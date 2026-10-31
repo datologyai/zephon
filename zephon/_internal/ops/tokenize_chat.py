@@ -483,6 +483,12 @@ class TokenizeChat(TokenizeBase):
     def _finalize_setup(self) -> None:
         tok = self.tok
         assert tok is not None
+        if not getattr(tok, "is_fast", False):
+            raise ValueError(
+                "TokenizeChat requires a Transformers fast tokenizer (offset mapping / "
+                + f"assistant token masks); got {type(tok).__name__}. "
+                + "Native tokenizers v1 currently support text tokenization only."
+            )
         self._left_truncation = getattr(tok, "truncation_side", "right") == "left"
         self._bos_token_id = self._resolve_special_token_id(
             "bos", required=self.special_tokens in ("bos", "bos_eos")
@@ -490,11 +496,6 @@ class TokenizeChat(TokenizeBase):
         self._eos_token_id = self._resolve_special_token_id(
             "eos", required=self.special_tokens in ("eos", "bos_eos")
         )
-        if not getattr(tok, "is_fast", False):
-            raise ValueError(
-                "TokenizeChat requires a fast tokenizer (offset mapping / "
-                + "assistant token masks); the loaded tokenizer is not fast"
-            )
         self._validate_configuration(tokenizer=tok)
         if not self.apply_chat_template:
             return

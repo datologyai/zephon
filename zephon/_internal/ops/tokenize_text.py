@@ -309,6 +309,8 @@ class TokenizeText(TokenizeBase):
         self._resolve_special_token_ids()
         self._ensure_padding_token()
         self._pad_token_id_cached = self._compute_pad_token_id()
+        if self.return_tensors and getattr(self.tok, "_supports_numpy_rows", False):
+            self._cached_kwargs["return_tensors"] = "np"
 
     def _resolve_special_token_ids(self) -> None:
         """Resolve IDs for the tokens requested by the insertion mode."""

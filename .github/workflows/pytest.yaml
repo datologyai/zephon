@@ -102,6 +102,40 @@ jobs:
       with:
         path: .venv
         key: venv-unit-${{ matrix.python_version }}-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+  tokenizers-v1:
+    name: Native tokenizers v1 (${{ matrix.python_version }})
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python_version: ["3.10", "3.14t"]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python_version }}
+        allow-prereleases: true
+        freethreaded: ${{ endsWith(matrix.python_version, 't') }}
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.11.15"
+    - name: Setup native engine without Transformers
+      run: |
+        uv sync --python ${{ matrix.python_version }} --group dev
+        uv pip install "tokenizers==1.0.0rc3" huggingface_hub torch pytest-timeout
+    - name: Run tokenizer and pipeline tests
+      env:
+        PYTHON_GIL: ${{ endsWith(matrix.python_version, 't') && '0' || '' }}
+      run: |
+        uv run --no-sync pytest \
+          tests/zephon/_internal/utils/test_tokenizer.py \
+          tests/zephon/_internal/utils/test_tokenizer_native.py \
+          tests/zephon/_internal/ops/test_tokenize_base.py \
+          tests/zephon/_internal/ops/test_tokenize_text.py \
+          tests/zephon/_internal/test_token_counting.py \
+          tests/zephon/test_pipeline_tokenize_decode.py \
+          tests/zephon/test_validation.py --maxfail=5
+
   lowest-bounds:
     # Installs the OLDEST versions allowed by pyproject.toml (instead of uv.lock)
     # to verify the declared `>=` floors; on failure, bump the offending floor.

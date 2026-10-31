@@ -8,7 +8,7 @@ Hugging Face tokenizer), the batch/output type aliases,
 :func:`fallback_tokenizer` — a deterministic, dependency-free reference
 implementation used when no tokenizer is configured and throughout the tests —
 and :func:`load_hf_tokenizer`, the retrying HF loader shared by the tokenize
-ops.
+ops. When Transformers is unavailable, it can load native tokenizers v1.
 
 Chat helpers select assistant messages, map generated ranges to token masks,
 and isolate HF's compiled-template caches between threads.
@@ -16,12 +16,15 @@ and isolate HF's compiled-template caches between threads.
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import traceback
+from importlib.metadata import PackageNotFoundError, version
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Mapping,
     Protocol,
     Sequence,
@@ -279,7 +282,8 @@ def load_hf_tokenizer(
     are resolved to a local cache path before loading. Transient load failures
     are retried with backoff; ``use_fast`` is dropped and the load retried once
     if the tokenizer class rejects the kwarg. ``eos_token`` is forwarded to
-    ``from_pretrained``; HF derives ``eos_token_id`` from that string.
+    ``from_pretrained``; HF derives ``eos_token_id`` from that string. If
+    Transformers cannot import, tokenizers v1 can load saved JSON directly.
     """
     # Before importing hf tokenizers we tell it we handle the parallelism and
     # not hf tokenizers. This avoids unforeseen effects when running multiple
@@ -297,8 +301,19 @@ def load_hf_tokenizer(
     # Deferred: tokenizer_cloud pulls the io/storage stack into this otherwise light module.
     from zephon._internal.utils.tokenizer_cloud import resolve_tokenizer_id_with_retry
 
+    factory: Callable[..., Any]
     with _IMPORT_LOCK:
-        from transformers import AutoTokenizer
+        try:
+            from transformers import AutoTokenizer
+
+            factory = AutoTokenizer.from_pretrained
+        except ImportError as exc:
+            if not _native_tokenizers_installed():
+                raise
+            from zephon._internal.utils.tokenizer_native import load_native_tokenizer
+
+            factory = load_native_tokenizer
+            logging.getLogger(__name__).info("Using native tokenizers: %s", exc)
 
     # Resolve before the HF retry — nesting would re-list the bucket on every
     # HF retry attempt.
@@ -312,7 +327,7 @@ def load_hf_tokenizer(
     )
     def _load_with_retry(model_id: str | None, **k: Any) -> Any:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(model_id, **k)
+            tokenizer = factory(model_id, **k)
         except Exception as e:
             print(
                 f"Error while instantiating tokenizer:\n\n{traceback.format_exc()}\n\n Will retry after some wait (unless this is the last iteration).",
@@ -337,6 +352,13 @@ def load_hf_tokenizer(
             kwargs.pop("use_fast", None)
             return cast(TokenizerLike, _load_with_retry(load_id, **kwargs))
         raise
+
+
+def _native_tokenizers_installed() -> bool:
+    try:
+        return int(version("tokenizers").split(".")[0]) >= 1
+    except PackageNotFoundError:
+        return False
 
 
 __all__ = [

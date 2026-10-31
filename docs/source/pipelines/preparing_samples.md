@@ -21,13 +21,34 @@ of tensors.
 converting a string of text in an input record into a sequence of tokens that can be fed
 into the model. The `Pipeline` API provides a number of built-in and optimized operations
 for these common data preparation steps. The `tokenize` operator on the `Pipeline` builds
-on top of the HuggingFace `transformers` library to support efficient tokenization of
-regular text strings:
+on Hugging Face tokenizers to tokenize regular text strings:
 
 ```{literalinclude} ../../../examples/guide/pipelines/tokenize_text.py
 :language: python
 :caption: examples/guide/pipelines/tokenize_text.py
 ```
+
+Zephon uses Transformers when it can import, otherwise native `tokenizers` v1
+(tested with `1.0.0rc3`). Normal Hub ids, local directories and cloud URIs work;
+the native path requires `tokenizer.json`. It supports text tokenization, including
+ragged NumPy/Torch output; chat and `use_fast=False` require Transformers.
+
+Native encoding follows the saved pipeline, not Transformers' model classes.
+IDs can differ from Transformers 5 for Llama-2, Phi-3 and OLMo-2; class defaults
+such as Llama/Mistral left padding or GPT-NeoX PAD are not inferred. BOS/EOS/PAD
+and EOS-string overrides must name existing added tokens. Scalar `config.json`
+IDs supply undeclared roles; explicit numeric BOS/EOS op overrides remain available.
+Save a configured tokenizer when its exact pipeline/defaults are required.
+Tensor chunks use array views, so keeping one split chunk can retain its source
+document's buffer.
+
+rc3 rejects some saved pipelines (e.g. Falcon, BLOOM, StarCoder2 and Gemma-2). Its batch pool
+ignores `TOKENIZERS_PARALLELISM` / `RAYON_NUM_THREADS`; some individual texts with
+special-token boundaries also parallelize. Limit worker concurrency if necessary.
+rc3 can deadlock when a forked child constructs a tokenizer after one was loaded
+in the parent, including by preflight/calibration. Use `spawn` or `forkserver`.
+Zephon detects its own parent initialization; external native parent loads remain
+subject to this [upstream rc3 bug](https://github.com/huggingface/tokenizers/pull/2581).
 
 By default, the `tokenize` operator emits one record for each input sample, no matter how
 long it is. If you need to cap the length of each output record, you can set the
