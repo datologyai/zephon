@@ -13,7 +13,7 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from filelock import BaseFileLock, FileLock
@@ -49,6 +49,9 @@ logger = logging.getLogger(__name__)
 _CACHE_LOCK_FILENAME = ".cache.lock"
 _STATE_DIR_NAME = ".zephon_cache_state"
 _SESSION_FILENAME = "session.json"
+# One line per published shard, its files' (size, mtime_ns); the newest line wins. A resumed
+# session keeps exactly the files this cache downloaded that nothing has changed since.
+_PUBLISHED_FILENAME = "published.jsonl"
 _RESET_LOCK_FILENAME = ".reset.lock"
 _TICK_SECONDS = float(os.environ.get("ZEPHON_CACHE_TICK", "0.05"))
 
@@ -474,6 +477,12 @@ class CacheStats:
     shards: int
 
 
+def _signature(path: Path) -> list[int]:
+    """A file's identity for resume: rewriting or truncating it changes one of these."""
+    stat = path.stat()
+    return [stat.st_size, stat.st_mtime_ns]
+
+
 class CacheManager(ShardResolver):
     """Resolve shards locally with eviction-aware coordination.
 
@@ -524,6 +533,7 @@ class CacheManager(ShardResolver):
         self._reset_lock = FileLock(str(self._reset_lock_path))
         self._state_dir = self._root / _STATE_DIR_NAME
         self._session_path = self._state_dir / _SESSION_FILENAME
+        self._published_path = self._state_dir / _PUBLISHED_FILENAME
         self._pid = os.getpid()
         # Capture our OS-level start time now so the session entry encodes
         # ``(pid, start_time_ns)``. Prevents stale entries from masquerading
@@ -906,18 +916,33 @@ class CacheManager(ShardResolver):
         access = self._shared.shard_access_ns
         now_ns = time.time_ns()
         total_usage = 0
+        published: dict[int, dict[str, Any]] = {}
+        if self._published_path.exists():
+            for line in self._published_path.read_text(encoding="utf-8").splitlines():
+                # A publisher killed mid-write leaves a torn line: its shard is unrecorded.
+                with contextlib.suppress(json.JSONDecodeError):
+                    record = json.loads(line)
+                    published[record["index"]] = record
         for idx, has_raw in raw_present.items():
             if not has_raw:
                 continue
             size = raw_bytes.get(idx, 0)
             locator = self._catalog_set.locator_at(idx)
-            if size != locator.raw.bytes or (
+            dataset_root = self._root / locator.dataset
+            record = published.get(idx)
+            keeps_zip = (
                 self._keep_zip
                 and zip_present.get(idx, False)
                 and locator.zip is not None
-                and zip_bytes[idx] != locator.zip.bytes
+            )
+            if (
+                record is None
+                or _signature(dataset_root / locator.raw.basename) != record["raw"]
+                or (
+                    keeps_zip
+                    and _signature(dataset_root / locator.zip.basename) != record["zip"]
+                )
             ):
-                dataset_root = self._root / locator.dataset
                 (dataset_root / locator.raw.basename).unlink(missing_ok=True)
                 if locator.zip is not None:
                     (dataset_root / locator.zip.basename).unlink(missing_ok=True)
@@ -937,6 +962,18 @@ class CacheManager(ShardResolver):
             access[idx] = np.uint64(now_ns)
             total_usage += size
         self._shared.set_cache_usage(total_usage)
+
+    def _record_published(
+        self, index: int, raw_path: Path, zip_path: Optional[Path]
+    ) -> None:
+        record = {
+            "index": index,
+            "raw": _signature(raw_path),
+            "zip": _signature(zip_path) if zip_path is not None else None,
+        }
+        # One short write to an O_APPEND file: concurrent publishers never interleave.
+        with self._published_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
 
     # ------------------------------------------------------------------
     # Public API
@@ -1094,6 +1131,7 @@ class CacheManager(ShardResolver):
                         actual_zip = zip_path
                     else:
                         zip_path.unlink(missing_ok=True)
+                self._record_published(index, raw_path, actual_zip)
                 with self._cache_lock:
                     old_size = int(self._shared.shard_sizes[index])
                     delta = entry_size - old_size

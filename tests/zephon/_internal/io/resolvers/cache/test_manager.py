@@ -14,7 +14,7 @@ import time
 import weakref
 from multiprocessing import Process, Queue
 from pathlib import Path
-from typing import IO, Any, Mapping
+from typing import IO, Any, Callable, Mapping
 
 import pytest
 from filelock import BaseFileLock, FileLock
@@ -1203,6 +1203,64 @@ def test_reconciliation_redownloads_truncated_shards(
         assert resumed.stats().bytes_used == len(payload) + len(compressed)
     finally:
         resumed.close()
+
+
+def _published_then_resumed(
+    tmp_path: Path, catalog_bytes_offset: int, damage: Callable[[Path], None]
+) -> tuple[bool, bytes]:
+    """Publish one shard, apply ``damage`` to the cache root, resume; the shard's
+    ``cache_hit`` and its bytes."""
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    payload = b"header" + b"records" * 16
+    _make_file(remote / "chunk.bin", payload)
+    locator = _locator(
+        "demo",
+        0,
+        str(remote),
+        raw_name="chunk.bin",
+        raw_bytes=len(payload) + catalog_bytes_offset,
+    )
+    storage = LocalFSBackend(root=remote)
+    first = _make_manager(cache_root, storage, [locator], persist_state=True)
+    first.resolve(locator)
+    first.close()
+    damage(cache_root)
+    resumed = _make_manager(cache_root, storage, [locator], persist_state=True)
+    try:
+        ref = resumed.resolve(locator)
+        assert resumed.stats().bytes_used == len(payload)
+        return ref.cache_hit, ref.raw.path.read_bytes()
+    finally:
+        resumed.close()
+
+
+def test_resume_keeps_a_shard_whose_catalog_size_is_not_its_file_size(
+    tmp_path: Path,
+) -> None:
+    # LitData's chunk_bytes counts a chunk's records, not its header: the file is larger.
+    hit, data = _published_then_resumed(tmp_path, -6, lambda root: None)
+    assert hit is True and data == b"header" + b"records" * 16
+
+
+def test_resume_fetches_again_a_shard_rewritten_at_its_size(tmp_path: Path) -> None:
+    def rewrite(root: Path) -> None:
+        path = root / "demo" / "chunk.bin"
+        stat = path.stat()
+        path.write_bytes(b"x" * stat.st_size)
+        # A later mtime than the published one, even on a coarse clock.
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+
+    hit, data = _published_then_resumed(tmp_path, 0, rewrite)
+    assert hit is False and data == b"header" + b"records" * 16
+
+
+def test_resume_fetches_again_a_shard_with_no_record(tmp_path: Path) -> None:
+    def forget(root: Path) -> None:
+        (root / ".zephon_cache_state" / "published.jsonl").unlink()
+
+    hit, data = _published_then_resumed(tmp_path, 0, forget)
+    assert hit is False and data == b"header" + b"records" * 16
 
 
 def test_reconciliation_zip_only_is_not_local(tmp_path: Path) -> None:
