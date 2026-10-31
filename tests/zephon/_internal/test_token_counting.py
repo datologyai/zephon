@@ -20,6 +20,8 @@ from zephon._internal.token_counting import (
     extract_text,
 )
 from zephon._internal.utils.tokenizer import fallback_tokenizer
+from zephon.ops.base import OpContext
+from zephon.types import SampleMeta, SampleRecord
 
 # ---------------------------------------------------------------------------
 # Delivered-token arithmetic
@@ -55,7 +57,8 @@ def test_delivered_tokens_tokenizer_default_counts_template():
     truncating = TextTokenCountingSpec(
         special_tokens="tokenizer_default", truncation=True, max_length=64
     )
-    assert truncating.delivered_tokens(100) == 64
+    # The input already reflects engine truncation and postprocessing.
+    assert truncating.delivered_tokens(100) == 100
 
 
 def test_tokenizer_default_counter_uses_implicit_hf_limit():
@@ -72,6 +75,35 @@ def test_tokenizer_default_counter_uses_implicit_hf_limit():
     assert spec.build_counter().plan([{"text": text}]).count({"text": text}) == len(
         actual
     )
+
+
+def test_tokenizer_default_counter_preserves_engine_postprocessor_length():
+    from tests.helpers.chat import make_fast_tokenizer
+
+    processors = pytest.importorskip("tokenizers.processors")
+    tok = make_fast_tokenizer()
+    eos = tok.eos_token
+    tok.backend_tokenizer.post_processor = processors.TemplateProcessing(
+        single=f"{eos} $A {eos}", special_tokens=[(eos, tok.eos_token_id)]
+    )
+    op = TokenizeText(
+        tokenizer=tok,
+        field="text",
+        special_tokens="tokenizer_default",
+        truncation=True,
+        max_length=1,
+    )
+    op.setup(OpContext({}))
+    text = "hello hi there how are you"
+    payload = {"text": text}
+    counter = op.token_counting_spec().build_counter().plan([payload])
+    record = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0), payload=payload
+    )
+    actual = op.process_one(record)[0].payload["input_ids"]
+    # HF cannot fit the mandatory special tokens into this requested limit.
+    assert len(actual) > 1
+    assert counter.count({"text": text}) == len(actual)
 
 
 @pytest.mark.parametrize(
@@ -257,9 +289,7 @@ def test_build_counter_delegates_to_shared_loader(monkeypatch):
         calls.append((tokenizer_id, use_fast, eos_token))
         return fallback_tokenizer()
 
-    monkeypatch.setattr(
-        "zephon._internal.token_counting.load_text_tokenizer", fake_load
-    )
+    monkeypatch.setattr("zephon._internal.token_counting.load_hf_tokenizer", fake_load)
     TextTokenCountingSpec(
         tokenizer_id="hf-model", use_fast=False, eos_token="<end>"
     ).build_counter()

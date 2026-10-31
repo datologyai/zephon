@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import builtins
 import json
+import os
 import pickle
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,7 +27,7 @@ if _TOKENIZERS_MAJOR < 1:
 pytest.importorskip("tokenizers")
 
 from zephon._internal.ops.tokenize_text import TokenizeText
-from zephon._internal.utils.tokenizer import load_text_tokenizer
+from zephon._internal.utils.tokenizer import load_hf_tokenizer
 from zephon._internal.utils.tokenizer_native import (
     NativeTokenizer,
     load_native_tokenizer,
@@ -43,6 +45,18 @@ def _update_json(path: Path, **changes: Any) -> None:
     value = json.loads(path.read_text(encoding="utf-8"))
     value.update(changes)
     _write_json(path, value)
+
+
+@pytest.fixture
+def native_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    import_module = builtins.__import__
+
+    def incompatible(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.split(".", 1)[0] == "transformers":
+            raise ImportError("Transformers requires tokenizers <1")
+        return import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", incompatible)
 
 
 @pytest.fixture
@@ -130,6 +144,61 @@ def test_native_roles_and_single_or_ragged_batch(tokenizer_dir: Path) -> None:
     assert tok("hello")["input_ids"] == [0, 4, 1]
 
 
+def test_native_added_tokens_preserve_whitespace_and_normalization(
+    tokenizer_dir: Path,
+) -> None:
+    path = tokenizer_dir / "tokenizer.json"
+    spec = json.loads(path.read_text())
+    spec["normalizer"] = {"type": "NFC"}
+    for token_id, (content, normalized, strip) in enumerate(
+        [
+            (" ", False, False),
+            ("  ", False, False),
+            ("\t\n", False, False),
+            ("é", True, False),
+            ("<strip>", False, True),
+        ],
+        start=9,
+    ):
+        spec["added_tokens"].append(
+            {
+                "id": token_id,
+                "content": content,
+                "single_word": False,
+                "lstrip": strip,
+                "rstrip": strip,
+                "normalized": normalized,
+                "special": False,
+            }
+        )
+    _write_json(path, spec)
+    tok = NativeTokenizer(str(tokenizer_dir))
+    assert tok(
+        ["hello  world", "hello\t\nworld", "e\u0301", "hello\t<strip>\tworld"],
+        add_special_tokens=False,
+    )["input_ids"] == [[4, 10, 5], [4, 11, 5], [12], [4, 13, 5]]
+
+
+@pytest.mark.parametrize("single", [False, True])
+def test_native_numpy_rows_match_ragged_lists(
+    tokenizer_dir: Path, single: bool
+) -> None:
+    import numpy as np
+
+    tok = NativeTokenizer(str(tokenizer_dir))
+    texts = "" if single else ["hello world", "hello", ""]
+    expected = tok(texts, add_special_tokens=False)
+    actual = tok(texts, add_special_tokens=False, return_tensors="np")
+    for field in ("input_ids", "attention_mask"):
+        rows = [actual[field]] if single else actual[field]
+        expected_rows = [expected[field]] if single else expected[field]
+        for row, expected_row in zip(rows, expected_rows):
+            assert isinstance(row, np.ndarray)
+            assert row.dtype == np.int64
+            assert row.shape == (len(expected_row),)
+            assert row.tolist() == expected_row
+
+
 def test_native_padding_truncation_and_sides(tokenizer_dir: Path) -> None:
     _update_json(
         tokenizer_dir / "tokenizer_config.json",
@@ -146,41 +215,50 @@ def test_native_padding_truncation_and_sides(tokenizer_dir: Path) -> None:
     )["input_ids"] == [5, 6]
 
 
-@pytest.mark.parametrize("eos_token", ["!", "<new-eos>"])
-def test_native_eos_override_existing_or_new(
-    tokenizer_dir: Path, eos_token: str
-) -> None:
-    tok = NativeTokenizer(str(tokenizer_dir), eos_token=eos_token)
-    expected_id = 8 if eos_token == "!" else 9
-    assert tok.eos_token == eos_token
-    assert tok.eos_token_id == expected_id
-    assert tok(eos_token, add_special_tokens=False)["input_ids"] == [expected_id]
+def test_native_eos_override_uses_existing_added_token(tokenizer_dir: Path) -> None:
+    tok = NativeTokenizer(str(tokenizer_dir), eos_token="<pad>")
+    assert (tok.eos_token, tok.eos_token_id) == ("<pad>", 2)
+    assert tok("hello <pad> world", add_special_tokens=False)["input_ids"] == [4, 2, 5]
     # Role overrides do not rewrite the serialized postprocessor.
     assert tok("hello")["input_ids"] == [0, 4, 1]
 
 
-def test_native_role_precedence_and_added_token_objects(tokenizer_dir: Path) -> None:
-    _update_json(
-        tokenizer_dir / "tokenizer.json",
-        role_to_token={"eos_token": "<bos>", "pad_token": "<eos>"},
-    )
+@pytest.mark.parametrize("eos_token", ["!", "<new-eos>"])
+def test_native_eos_override_requires_existing_added_token(
+    tokenizer_dir: Path, eos_token: str
+) -> None:
+    with pytest.raises(ValueError, match="existing added token"):
+        NativeTokenizer(str(tokenizer_dir), eos_token=eos_token)
+
+
+@pytest.mark.parametrize("modern", [False, True])
+def test_native_role_precedence_matches_transformers(
+    tokenizer_dir: Path, modern: bool
+) -> None:
     _write_json(
         tokenizer_dir / "special_tokens_map.json",
-        {"eos_token": "<pad>", "pad_token": "!"},
+        {"eos_token": {"content": "<pad>", "special": True}, "pad_token": "<bos>"},
     )
-    _write_json(
-        tokenizer_dir / "tokenizer_config.json",
-        {"eos_token": {"content": "<eos>", "special": True}},
-    )
+    config: dict[str, Any] = {
+        "bos_token": "<eos>",
+        "eos_token": "<eos>",
+        "pad_token": None,
+    }
+    if modern:
+        config["added_tokens_decoder"] = {"2": {"content": "<pad>", "special": True}}
+    _write_json(tokenizer_dir / "tokenizer_config.json", config)
     tok = NativeTokenizer(str(tokenizer_dir))
-    assert tok.eos_token_id == 1
-    assert tok.pad_token_id == 8
+    assert tok.bos_token_id == 1
+    # Legacy maps override config; modern files ignore the map entirely.
+    assert (tok.eos_token_id, tok.pad_token_id) == ((1, None) if modern else (2, 0))
 
 
 def test_native_explicit_null_prevents_other_role_fallbacks(
     tokenizer_dir: Path,
 ) -> None:
-    _update_json(tokenizer_dir / "tokenizer_config.json", eos_token=None)
+    _update_json(
+        tokenizer_dir / "tokenizer_config.json", eos_token=None, added_tokens_decoder={}
+    )
     _write_json(tokenizer_dir / "special_tokens_map.json", {"eos_token": "<eos>"})
     _write_json(tokenizer_dir / "config.json", {"eos_token_id": 1})
     assert NativeTokenizer(str(tokenizer_dir)).eos_token_id is None
@@ -200,14 +278,35 @@ def test_native_model_config_scalar_fallback_ignores_multiple_eos(
     assert tok.pad_token_id == 2
 
 
-def test_native_role_to_token_supplies_metadata(tokenizer_dir: Path) -> None:
+@pytest.mark.parametrize("pad_id", [99, 4])
+def test_native_scalar_pad_requires_existing_added_id(
+    tokenizer_dir: Path, pad_id: int
+) -> None:
+    _write_json(tokenizer_dir / "tokenizer_config.json", {"eos_token": "<eos>"})
+    _write_json(tokenizer_dir / "config.json", {"pad_token_id": pad_id})
+    # An unmapped ID must not silently become None and fall back to EOS padding.
+    with pytest.raises(ValueError, match="pad_token_id.*existing added token"):
+        NativeTokenizer(str(tokenizer_dir))
+
+
+def test_native_role_metadata_follows_engine_schema(tokenizer_dir: Path) -> None:
+    from tokenizers import Tokenizer
+
     _write_json(tokenizer_dir / "tokenizer_config.json", {})
     _update_json(
         tokenizer_dir / "tokenizer.json",
         role_to_token={"bos_token": "<bos>", "eos_token": "<eos>"},
     )
-    tok = NativeTokenizer(str(tokenizer_dir))
-    assert (tok.bos_token_id, tok.eos_token_id) == (0, 1)
+    # rc3 accepts this optional metadata; the newer editable-spec API rejects it.
+    # Preserve that native error rather than silently rewriting the saved pipeline.
+    try:
+        Tokenizer.from_file(tokenizer_dir / "tokenizer.json")
+    except ValueError:
+        with pytest.raises(ValueError, match="unknown keys.*role_to_token"):
+            NativeTokenizer(str(tokenizer_dir))
+    else:
+        tok = NativeTokenizer(str(tokenizer_dir))
+        assert (tok.bos_token_id, tok.eos_token_id) == (0, 1)
 
 
 def test_native_missing_declared_role_is_rejected(tokenizer_dir: Path) -> None:
@@ -247,6 +346,50 @@ def test_native_rejects_added_token_id_renumbering(tokenizer_dir: Path) -> None:
         NativeTokenizer(str(tokenizer_dir))
 
 
+def test_native_compiles_editable_specs_at_load_and_restore(
+    tokenizer_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tokenizers
+
+    native = tokenizers.Tokenizer.from_file(tokenizer_dir / "tokenizer.json")
+    engine = native.compile() if hasattr(native, "compile") else native
+    compiled: list[bool] = []
+
+    class EditableSpec:
+        def compile(self) -> Any:
+            compiled.append(True)
+            return engine
+
+    class Tokenizer:
+        @staticmethod
+        def from_file(path: Any) -> EditableSpec:
+            return EditableSpec()
+
+    monkeypatch.setattr(tokenizers, "Tokenizer", Tokenizer)
+    tok = pickle.loads(pickle.dumps(NativeTokenizer(str(tokenizer_dir))))
+    assert compiled == [True, True]
+    assert tok("hello world", add_special_tokens=False)["input_ids"] == [4, 5]
+
+
+def test_native_guards_only_versions_with_upstream_fork_bug(
+    tokenizer_dir: Path, monkeypatch: pytest.MonkeyPatch, native_only: None
+) -> None:
+    from zephon._internal.utils import tokenizer_native
+
+    monkeypatch.setattr(tokenizer_native, "_ENGINE_PID", os.getpid() + 1)
+    monkeypatch.setattr(
+        "tenacity.nap.time",
+        SimpleNamespace(
+            sleep=lambda _: pytest.fail("deterministic fork error retried")
+        ),
+    )
+    if version("tokenizers") == "1.0.0rc3":
+        with pytest.raises(ValueError, match="spawn or forkserver"):
+            load_hf_tokenizer(str(tokenizer_dir))
+    else:
+        assert load_hf_tokenizer(str(tokenizer_dir)).eos_token_id == 1
+
+
 def test_native_ignores_saved_padding_and_truncation_when_disabled(
     tokenizer_dir: Path,
 ) -> None:
@@ -274,17 +417,27 @@ def test_native_ignores_saved_padding_and_truncation_when_disabled(
     }
 
 
-def test_native_pickle_preserves_new_eos_and_mutable_pad(tokenizer_dir: Path) -> None:
-    tok = NativeTokenizer(str(tokenizer_dir), eos_token="<new-eos>")
+@pytest.mark.parametrize("cache_change", ["replace", "delete"])
+def test_native_pickle_preserves_loaded_snapshot_and_mutable_pad(
+    tokenizer_dir: Path, cache_change: str
+) -> None:
+    tok = NativeTokenizer(str(tokenizer_dir), eos_token="<bos>")
     tok.pad_token = tok.eos_token
+    if cache_change == "replace":
+        path = tokenizer_dir / "tokenizer.json"
+        replacement = json.loads(path.read_text(encoding="utf-8"))
+        replacement["model"]["vocab"].update(hello=5, world=4)
+        _write_json(path, replacement)
+    else:
+        for path in tokenizer_dir.iterdir():
+            path.unlink()
+    # Capture must happen at loading, before a cloud cache changes or disappears.
     serialized = pickle.dumps(tok)
-    for path in tokenizer_dir.iterdir():
-        path.unlink()
     restored = pickle.loads(serialized)
-    assert restored.eos_token_id == tok.eos_token_id == 9
-    assert restored.pad_token_id == 9
+    assert restored.eos_token_id == tok.eos_token_id == 0
+    assert restored.pad_token_id == 0
     expected = {
-        "input_ids": [[4, 5], [4, 9]],
+        "input_ids": [[4, 5], [4, 0]],
         "attention_mask": [[1, 1], [1, 0]],
     }
     assert (
@@ -292,7 +445,7 @@ def test_native_pickle_preserves_new_eos_and_mutable_pad(tokenizer_dir: Path) ->
         == expected
     )
     restored_again = pickle.loads(pickle.dumps(restored))
-    assert restored_again.pad_token_id == restored_again.eos_token_id == 9
+    assert restored_again.pad_token_id == restored_again.eos_token_id == 0
     assert (
         restored_again(["hello world", "hello"], add_special_tokens=False, padding=True)
         == expected
@@ -321,21 +474,14 @@ def test_native_loader_downloads_tokenizer_files(
     assert "tokenizer.json" in calls[0][1]["allow_patterns"]
 
 
-def test_text_loader_resolves_cloud_without_transformers(
-    tokenizer_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_loader_falls_back_and_resolves_cloud_without_transformers(
+    tokenizer_dir: Path, monkeypatch: pytest.MonkeyPatch, native_only: None
 ) -> None:
     resolved: list[str] = []
 
     def resolve(source: str) -> str:
         resolved.append(source)
         return str(tokenizer_dir)
-
-    import_module = builtins.__import__
-
-    def without_transformers(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name.split(".", 1)[0] == "transformers":
-            raise AssertionError("native text tokenization imported Transformers")
-        return import_module(name, *args, **kwargs)
 
     monkeypatch.setattr(
         "zephon._internal.utils.tokenizer_cloud.resolve_tokenizer_id_with_retry",
@@ -344,8 +490,7 @@ def test_text_loader_resolves_cloud_without_transformers(
     monkeypatch.setattr(
         "zephon._internal.utils.tokenizer.suppress_library_threads", lambda: None
     )
-    monkeypatch.setattr(builtins, "__import__", without_transformers)
-    tok = load_text_tokenizer("s3://bucket/tokenizer/")
+    tok = load_hf_tokenizer("s3://bucket/tokenizer/")
     assert resolved == ["s3://bucket/tokenizer/"]
     assert tok("hello", add_special_tokens=False)["input_ids"] == [4]
 
@@ -353,6 +498,22 @@ def test_text_loader_resolves_cloud_without_transformers(
 def test_native_loader_missing_tokenizer_json_is_actionable(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="tokenizer.json"):
         load_native_tokenizer(str(tmp_path))
+
+
+@pytest.mark.parametrize("bos_token", ["<bos>", None])
+def test_chat_rejects_native_tokenizer_with_helpful_error(
+    tokenizer_dir: Path, bos_token: str | None
+) -> None:
+    from zephon._internal.ops.tokenize_chat import TokenizeChat
+
+    tokenizer = NativeTokenizer(str(tokenizer_dir))
+    tokenizer.bos_token = bos_token
+    op = TokenizeChat(tokenizer=tokenizer)
+    op.setup(OpContext({}))
+    with pytest.raises(
+        ValueError, match="Transformers fast tokenizer.*NativeTokenizer"
+    ):
+        op._setup_tokenizer()
 
 
 def _record(text: str, index: int = 0) -> SampleRecord:
@@ -389,6 +550,7 @@ def test_native_loaded_op_ragged_backends_and_counter(
     op.setup(OpContext({}))
     assert op.tok is None
     records = op.process_many([_record(text, i) for i, text in enumerate(texts)])
+    assert op._cached_kwargs.get("return_tensors") == ("np" if return_tensors else None)
     for record, text, ids in zip(records, texts, expected):
         assert isinstance(record.payload, dict)
         actual = record.payload["input_ids"]
@@ -431,8 +593,16 @@ def test_native_loaded_op_truncate_split_padding_and_counter(
     )
 
 
-def test_native_counter_honors_implicit_model_max_length(tokenizer_dir: Path) -> None:
-    _update_json(tokenizer_dir / "tokenizer_config.json", model_max_length=3)
+@pytest.mark.parametrize(
+    ("model_max_length", "expected"),
+    [(1, [0, 1]), (2, [0, 1]), (3, [0, 4, 1])],
+)
+def test_native_counter_honors_implicit_model_max_length(
+    tokenizer_dir: Path, model_max_length: int, expected: list[int]
+) -> None:
+    _update_json(
+        tokenizer_dir / "tokenizer_config.json", model_max_length=model_max_length
+    )
     op = TokenizeText(
         tokenizer_id=str(tokenizer_dir),
         field="text",
@@ -443,8 +613,8 @@ def test_native_counter_honors_implicit_model_max_length(tokenizer_dir: Path) ->
     op.setup(OpContext({}))
     text = "hello world data"
     (record,) = op.process_one(_record(text))
-    assert record.payload["input_ids"] == [0, 4, 1]
-    assert counter.count({"text": text}) == len(record.payload["input_ids"]) == 3
+    assert record.payload["input_ids"] == expected
+    assert counter.count({"text": text}) == len(expected)
 
 
 @pytest.mark.parametrize("runner", ["threads", "process"])

@@ -26,7 +26,6 @@ from zephon._internal.utils.tokenizer import (
     TokenBatch,
     TokenizerLike,
     TokenizerOutput,
-    load_text_tokenizer,
 )
 from zephon._internal.utils.torch_compat import (
     _TENSOR_ITER_LOCK,
@@ -92,9 +91,7 @@ class TokenizeText(TokenizeBase):
         Args:
             tokenizer: Pre-instantiated HF-compatible tokenizer; takes precedence over
                 ``tokenizer_id``.
-            tokenizer_id: HF model id, local directory, or cloud URI. Uses
-                ``AutoTokenizer`` with tokenizers <1; v1 loads ``tokenizer.json``
-                directly and reads declared special-token metadata.
+            tokenizer_id: HF model id passed to ``AutoTokenizer.from_pretrained``.
                 ``"__fallback__"`` selects a small in-process stub for tests.
             eos_token: Override the EOS string when loading tokenizer_id.
                 With a tokenizer instance, configure its EOS before passing it in.
@@ -135,8 +132,7 @@ class TokenizeText(TokenizeBase):
             return_tensors: ``"pt"`` / ``"np"`` / ``"tf"`` backend for emitted fields.
             split_long_samples: Slice each tokenized sequence into ``max_length``
                 chunks. BOS/EOS, if added, land only on the first/last chunk.
-            use_fast: Forwarded to ``AutoTokenizer.from_pretrained`` on v0;
-                ``False`` is unsupported with tokenizers v1.
+            use_fast: Forwarded to ``AutoTokenizer.from_pretrained``.
             preserve_upstream_payload: Keep all upstream payload keys; otherwise the
                 output dict contains only ``input_ids`` and ``attention_mask``.
             special_tokens: How BOS/EOS are added.
@@ -307,17 +303,14 @@ class TokenizeText(TokenizeBase):
         if hf_max_length is not None:
             self._cached_kwargs["max_length"] = hf_max_length
 
-    def _load_tokenizer(self) -> TokenizerLike:
-        return load_text_tokenizer(
-            self.tokenizer_id, use_fast=self.use_fast, eos_token=self.eos_token
-        )
-
     def _finalize_setup(self) -> None:
         # _ensure_padding_token may set pad_token=eos_token (the HF pattern
         # for Llama/GPT-2 et al.), so it must run before we snapshot pad id.
         self._resolve_special_token_ids()
         self._ensure_padding_token()
         self._pad_token_id_cached = self._compute_pad_token_id()
+        if self.return_tensors and getattr(self.tok, "_supports_numpy_rows", False):
+            self._cached_kwargs["return_tensors"] = "np"
 
     def _resolve_special_token_ids(self) -> None:
         """Resolve IDs for the tokens requested by the insertion mode."""
@@ -720,11 +713,7 @@ class TokenizeText(TokenizeBase):
 
         # Convert each record independently; ragged batches need no padding.
         # Splitting converts each output chunk after slicing instead.
-        if (
-            self.return_tensors is not None
-            and not self.split_long_samples
-            and input_ids
-        ):
+        if self.return_tensors is not None and not self.split_long_samples:
             input_ids = [self._convert_tensor(seq) for seq in input_ids]
             if attention_mask is not None:
                 attention_mask = [self._convert_tensor(seq) for seq in attention_mask]

@@ -28,33 +28,27 @@ on Hugging Face tokenizers to tokenize regular text strings:
 :caption: examples/guide/pipelines/tokenize_text.py
 ```
 
-Text tokenization selects the installed engine automatically. With `tokenizers <1`,
-Zephon uses `transformers.AutoTokenizer` as before. With `tokenizers >=1` (tested with
-`1.0.0rc3`), install `tokenizers` and `huggingface_hub`; Transformers is not needed.
-The same Hub model names, local directories, and cloud URIs work, provided they
-contain `tokenizer.json`. Hub files are downloaded automatically.
+Zephon uses Transformers when it can import, otherwise native `tokenizers` v1
+(tested with `1.0.0rc3`). Normal Hub ids, local directories and cloud URIs work;
+the native path requires `tokenizer.json`. It supports text tokenization, including
+ragged NumPy/Torch output; chat and `use_fast=False` require Transformers.
 
-The v1 engine executes the saved `tokenizer.json` pipeline. BOS/EOS/PAD declarations
-come from `tokenizer_config.json` / `special_tokens_map.json`, with scalar IDs from
-`config.json` as a fallback. Zephon checks added-token IDs and fails on inconsistent
-metadata. It does not reproduce Transformers' model-class defaults or rebuild
-postprocessors from settings such as `add_bos_token`. In particular,
-`special_tokens="tokenizer_default"` uses the serialized postprocessor. To reproduce
-a particular Transformers tokenizer, save that configured tokenizer first.
-If a requested BOS/EOS role is undeclared, supply `bos_token_id` / `eos_token_id`
-or select a special-token mode that does not require it.
+Native encoding follows the saved pipeline, not Transformers' model classes.
+IDs can differ from Transformers 5 for Llama-2, Phi-3 and OLMo-2; class defaults
+such as Llama/Mistral left padding or GPT-NeoX PAD are not inferred. BOS/EOS/PAD
+and EOS-string overrides must name existing added tokens. Scalar `config.json`
+IDs supply undeclared roles; explicit numeric BOS/EOS op overrides remain available.
+Save a configured tokenizer when its exact pipeline/defaults are required.
+Tensor chunks use array views, so keeping one split chunk can retain its source
+document's buffer.
 
-Zephon's explicit BOS/EOS modes, EOS override, splitting, attention masks, and
-NumPy/Torch output work with either engine. Each output record has its own 1D
-array/tensor, so different document lengths do not require padding. v1 does not
-support `use_fast=False` or `tokenize_chat`; chat still requires Transformers with
-`tokenizers <1` (or a supplied compatible tokenizer).
-
-The v1 rc3 native thread pool ignores `TOKENIZERS_PARALLELISM` and
-`RAYON_NUM_THREADS`, including for sufficiently long individual texts. Multiple
-Zephon worker processes can therefore oversubscribe CPUs. Lower worker concurrency
-if necessary; switching between scalar and batch encoding does not solve this
-upstream limitation.
+rc3 rejects some saved pipelines (e.g. Falcon, BLOOM, StarCoder2 and Gemma-2). Its batch pool
+ignores `TOKENIZERS_PARALLELISM` / `RAYON_NUM_THREADS`; some individual texts with
+special-token boundaries also parallelize. Limit worker concurrency if necessary.
+rc3 can deadlock when a forked child constructs a tokenizer after one was loaded
+in the parent, including by preflight/calibration. Use `spawn` or `forkserver`.
+Zephon detects its own parent initialization; external native parent loads remain
+subject to this [upstream rc3 bug](https://github.com/huggingface/tokenizers/pull/2581).
 
 By default, the `tokenize` operator emits one record for each input sample, no matter how
 long it is. If you need to cap the length of each output record, you can set the

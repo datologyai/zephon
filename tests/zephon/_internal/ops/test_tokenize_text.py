@@ -482,6 +482,42 @@ def test_convert_tensor_does_not_copy_torch_segments() -> None:
     assert second.storage().data_ptr() == ids.storage().data_ptr()
 
 
+@pytest.mark.parametrize("backend", ["np", "pt"])
+def test_tensor_conversion_preserves_custom_tensor_batch_rows(backend: str) -> None:
+    framework = pytest.importorskip("numpy" if backend == "np" else "torch")
+    ids = framework.arange(6, dtype=framework.int32).reshape(2, 3)
+    mask = framework.ones_like(ids)
+
+    class TensorTok:
+        name_or_path = "custom-tensor-batch"
+
+        def __call__(self, texts, **kwargs):
+            return {"input_ids": ids, "attention_mask": mask}
+
+    op = _setup(
+        TokenizeText(
+            tokenizer=TensorTok(),
+            field="text",
+            special_tokens="tokenizer_default",
+            return_tensors=backend,
+        )
+    )
+    out = op.process_many([_rec("first"), _rec("second")])
+    assert len(out) == 2
+    for row, record in enumerate(out):
+        for field, original in (("input_ids", ids), ("attention_mask", mask)):
+            value = _payload_dict(record)[field]
+            assert value.tolist() == original[row].tolist()
+            assert value.dtype == framework.int32
+            if backend == "np":
+                assert framework.shares_memory(value, original)
+            else:
+                assert (
+                    value.untyped_storage().data_ptr()
+                    == original.untyped_storage().data_ptr()
+                )
+
+
 def test_split_segments_torch_backend() -> None:
     torch = pytest.importorskip("torch")
     op = _setup(
