@@ -673,7 +673,7 @@ def test_preflight_tokenizers_strict_default_raises(
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise OSError("unreachable hub")
 
-    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    monkeypatch.setattr("zephon._internal.utils.tokenizer.load_hf_tokenizer", _boom)
     pipe = _empty_pipeline().tokenize(
         tokenizer_id="unreachable",
         field="text",
@@ -690,7 +690,7 @@ def test_preflight_tokenizers_lenient_returns_report(
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise OSError("unreachable hub")
 
-    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    monkeypatch.setattr("zephon._internal.utils.tokenizer.load_hf_tokenizer", _boom)
     pipe = _empty_pipeline().tokenize(
         tokenizer_id="unreachable",
         field="text",

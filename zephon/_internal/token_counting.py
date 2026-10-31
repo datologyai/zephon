@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import cloudpickle
 import numpy as np
 
-from zephon._internal.utils.tokenizer import load_hf_tokenizer
+from zephon._internal.utils.tokenizer import installed_tokenizer_loader
 from zephon.ops.config import MissingFieldMode
 
 if TYPE_CHECKING:
@@ -282,7 +282,7 @@ class TextTokenCountingSpec(TokenCountingSpec):
     def build_counter(self) -> DeliveredTokenCounter:
         tokenizer = self.tokenizer
         if tokenizer is None:
-            tokenizer = load_hf_tokenizer(
+            tokenizer = installed_tokenizer_loader()(
                 self.tokenizer_id, use_fast=self.use_fast, eos_token=self.eos_token
             )
         return _TextCounter(tokenizer, self)

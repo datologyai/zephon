@@ -41,6 +41,12 @@ split the input sample into any number of output records that will each be at mo
 :caption: examples/guide/pipelines/tokenize_max_length.py
 ```
 
+When `tokenizers>=1` is installed, `tokenize` loads with that much faster engine instead of
+`AutoTokenizer` and returns the same records. It replicates how transformers loads Qwen 2
+and 3, Gemma, and every tokenizer transformers loads with its generic class (Llama 3,
+DeepSeek V3, Mistral, OLMo 2, Phi, ...); tokenizers loaded through any other transformers
+class raise `Refused` rather than tokenizing differently. Passing a pre-built `tokenizer` skips loading either way.
+
 If the underlying data format you are reading from returns text as bytes instead of as a
 Python string, you can insert a `decode_text` operation in order to handle converting the
 raw bytes into a string prior to tokenization:

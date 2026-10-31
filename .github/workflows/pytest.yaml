@@ -139,6 +139,38 @@ jobs:
         esac
         uv run --python 3.10 --no-sync pytest "${test_targets[@]}" \
           -m "not integration and not requires_ray" --maxfail=10
+  tokenizers-v1:
+    # With tokenizers>=1 installed, TokenizeText loads with that engine; this job
+    # runs the engine tests there. transformers pins tokenizers<0.24, so the main
+    # jobs run the same tests with HF, and both must produce the same literals.
+    name: Tokenizers v1 Tests (${{ matrix.python_version }})
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # tokenizers 1.x wheels: cp310-abi3 (lowest supported) and cp314t.
+        python_version: ["3.10", "3.14t"]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python_version }}
+        allow-prereleases: true
+        freethreaded: ${{ endsWith(matrix.python_version, 't') }}
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.11.15"
+    - name: Setup
+      run: |
+        set -ex
+        uv sync --python ${{ matrix.python_version }} --group dev
+        uv pip install "tokenizers==1.0.0rc3"
+    - name: Run Tokenizers v1 Tests
+      env:
+        PYTHON_GIL: ${{ endsWith(matrix.python_version, 't') && '0' || '' }}
+      run: |
+        uv run --python ${{ matrix.python_version }} --no-sync pytest \
+          tests/zephon/_internal/test_tokenizer_engine.py
   packaging:
     name: Packaging Tests
     timeout-minutes: 15

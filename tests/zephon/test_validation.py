@@ -1897,7 +1897,7 @@ def test_preflight_bad_tokenizer_reports_error_issue(
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise OSError("no repo named 'definitely-not-a-model'")
 
-    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    monkeypatch.setattr("zephon._internal.utils.tokenizer.load_hf_tokenizer", _boom)
     pipe = _empty_pipeline().tokenize(
         tokenizer_id="definitely-not-a-model",
         field="text",
@@ -1942,7 +1942,7 @@ def test_preflight_probes_a_copy_and_leaves_pipeline_ops_lazy(
         return _FastTok()
 
     monkeypatch.setattr(
-        "zephon._internal.ops.tokenize_base.load_hf_tokenizer", _fake_load
+        "zephon._internal.utils.tokenizer.load_hf_tokenizer", _fake_load
     )
     pipe = _empty_pipeline().tokenize(
         tokenizer_id="fake-model",
@@ -1966,7 +1966,7 @@ def test_preflight_finalize_failure_is_not_cached_on_pipeline_op(
 ) -> None:
     # Finalization failures are cached, unlike loader failures.
     monkeypatch.setattr(
-        "zephon._internal.ops.tokenize_base.load_hf_tokenizer",
+        "zephon._internal.utils.tokenizer.load_hf_tokenizer",
         lambda *a, **k: _NoBosTok(),
     )
     pipe = _empty_pipeline().tokenize(tokenizer_id="fake-model", field="text")
@@ -1987,6 +1987,8 @@ def test_preflight_aggregates_issues_in_graph_order(
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise OSError("down")
 
+    # tokenize loads through the installed engine, tokenize_chat through HF.
+    monkeypatch.setattr("zephon._internal.utils.tokenizer.load_hf_tokenizer", _boom)
     monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
     pipe = (
         _empty_pipeline()
