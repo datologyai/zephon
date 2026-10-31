@@ -541,6 +541,57 @@ def test_split_long_samples_numpy_tensors() -> None:
         assert isinstance(payload["input_ids"], np.ndarray)
 
 
+@pytest.mark.parametrize("backend", ["np", "pt", "tf"])
+@pytest.mark.parametrize("values", [[], [1, 2], [1.5]])
+def test_convert_tensor_empty_integer_dtype_preserves_nonempty_inference(
+    backend: str, values: list[int] | list[float]
+) -> None:
+    framework = pytest.importorskip(
+        {"np": "numpy", "pt": "torch", "tf": "tensorflow"}[backend]
+    )
+    op = TokenizeText(tokenizer_id="__fallback__", field="text", return_tensors=backend)
+    actual = op._convert_tensor(values)
+    if values == [1.5]:
+        expected_dtype = framework.float64 if backend == "np" else framework.float32
+    else:
+        expected_dtype = framework.int32 if backend == "tf" else framework.int64
+    assert actual.dtype == expected_dtype
+    assert (
+        actual.tolist() == values
+        if backend != "tf"
+        else actual.numpy().tolist() == values
+    )
+
+
+@pytest.mark.parametrize("backend", ["np", "pt", "tf"])
+@pytest.mark.parametrize("values", [[], [1, 2]])
+def test_convert_tensor_preserves_existing_int32_array(
+    backend: str, values: list[int]
+) -> None:
+    framework = pytest.importorskip(
+        {"np": "numpy", "pt": "torch", "tf": "tensorflow"}[backend]
+    )
+    factory = {"np": "array", "pt": "tensor", "tf": "convert_to_tensor"}[backend]
+    original = getattr(framework, factory)(values, dtype=framework.int32)
+    op = TokenizeText(tokenizer_id="__fallback__", field="text", return_tensors=backend)
+    assert op._convert_tensor(original) is original
+    if backend == "pt":
+        np = pytest.importorskip("numpy")
+        op.return_tensors = "np"
+        assert op._convert_tensor(original).dtype == np.int32
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint32"])
+def test_convert_tensor_wraps_numpy_storage_without_widening(dtype: str) -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    original = np.arange(3, dtype=getattr(np, dtype))
+    op = TokenizeText(tokenizer_id="__fallback__", field="text", return_tensors="pt")
+    actual = op._convert_tensor(original)
+    assert actual.dtype == getattr(torch, dtype)
+    assert actual.data_ptr() == original.ctypes.data
+
+
 def test_convert_tensor_does_not_copy_torch_segments() -> None:
     torch = pytest.importorskip("torch")
 
