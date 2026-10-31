@@ -21,13 +21,19 @@ of tensors.
 converting a string of text in an input record into a sequence of tokens that can be fed
 into the model. The `Pipeline` API provides a number of built-in and optimized operations
 for these common data preparation steps. The `tokenize` operator on the `Pipeline` builds
-on top of the HuggingFace `transformers` library to support efficient tokenization of
-regular text strings:
+on Hugging Face tokenizers to tokenize regular text strings:
 
 ```{literalinclude} ../../../examples/guide/pipelines/tokenize_text.py
 :language: python
 :caption: examples/guide/pipelines/tokenize_text.py
 ```
+
+For higher text-tokenization throughput, you can use `tokenizers` v1. It follows the
+configuration files shipped with the tokenizer in its Hugging Face repository or
+local directory, so tokenization and padding can differ from Transformers defaults.
+Some tokenizers are not yet supported, and chat tokenization needs a separate
+environment until Transformers supports v1. The current v1 release candidates
+ignore thread-pool limits, so multiple workers can oversubscribe CPUs.
 
 By default, the `tokenize` operator emits one record for each input sample, no matter how
 long it is. If you need to cap the length of each output record, you can set the

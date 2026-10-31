@@ -270,7 +270,7 @@ class TokenizeText(TokenizeBase):
         # We do NOT set up the tokenizer here to avoid problems in multiprocessing:
         # hf tokenizers don't like if we fork after creating the object
 
-        # Request lists and convert each output record ourselves so different
+        # Request ragged rows and convert each output record ourselves so different
         # sequence lengths never require stacking into a rectangular tensor.
         # In bracket mode we also own special-token insertion and padding.
         self._cached_kwargs = self._tokenization_kwargs()
@@ -304,6 +304,10 @@ class TokenizeText(TokenizeBase):
         self._resolve_special_token_ids()
         self._ensure_padding_token()
         self._pad_token_id_cached = self._compute_pad_token_id()
+        if self.return_tensors in ("np", "numpy", "pt") and getattr(
+            self.tok, "_supports_numpy_rows", False
+        ):
+            self._cached_kwargs["return_numpy"] = True
 
     def _resolve_special_token_ids(self) -> None:
         """Resolve IDs for the tokens requested by the insertion mode."""
