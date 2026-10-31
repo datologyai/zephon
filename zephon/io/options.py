@@ -121,6 +121,8 @@ class CacheOptions:
     open_retry_max_backoff: float = _option(2.0)
     min_slack_bytes: int = _option(512 * 1024)  # 512 KiB minimum slack
     max_slack_bytes: int = _option(64 * 1024 * 1024)  # 64 MiB maximum slack
+    # Keep shards across runs; reused only if the next run reads the same shards.
+    persist_state: bool = _option(False)
     _provided_fields: frozenset[str] = field(
         init=False,
         repr=False,
