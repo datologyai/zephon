@@ -477,6 +477,18 @@ class CacheStats:
     shards: int
 
 
+def _publish(temporary: Path, final: Path) -> None:
+    """Renames a finished download into place durably: a crash leaves no file or a whole one."""
+    with temporary.open("rb") as f:
+        os.fsync(f.fileno())
+    temporary.replace(final)
+    directory = os.open(final.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _signature(path: Path) -> list[int]:
     """A file's identity for resume: rewriting or truncating it changes one of these."""
     stat = path.stat()
@@ -1230,15 +1242,15 @@ class CacheManager(ShardResolver):
                 raise
             if self._keep_zip:
                 with contextlib.suppress(Exception):
-                    zip_tmp.replace(zip_path)
+                    _publish(zip_tmp, zip_path)
             else:
                 zip_tmp.unlink(missing_ok=True)
-            raw_tmp.replace(raw_path)
+            _publish(raw_tmp, raw_path)
         else:
             raw_tmp.parent.mkdir(parents=True, exist_ok=True)
             self._download_file(locator.root, locator.raw, raw_tmp)
             self._validate(raw_tmp, locator.raw)
-            raw_tmp.replace(raw_path)
+            _publish(raw_tmp, raw_path)
 
     def _download_file(
         self, root: str, shard_file: ShardFile, target_tmp: Path

@@ -1263,6 +1263,35 @@ def test_resume_fetches_again_a_shard_with_no_record(tmp_path: Path) -> None:
     assert hit is False and data == b"header" + b"records" * 16
 
 
+def test_a_download_is_on_disk_before_it_takes_its_final_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = tmp_path / "remote"
+    _make_file(remote / "chunk.bin", b"records")
+    locator = _locator(
+        "demo", 0, str(remote), raw_name="chunk.bin", raw_bytes=len(b"records")
+    )
+    final = tmp_path / "cache" / "demo" / "chunk.bin"
+    synced: list[tuple[int, bool]] = []
+    real_fsync = os.fsync
+
+    def fsync(fd: int) -> None:
+        synced.append((os.fstat(fd).st_ino, final.exists()))
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    manager = _make_manager(
+        tmp_path / "cache", LocalFSBackend(root=remote), [locator], persist_state=True
+    )
+    try:
+        manager.resolve(locator)
+        # A rename keeps the inode: the file's bytes first, then its directory's rename.
+        assert (final.stat().st_ino, False) in synced
+        assert (final.parent.stat().st_ino, True) in synced
+    finally:
+        manager.close()
+
+
 def test_reconciliation_zip_only_is_not_local(tmp_path: Path) -> None:
     """A dataset dir containing only the zip file for a shard stays REMOTE."""
     import gzip
