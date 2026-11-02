@@ -200,10 +200,11 @@ class FakeWorld:
                     if comment["id"] != comment_id:
                         continue
                     if method == "DELETE":
+                        # Like GitHub: 204 with no body.
                         del comments[i]
-                    else:
-                        assert method == "PATCH" and data is not None
-                        comment["body"] = data["body"]
+                        return None
+                    assert method == "PATCH" and data is not None
+                    comment["body"] = data["body"]
                     return {}
             raise AssertionError(f"no comment {comment_id}")
         if match := re.search(r"/issues/(\d+)/comments", path):
@@ -708,3 +709,19 @@ def test_comments_are_fetched_once_per_pr(
     world.add_pr(1, "feature")
     assert world.handle(1)
     assert len(calls) == 1
+
+
+def test_github_call_with_an_empty_response_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_TOKEN", "test")
+    monkeypatch.delenv("LINEAR_CLIENT_ID", raising=False)
+    monkeypatch.setenv("LINEAR_API_KEY", "test")
+    responses = [b"", b'{"id": 7}']
+    monkeypatch.setattr(
+        ls.urllib.request, "urlopen", lambda request: io.BytesIO(responses.pop(0))
+    )
+    client = ls._Client(dry_run=False)
+    assert client.github("DELETE", f"/repos/{REPO}/issues/comments/1") is None
+    assert client.github("GET", f"/repos/{REPO}/issues/comments/7") == {"id": 7}

@@ -182,7 +182,9 @@ class _Client:
             },
         )
         with urllib.request.urlopen(request) as response:
-            return json.load(response)
+            # DELETE answers 204 with no body.
+            body = response.read()
+        return json.loads(body) if body else None
 
     def github_paged(self, path: str) -> list[Any]:
         items: list[Any] = []
