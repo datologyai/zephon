@@ -398,69 +398,87 @@ def _triage_marker(pr: dict[str, Any]) -> str:
     return f"(<{pr['html_url']}>) by"
 
 
-def _has_triage_comment(client: _Client, pr: dict[str, Any]) -> bool:
-    comment = _bot_comment(client, pr)
-    return bool(comment and TRIAGE_COMMENT_MARKER in comment["body"])
-
-
 def _record_triage(client: _Client, pr: dict[str, Any], issue: _LinkedIssue) -> None:
     if client.dry_run:
         return
     _link_pr(client, issue.identifier, pr["html_url"], "closes")
-    _show_link(client, pr, issue, triaged=True)
 
 
-def _bot_comment(client: _Client, pr: dict[str, Any]) -> dict[str, Any] | None:
-    comments = client.github_paged(
-        f"/repos/{client.repo}/issues/{pr['number']}/comments"
-    )
-    for comment in comments:
-        body = comment.get("body") or ""
-        ours = LINK_COMMENT_MARKER in body or TRIAGE_COMMENT_MARKER in body
-        if ours and comment["user"]["login"] == BOT_LOGIN:
-            return comment
-    return None
+def _bot_comments(client: _Client, pr: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        comment
+        for comment in client.github_paged(
+            f"/repos/{client.repo}/issues/{pr['number']}/comments"
+        )
+        if comment["user"]["login"] == BOT_LOGIN
+        and any(
+            marker in (comment.get("body") or "")
+            for marker in (LINK_COMMENT_MARKER, TRIAGE_COMMENT_MARKER)
+        )
+    ]
 
 
-def _show_link(
-    client: _Client, pr: dict[str, Any], issue: _LinkedIssue, triaged: bool = False
+def _sync_comment(
+    client: _Client,
+    pr: dict[str, Any],
+    issue: _LinkedIssue | None,
+    comments: list[dict[str, Any]],
 ) -> None:
-    existing = _bot_comment(client, pr)
-    # A PR naming its issue itself needs no comment, but one already posted is
-    # kept accurate rather than left stale.
-    if not existing and issue.identifier in _referenced_ids(pr):
-        return
-    markers = LINK_COMMENT_MARKER
-    if triaged or (existing and TRIAGE_COMMENT_MARKER in existing["body"]):
-        markers += TRIAGE_COMMENT_MARKER
-    note = STATE_NOTES.get(issue.state or "")
-    body = f"{markers}\nLinear: {issue.identifier}{f' ({note})' if note else ''}"
-    if existing and existing["body"] == body:
-        return
-    _log(f"  comment: Linear {issue.identifier}")
-    if client.dry_run:
-        return
-    if existing:
-        client.github(
-            "PATCH",
-            f"/repos/{client.repo}/issues/comments/{existing['id']}",
-            {"body": body},
-        )
+    first = comments[0] if comments else None
+    if issue is None:
+        if first is None:
+            return
+        text = "Linear: no linked issue"
     else:
-        client.github(
-            "POST",
-            f"/repos/{client.repo}/issues/{pr['number']}/comments",
-            {"body": body},
-        )
+        # A PR naming its issue itself needs no comment, but one already posted
+        # is kept accurate rather than left stale.
+        if first is None and issue.identifier in _referenced_ids(pr):
+            return
+        note = STATE_NOTES.get(issue.state or "")
+        text = f"Linear: {issue.identifier}{f' ({note})' if note else ''}"
+    # An issue in the triage team came from triage; the record outlives its
+    # move to another team.
+    triaged = any(TRIAGE_COMMENT_MARKER in c["body"] for c in comments) or bool(
+        issue
+        and client.triage_team
+        and issue.identifier.startswith(f"{client.triage_team}-")
+    )
+    markers = LINK_COMMENT_MARKER + (TRIAGE_COMMENT_MARKER if triaged else "")
+    body = f"{markers}\n{text}"
+    if first is None or first["body"] != body:
+        _log(f"  comment: {text}")
+        if not client.dry_run:
+            if first is None:
+                client.github(
+                    "POST",
+                    f"/repos/{client.repo}/issues/{pr['number']}/comments",
+                    {"body": body},
+                )
+            else:
+                client.github(
+                    "PATCH",
+                    f"/repos/{client.repo}/issues/comments/{first['id']}",
+                    {"body": body},
+                )
+    # A PR event and the scheduled pass can handle the same PR at once and both
+    # post; keep the first comment and drop the rest.
+    for extra in comments[1:]:
+        _log("  delete duplicate comment")
+        if not client.dry_run:
+            client.github(
+                "DELETE", f"/repos/{client.repo}/issues/comments/{extra['id']}"
+            )
 
 
-def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | None:
+def _create_triage_issue(
+    client: _Client, pr: dict[str, Any], comments: list[dict[str, Any]]
+) -> _LinkedIssue | None:
     if not client.triage_team:
         _log("  no LINEAR_TRIAGE_TEAM, no triage issue")
         return None
     # Reaching here with a recorded triage issue means triage moved it out of
     # ZEPH and the triage team (or detached it): the PR is handled.
-    if _has_triage_comment(client, pr):
+    if any(TRIAGE_COMMENT_MARKER in c["body"] for c in comments):
         _log("  triage issue already opened elsewhere, skipped")
         return None
     # Creating and attaching are separate mutations. If attaching failed on an
@@ -553,6 +571,7 @@ def _resolve(
     pr: dict[str, Any],
     default_branch: str,
     create: bool,
+    comments: list[dict[str, Any]],
     depth: int = 0,
 ) -> tuple[_LinkedIssue | None, bool]:
     """Return the PR's ZEPH issue, and whether it references only PLAT issues."""
@@ -590,7 +609,7 @@ def _resolve(
     # a parent's PLAT reference is reported on the parent's own run.
     parent = _stack_parent(client, pr, default_branch)
     if parent and depth < 20:
-        issue, _ = _resolve(client, parent, default_branch, create, depth + 1)
+        issue, _ = _resolve(client, parent, default_branch, create, [], depth + 1)
         if issue:
             if depth == 0:
                 _attach_inherited(client, pr, issue, attached)
@@ -603,7 +622,7 @@ def _resolve(
     # missing one, so it gets no triage issue. Neither does a stacked child: its
     # parent's own run opens the one for the stack.
     if create and not ids and not parent and not _is_bot(pr) and depth == 0:
-        return _create_triage_issue(client, pr), False
+        return _create_triage_issue(client, pr, comments), False
     return None, False
 
 
@@ -640,7 +659,9 @@ def _handle(
     if _is_bot(pr) and not _referenced_ids(pr):
         _log("  bot PR without issue ID, skipped")
         return True
-    issue, plat_only = _resolve(client, pr, default_branch, create)
+    # Fetched once: triage and the link comment both read it.
+    comments = _bot_comments(client, pr)
+    issue, plat_only = _resolve(client, pr, default_branch, create, comments)
     if plat_only:
         _log(
             f"::error::#{pr['number']} references a PLAT issue only. Zephon PRs must "
@@ -648,9 +669,8 @@ def _handle(
         )
         return False
     _log(f"  linked to {issue.identifier if issue else '-'}")
+    _sync_comment(client, pr, issue, comments)
     _sync_milestone(client, pr, issue)
-    if issue:
-        _show_link(client, pr, issue)
     return True
 
 

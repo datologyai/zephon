@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import itertools
 import re
 import sys
 import urllib.error
@@ -41,9 +42,9 @@ class FakeWorld:
         # PR or GitHub issue URL -> (issue identifier, link kind)
         self.attachments: dict[str, tuple[str, str]] = {}
         self.prs: dict[int, dict[str, Any]] = {}
-        # Bodies of the bot's comments per PR, and of everyone else's.
-        self.comments: dict[int, list[str]] = {}
-        self.foreign_comments: dict[int, list[str]] = {}
+        # PR number -> comments, as {"id", "body", "user"} like the REST API.
+        self.comments: dict[int, list[dict[str, Any]]] = {}
+        self._comment_ids = itertools.count(1)
         # Teams the credentials can read; issues in other teams are not found.
         self.visible_teams = {"ZEPH", INBOX}
         self.fail_next_attach = False
@@ -92,6 +93,19 @@ class FakeWorld:
         pr = self.add_pr(number, head)
         pr["user"] = {"login": "dependabot[bot]", "type": "Bot"}
         return pr
+
+    def add_comment(self, number: int, body: str, login: str = ls.BOT_LOGIN) -> None:
+        self.comments.setdefault(number, []).append(
+            {"id": next(self._comment_ids), "body": body, "user": {"login": login}}
+        )
+
+    def bodies(self, number: int) -> list[str]:
+        """Bodies of the bot's comments on a PR."""
+        return [
+            c["body"]
+            for c in self.comments.get(number, [])
+            if c["user"]["login"] == ls.BOT_LOGIN
+        ]
 
     def handle(self, number: int, create: bool = True) -> bool:
         return ls._handle(self.client, self.prs[number], "main", create)
@@ -179,25 +193,26 @@ class FakeWorld:
             assert "&" not in match[1], "head must be URL-encoded"
             base = urllib.parse.unquote(match[1])
             return [pr for pr in self.prs.values() if pr["head"]["ref"] == base]
-        if method == "PATCH" and (match := re.search(r"/comments/(\d+)-(\d+)$", path)):
-            assert data is not None
-            self.comments[int(match[1])][int(match[2])] = data["body"]
-            return {}
+        if match := re.search(r"/issues/comments/(\d+)$", path):
+            comment_id = int(match[1])
+            for comments in self.comments.values():
+                for i, comment in enumerate(comments):
+                    if comment["id"] != comment_id:
+                        continue
+                    if method == "DELETE":
+                        del comments[i]
+                    else:
+                        assert method == "PATCH" and data is not None
+                        comment["body"] = data["body"]
+                    return {}
+            raise AssertionError(f"no comment {comment_id}")
         if match := re.search(r"/issues/(\d+)/comments", path):
             number = int(match[1])
-            comments = self.comments.setdefault(number, [])
             if method == "POST":
                 assert data is not None
-                comments.append(data["body"])
+                self.add_comment(number, data["body"])
                 return {}
-            foreign = [
-                {"id": f"x-{i}", "body": body, "user": {"login": "someone"}}
-                for i, body in enumerate(self.foreign_comments.get(number, []))
-            ]
-            return foreign + [
-                {"id": f"{number}-{i}", "body": body, "user": {"login": ls.BOT_LOGIN}}
-                for i, body in enumerate(comments)
-            ]
+            return [dict(c) for c in self.comments.get(number, [])]
         if method == "PATCH" and (match := re.search(r"/issues/(\d+)$", path)):
             assert data is not None
             title = data["milestone"]
@@ -356,7 +371,7 @@ def test_triage_issue_moved_out_of_zeph_is_not_reopened(world: FakeWorld) -> Non
     world.add_pr(1, "feature")
     assert world.handle(1)
     (identifier,) = world.issues
-    assert world.comments[1] == [
+    assert world.bodies(1) == [
         f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\n"
         f"Linear: {identifier} (in triage)"
     ]
@@ -364,7 +379,7 @@ def test_triage_issue_moved_out_of_zeph_is_not_reopened(world: FakeWorld) -> Non
     world.move(identifier, "PLAT")
     assert world.handle(1)
     assert set(world.issues) == {identifier}
-    assert len(world.comments[1]) == 1
+    assert len(world.bodies(1)) == 1
 
 
 def test_stack_child_never_opens_its_own_triage_issue(world: FakeWorld) -> None:
@@ -458,7 +473,7 @@ def test_no_triage_issue_without_triage_team(
     world.add_pr(1, "feature")
     assert world.handle(1)
     assert world.issues == {}
-    assert 1 not in world.comments
+    assert not world.bodies(1)
 
 
 def test_accepted_triage_issue_keeps_its_pr(world: FakeWorld) -> None:
@@ -589,14 +604,14 @@ def test_link_comment_follows_the_issue_out_of_triage(world: FakeWorld) -> None:
     world.add_pr(1, "feature")
     assert world.handle(1)
     (key,) = world.issues
-    assert world.comments[1][0].endswith(f"Linear: {key} (in triage)")
+    assert world.bodies(1)[0].endswith(f"Linear: {key} (in triage)")
 
     # Accepting it into ZEPH gives the issue a new identifier.
     world.move(key, "ZEPH")
     world.issues[key]["identifier"] = "ZEPH-30"
     world.issues[key]["state"] = "started"
     assert world.handle(1, create=False)
-    assert world.comments[1] == [
+    assert world.bodies(1) == [
         f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nLinear: ZEPH-30"
     ]
 
@@ -605,7 +620,7 @@ def test_pr_naming_its_issue_gets_no_link_comment(world: FakeWorld) -> None:
     world.add_issue("ZEPH-2", RELEASE)
     world.add_pr(1, "feature", body="Fixes ZEPH-2")
     assert world.handle(1)
-    assert not world.comments.get(1)
+    assert not world.bodies(1)
 
 
 def test_github_issue_reference_shows_the_zeph_issue(world: FakeWorld) -> None:
@@ -614,7 +629,7 @@ def test_github_issue_reference_shows_the_zeph_issue(world: FakeWorld) -> None:
     world.add_pr(1, "feature", body="Closes #86")
     assert world.handle(1)
     assert world.handle(1)
-    assert world.comments[1] == [f"{ls.LINK_COMMENT_MARKER}\nLinear: ZEPH-20"]
+    assert world.bodies(1) == [f"{ls.LINK_COMMENT_MARKER}\nLinear: ZEPH-20"]
 
 
 def test_declined_triage_issue_is_shown_as_canceled(world: FakeWorld) -> None:
@@ -623,18 +638,73 @@ def test_declined_triage_issue_is_shown_as_canceled(world: FakeWorld) -> None:
     (key,) = world.issues
     world.issues[key]["state"] = "canceled"
     assert world.handle(1, create=False)
-    assert world.comments[1] == [
+    assert world.bodies(1) == [
         f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nLinear: {key} (canceled)"
     ]
 
 
 def test_markers_in_other_peoples_comments_are_ignored(world: FakeWorld) -> None:
     world.add_pr(1, "feature")
-    world.foreign_comments[1] = [
-        f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nquoting the bot"
-    ]
+    world.add_comment(
+        1, f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nquoting", "someone"
+    )
     assert world.handle(1)
     (key,) = world.issues
-    assert world.comments[1] == [
+    assert world.bodies(1) == [
         f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nLinear: {key} (in triage)"
     ]
+
+
+def test_link_comment_says_so_when_the_link_is_removed(world: FakeWorld) -> None:
+    world.add_issue("ZEPH-20", RELEASE)
+    world.attachments[world.add_pr(1, "feature")["html_url"]] = ("ZEPH-20", "links")
+    assert world.handle(1)
+    assert _milestone(world, 1) == "v0.3"
+
+    world.attachments.clear()
+    assert world.handle(1, create=False)
+    assert _milestone(world, 1) is None
+    assert world.bodies(1) == [f"{ls.LINK_COMMENT_MARKER}\nLinear: no linked issue"]
+
+
+def test_unlinked_triage_record_keeps_its_marker(world: FakeWorld) -> None:
+    world.add_pr(1, "feature")
+    assert world.handle(1)
+    world.attachments.clear()
+    assert world.handle(1)
+    assert world.bodies(1) == [
+        f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nLinear: no linked issue"
+    ]
+    assert len(world.issues) == 1
+
+
+def test_duplicate_link_comments_from_racing_runs_are_merged(
+    world: FakeWorld,
+) -> None:
+    world.add_issue("ZEPH-20")
+    world.attachments[world.add_pr(1, "feature")["html_url"]] = ("ZEPH-20", "links")
+    world.add_comment(1, f"{ls.LINK_COMMENT_MARKER}\nLinear: ZEPH-20")
+    world.add_comment(
+        1, f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nLinear: ZEPH-20"
+    )
+    assert world.handle(1, create=False)
+    assert world.bodies(1) == [
+        f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nLinear: ZEPH-20"
+    ]
+
+
+def test_comments_are_fetched_once_per_pr(
+    world: FakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    real = world._github
+
+    def counting(method: str, path: str, data: dict[str, Any] | None = None) -> Any:
+        if method == "GET" and "/comments" in path:
+            calls.append(path)
+        return real(method, path, data)
+
+    monkeypatch.setattr(world.client, "github", counting)
+    world.add_pr(1, "feature")
+    assert world.handle(1)
+    assert len(calls) == 1
