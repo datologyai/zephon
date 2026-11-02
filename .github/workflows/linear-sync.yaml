@@ -15,7 +15,8 @@ on:
   pull_request_target:
     types: [opened, edited, reopened, ready_for_review]
   schedule:
-  - cron: '17 3 * * *'
+  # Hourly: picks up changes made in Linear (triage, relinking, releases).
+  - cron: '17 * * * *'
   workflow_dispatch: {}
 
 concurrency:

@@ -16,7 +16,7 @@ created.
 
 Modes:
   pr         Handle the PR in ``$GITHUB_EVENT_PATH`` (pull_request_target).
-  reconcile  Re-check every open PR (nightly), catching issues that moved
+  reconcile  Re-check every open PR (hourly), catching issues that moved
              between releases or left triage.
 
 Pass ``--dry-run`` to log intended changes without writing anything.
