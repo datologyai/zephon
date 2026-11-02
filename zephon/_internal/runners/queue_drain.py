@@ -79,8 +79,21 @@ class QueueDrainStageRunner(ConcurrentStageRunner[SQueueDrain], Generic[SQueueDr
         next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
         context: ConcurrentRunContext,
     ) -> None:
+        # The pump calls this about once per input item and the queue is
+        # usually empty, so poll before starting the idle_drain timer: timing
+        # every empty poll cost more than the poll itself.
+        try:
+            item = self._queue_get_nowait(state.result_queue)
+        except queue.Empty:
+            return
+        except FileNotFoundError as exc:
+            self._record_error(context, exc)
+            return
         with state.pump_timer.measure_excluding("idle_drain", "result_handle"):
             while True:
+                state.pump_timer.note("batches_completed")
+                with state.pump_timer.measure("result_handle"):
+                    self._handle_result(state, item, next_queue, context)
                 try:
                     item = self._queue_get_nowait(state.result_queue)
                 except queue.Empty:
@@ -88,9 +101,6 @@ class QueueDrainStageRunner(ConcurrentStageRunner[SQueueDrain], Generic[SQueueDr
                 except FileNotFoundError as exc:
                     self._record_error(context, exc)
                     return
-                state.pump_timer.note("batches_completed")
-                with state.pump_timer.measure("result_handle"):
-                    self._handle_result(state, item, next_queue, context)
 
     def _await_one_result(
         self,
