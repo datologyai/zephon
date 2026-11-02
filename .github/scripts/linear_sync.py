@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,6 +42,7 @@ from typing import Any
 
 LINEAR_URL = "https://api.linear.app/graphql"
 LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
+LINEAR_REVOKE_URL = "https://api.linear.app/oauth/revoke"
 GITHUB_API = "https://api.github.com"
 TEAM_KEY = "ZEPH"
 TRIAGE_LABEL = "from-github-pr"
@@ -58,16 +60,18 @@ RELEASE_RE = re.compile(r"^v(\d+\.\d+(?:\.\d+)?)\b")
 # Only milestones this script could have set are ever replaced or cleared, so a
 # milestone a maintainer set by hand for another reason is left alone.
 MANAGED_MILESTONE_RE = re.compile(r"^v\d+\.\d+(?:\.\d+)?$")
-# Marks the PR comment recording a triage issue. Lookups only cover ZEPH and the
-# triage team, so once triage moves the issue elsewhere GitHub keeps the record.
-# The comment names no issue: the identifier changes when the issue moves.
+# Marks the PR comment recording that a triage issue was opened. Lookups only
+# cover ZEPH and the triage team, so once triage moves the issue elsewhere GitHub
+# keeps the record.
 TRIAGE_COMMENT_MARKER = "<!-- linear-sync:triage -->"
 # Marks the bot comment naming the PR's Linear issue. It is edited in place, so a
 # PR never collects more than one; a triage record shares the same comment.
 LINK_COMMENT_MARKER = "<!-- linear-sync:link -->"
 # The author of comments made with the workflow's GITHUB_TOKEN, which can only
-# edit its own.
+# edit its own. Markers in anyone else's comments are ignored.
 BOT_LOGIN = "github-actions[bot]"
+# Shown after the identifier in the link comment, by Linear state type.
+STATE_NOTES = {"triage": "in triage", "canceled": "canceled", "duplicate": "duplicate"}
 # Link kind of the attachments this script adds for inherited issues. Linear only
 # creates "contributes" links itself from a magic word, which needs an ID in the
 # PR, and attaching by hand in Linear creates "links".
@@ -91,32 +95,56 @@ class _LinearError(RuntimeError):
         return all(e.get("message", "").startswith(prefix) for e in self.errors)
 
 
-def _linear_auth() -> str:
-    client_id = os.environ.get("LINEAR_CLIENT_ID")
-    if not client_id:
-        return os.environ["LINEAR_API_KEY"]
+def _post_form(url: str, fields: dict[str, str]) -> Any:
+    body = urllib.parse.urlencode(fields).encode()
+    with urllib.request.urlopen(url, data=body) as response:
+        return json.load(response)
+
+
+def _app_token(client_id: str, client_secret: str) -> str:
     # A client-credentials token acts as the app itself, so issues the sync
     # creates are not attributed to a person (nor synced to GitHub under one).
-    body = urllib.parse.urlencode(
-        {
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": os.environ["LINEAR_CLIENT_SECRET"],
-            "scope": "read,write",
-        }
-    ).encode()
-    with urllib.request.urlopen(LINEAR_TOKEN_URL, data=body) as response:
-        return f"Bearer {json.load(response)['access_token']}"
+    fields = {
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": "read,write",
+    }
+    try:
+        return _post_form(LINEAR_TOKEN_URL, fields)["access_token"]
+    except urllib.error.HTTPError as error:
+        # The endpoint has answered 400 transiently. Its error body carries no
+        # secret, so log the reason, then retry once.
+        _log(f"::warning::Linear token request: {error.code} {error.read()[:300]!r}")
+        time.sleep(5)
+        return _post_form(LINEAR_TOKEN_URL, fields)["access_token"]
 
 
 class _Client:
     def __init__(self, dry_run: bool) -> None:
         self.dry_run = dry_run
         self.repo = os.environ["GITHUB_REPOSITORY"]
-        self._linear_auth = _linear_auth()
+        client_id = os.environ.get("LINEAR_CLIENT_ID")
+        self._app_token = (
+            _app_token(client_id, os.environ["LINEAR_CLIENT_SECRET"])
+            if client_id
+            else None
+        )
+        self._linear_auth = (
+            f"Bearer {self._app_token}"
+            if self._app_token
+            else os.environ["LINEAR_API_KEY"]
+        )
         self._github_token = os.environ["GITHUB_TOKEN"]
         self.triage_team = os.environ.get("LINEAR_TRIAGE_TEAM") or None
         self._milestones: dict[str, int] | None = None
+
+    def close(self) -> None:
+        # Every run mints a token valid for 30 days; revoke it so they don't
+        # pile up.
+        if self._app_token:
+            _post_form(LINEAR_REVOKE_URL, {"token": self._app_token})
+            self._app_token = None
 
     def linear(self, query: str, **variables: Any) -> dict[str, Any]:
         body = json.dumps({"query": query, "variables": variables}).encode()
@@ -203,6 +231,7 @@ class _Client:
 class _LinkedIssue:
     identifier: str
     release: str | None
+    state: str | None = None
 
 
 @dataclass
@@ -252,7 +281,9 @@ def _fetch_issue(client: _Client, identifier: str) -> _LinkedIssue | None:
     try:
         data = client.linear(
             """query($id: String!) {
-              issue(id: $id) { identifier team { key } projectMilestone { name } }
+              issue(id: $id) {
+                identifier team { key } state { type } projectMilestone { name }
+              }
             }""",
             id=identifier,
         )
@@ -266,7 +297,11 @@ def _fetch_issue(client: _Client, identifier: str) -> _LinkedIssue | None:
     if issue["team"]["key"] != TEAM_KEY:
         _log(f"  {identifier}: moved out of {TEAM_KEY}")
         return None
-    return _LinkedIssue(issue["identifier"], _release_of(issue["projectMilestone"]))
+    return _LinkedIssue(
+        issue["identifier"],
+        _release_of(issue["projectMilestone"]),
+        issue["state"]["type"],
+    )
 
 
 def _attachments(client: _Client, pr_url: str) -> list[_Attachment]:
@@ -276,7 +311,9 @@ def _attachments(client: _Client, pr_url: str) -> list[_Attachment]:
             nodes {
               id
               metadata
-              issue { identifier team { key } projectMilestone { name } }
+              issue {
+                identifier team { key } state { type } projectMilestone { name }
+              }
             }
           }
         }""",
@@ -288,6 +325,7 @@ def _attachments(client: _Client, pr_url: str) -> list[_Attachment]:
             _LinkedIssue(
                 node["issue"]["identifier"],
                 _release_of(node["issue"]["projectMilestone"]),
+                node["issue"]["state"]["type"],
             ),
             (node["metadata"] or {}).get("linkKind"),
         )
@@ -361,10 +399,8 @@ def _triage_marker(pr: dict[str, Any]) -> str:
 
 
 def _has_triage_comment(client: _Client, pr: dict[str, Any]) -> bool:
-    comments = client.github_paged(
-        f"/repos/{client.repo}/issues/{pr['number']}/comments"
-    )
-    return any(TRIAGE_COMMENT_MARKER in (c.get("body") or "") for c in comments)
+    comment = _bot_comment(client, pr)
+    return bool(comment and TRIAGE_COMMENT_MARKER in comment["body"])
 
 
 def _record_triage(client: _Client, pr: dict[str, Any], issue: _LinkedIssue) -> None:
@@ -397,10 +433,8 @@ def _show_link(
     markers = LINK_COMMENT_MARKER
     if triaged or (existing and TRIAGE_COMMENT_MARKER in existing["body"]):
         markers += TRIAGE_COMMENT_MARKER
-    in_triage = client.triage_team and issue.identifier.startswith(
-        f"{client.triage_team}-"
-    )
-    body = f"{markers}\nLinear: {issue.identifier}{' (in triage)' if in_triage else ''}"
+    note = STATE_NOTES.get(issue.state or "")
+    body = f"{markers}\nLinear: {issue.identifier}{f' ({note})' if note else ''}"
     if existing and existing["body"] == body:
         return
     _log(f"  comment: Linear {issue.identifier}")
@@ -437,14 +471,16 @@ def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | 
           issues(
             first: 1
             filter: { team: { key: { in: $keys } }, description: { contains: $marker } }
-          ) { nodes { identifier projectMilestone { name } } }
+          ) { nodes { identifier state { type } projectMilestone { name } } }
         }""",
         keys=sorted(_linked_teams(client)),
         marker=_triage_marker(pr),
     )["issues"]["nodes"]
     if existing:
         issue = _LinkedIssue(
-            existing[0]["identifier"], _release_of(existing[0]["projectMilestone"])
+            existing[0]["identifier"],
+            _release_of(existing[0]["projectMilestone"]),
+            existing[0]["state"]["type"],
         )
         _log(f"  reuse triage issue {issue.identifier} for #{pr['number']}")
         _record_triage(client, pr, issue)
@@ -479,7 +515,8 @@ def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | 
         "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { issue { id identifier } } }",
         input=issue_input,
     )["issueCreate"]["issue"]
-    issue = _LinkedIssue(created["identifier"], None)
+    state = "triage" if team["states"]["nodes"] else None
+    issue = _LinkedIssue(created["identifier"], None, state)
     _record_triage(client, pr, issue)
     _log(f"  created {issue.identifier}")
     return issue
@@ -624,9 +661,19 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     client = _Client(args.dry_run)
+    try:
+        return _run(client, args.mode)
+    finally:
+        try:
+            client.close()
+        except Exception as error:
+            _log(f"::warning::revoking the Linear token: {error}")
+
+
+def _run(client: _Client, mode: str) -> int:
     default_branch = client.github("GET", f"/repos/{client.repo}")["default_branch"]
 
-    if args.mode == "pr":
+    if mode == "pr":
         with open(os.environ["GITHUB_EVENT_PATH"]) as f:
             event = json.load(f)
         # Re-fetch: the event payload can predate an edit made seconds earlier.

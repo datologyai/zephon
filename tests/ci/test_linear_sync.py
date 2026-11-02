@@ -41,7 +41,9 @@ class FakeWorld:
         # PR or GitHub issue URL -> (issue identifier, link kind)
         self.attachments: dict[str, tuple[str, str]] = {}
         self.prs: dict[int, dict[str, Any]] = {}
+        # Bodies of the bot's comments per PR, and of everyone else's.
         self.comments: dict[int, list[str]] = {}
+        self.foreign_comments: dict[int, list[str]] = {}
         # Teams the credentials can read; issues in other teams are not found.
         self.visible_teams = {"ZEPH", INBOX}
         self.fail_next_attach = False
@@ -51,11 +53,16 @@ class FakeWorld:
         monkeypatch.setattr(self.client, "milestone_number", lambda title: title)
 
     def add_issue(
-        self, identifier: str, milestone: str | None = None, team: str = "ZEPH"
+        self,
+        identifier: str,
+        milestone: str | None = None,
+        team: str = "ZEPH",
+        state: str = "started",
     ) -> None:
         self.issues[identifier] = {
             "identifier": identifier,
             "team": team,
+            "state": state,
             "milestone": milestone,
             "description": "",
         }
@@ -102,6 +109,7 @@ class FakeWorld:
             "id": identifier,
             "identifier": issue["identifier"],
             "team": {"key": issue["team"]},
+            "state": {"type": issue["state"]},
             "projectMilestone": {"name": milestone} if milestone else None,
         }
 
@@ -142,7 +150,7 @@ class FakeWorld:
         if "issueCreate" in query:
             team = variables["input"]["teamId"]
             identifier = f"{team}-{100 + len(self.issues)}"
-            self.add_issue(identifier, team=team)
+            self.add_issue(identifier, team=team, state="triage")
             self.issues[identifier]["description"] = _as_linear_stores(
                 variables["input"]["description"]
             )
@@ -182,7 +190,11 @@ class FakeWorld:
                 assert data is not None
                 comments.append(data["body"])
                 return {}
-            return [
+            foreign = [
+                {"id": f"x-{i}", "body": body, "user": {"login": "someone"}}
+                for i, body in enumerate(self.foreign_comments.get(number, []))
+            ]
+            return foreign + [
                 {"id": f"{number}-{i}", "body": body, "user": {"login": ls.BOT_LOGIN}}
                 for i, body in enumerate(comments)
             ]
@@ -510,30 +522,67 @@ def test_plat_reference_next_to_synced_github_issue_passes(
     assert world.handle(1, create=False)
 
 
-def test_oauth_app_credentials_are_exchanged_for_a_bearer_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _app_env(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, list[str]]]]:
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_TOKEN", "test")
     monkeypatch.setenv("LINEAR_CLIENT_ID", "id")
     monkeypatch.setenv("LINEAR_CLIENT_SECRET", "secret")
-    sent: dict[str, Any] = {}
+    monkeypatch.setattr(ls.time, "sleep", lambda seconds: None)
+    sent: list[tuple[str, dict[str, list[str]]]] = []
 
     def urlopen(url: str, data: bytes) -> Any:
-        sent.update(url=url, form=urllib.parse.parse_qs(data.decode()))
-        return io.BytesIO(b'{"access_token": "tok"}')
+        sent.append((url, urllib.parse.parse_qs(data.decode())))
+        return io.BytesIO(b'{"access_token": "tok", "success": true}')
 
     monkeypatch.setattr(ls.urllib.request, "urlopen", urlopen)
-    assert ls._linear_auth() == "Bearer tok"
-    assert sent["url"] == ls.LINEAR_TOKEN_URL
-    assert sent["form"]["grant_type"] == ["client_credentials"]
-    assert sent["form"]["client_secret"] == ["secret"]
+    return sent
+
+
+def test_app_token_is_used_and_revoked_on_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent = _app_env(monkeypatch)
+    client = ls._Client(dry_run=False)
+    assert client._linear_auth == "Bearer tok"
+    url, form = sent[0]
+    assert url == ls.LINEAR_TOKEN_URL
+    assert form["grant_type"] == ["client_credentials"]
+    assert form["client_secret"] == ["secret"]
+
+    client.close()
+    client.close()
+    assert sent[1:] == [(ls.LINEAR_REVOKE_URL, {"token": ["tok"]})]
+
+
+def test_app_token_request_is_retried_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _app_env(monkeypatch)
+    real_urlopen = ls.urllib.request.urlopen
+    failures = [
+        urllib.error.HTTPError(
+            ls.LINEAR_TOKEN_URL, 400, "Bad Request", Message(), io.BytesIO(b"oops")
+        )
+    ]
+
+    def flaky(url: str, data: bytes) -> Any:
+        if failures:
+            raise failures.pop()
+        return real_urlopen(url, data)
+
+    monkeypatch.setattr(ls.urllib.request, "urlopen", flaky)
+    assert ls._Client(dry_run=False)._linear_auth == "Bearer tok"
+    assert len(sent) == 1
 
 
 def test_personal_api_key_is_used_without_app_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_TOKEN", "test")
     monkeypatch.delenv("LINEAR_CLIENT_ID", raising=False)
     monkeypatch.setenv("LINEAR_API_KEY", "lin_api_x")
-    assert ls._linear_auth() == "lin_api_x"
+    client = ls._Client(dry_run=False)
+    assert client._linear_auth == "lin_api_x"
+    client.close()
 
 
 def test_link_comment_follows_the_issue_out_of_triage(world: FakeWorld) -> None:
@@ -545,6 +594,7 @@ def test_link_comment_follows_the_issue_out_of_triage(world: FakeWorld) -> None:
     # Accepting it into ZEPH gives the issue a new identifier.
     world.move(key, "ZEPH")
     world.issues[key]["identifier"] = "ZEPH-30"
+    world.issues[key]["state"] = "started"
     assert world.handle(1, create=False)
     assert world.comments[1] == [
         f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nLinear: ZEPH-30"
@@ -565,3 +615,26 @@ def test_github_issue_reference_shows_the_zeph_issue(world: FakeWorld) -> None:
     assert world.handle(1)
     assert world.handle(1)
     assert world.comments[1] == [f"{ls.LINK_COMMENT_MARKER}\nLinear: ZEPH-20"]
+
+
+def test_declined_triage_issue_is_shown_as_canceled(world: FakeWorld) -> None:
+    world.add_pr(1, "feature")
+    assert world.handle(1)
+    (key,) = world.issues
+    world.issues[key]["state"] = "canceled"
+    assert world.handle(1, create=False)
+    assert world.comments[1] == [
+        f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nLinear: {key} (canceled)"
+    ]
+
+
+def test_markers_in_other_peoples_comments_are_ignored(world: FakeWorld) -> None:
+    world.add_pr(1, "feature")
+    world.foreign_comments[1] = [
+        f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nquoting the bot"
+    ]
+    assert world.handle(1)
+    (key,) = world.issues
+    assert world.comments[1] == [
+        f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nLinear: {key} (in triage)"
+    ]
