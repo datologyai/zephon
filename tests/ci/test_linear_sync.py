@@ -171,13 +171,21 @@ class FakeWorld:
             assert "&" not in match[1], "head must be URL-encoded"
             base = urllib.parse.unquote(match[1])
             return [pr for pr in self.prs.values() if pr["head"]["ref"] == base]
+        if method == "PATCH" and (match := re.search(r"/comments/(\d+)-(\d+)$", path)):
+            assert data is not None
+            self.comments[int(match[1])][int(match[2])] = data["body"]
+            return {}
         if match := re.search(r"/issues/(\d+)/comments", path):
-            comments = self.comments.setdefault(int(match[1]), [])
+            number = int(match[1])
+            comments = self.comments.setdefault(number, [])
             if method == "POST":
                 assert data is not None
                 comments.append(data["body"])
                 return {}
-            return [{"body": body} for body in comments]
+            return [
+                {"id": f"{number}-{i}", "body": body, "user": {"login": ls.BOT_LOGIN}}
+                for i, body in enumerate(comments)
+            ]
         if method == "PATCH" and (match := re.search(r"/issues/(\d+)$", path)):
             assert data is not None
             title = data["milestone"]
@@ -337,7 +345,8 @@ def test_triage_issue_moved_out_of_zeph_is_not_reopened(world: FakeWorld) -> Non
     assert world.handle(1)
     (identifier,) = world.issues
     assert world.comments[1] == [
-        f"{ls.TRIAGE_COMMENT_MARKER}\nTracked in Linear for triage."
+        f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\n"
+        f"Linear: {identifier} (in triage)"
     ]
 
     world.move(identifier, "PLAT")
@@ -525,3 +534,34 @@ def test_personal_api_key_is_used_without_app_credentials(
     monkeypatch.delenv("LINEAR_CLIENT_ID", raising=False)
     monkeypatch.setenv("LINEAR_API_KEY", "lin_api_x")
     assert ls._linear_auth() == "lin_api_x"
+
+
+def test_link_comment_follows_the_issue_out_of_triage(world: FakeWorld) -> None:
+    world.add_pr(1, "feature")
+    assert world.handle(1)
+    (key,) = world.issues
+    assert world.comments[1][0].endswith(f"Linear: {key} (in triage)")
+
+    # Accepting it into ZEPH gives the issue a new identifier.
+    world.move(key, "ZEPH")
+    world.issues[key]["identifier"] = "ZEPH-30"
+    assert world.handle(1, create=False)
+    assert world.comments[1] == [
+        f"{ls.LINK_COMMENT_MARKER}{ls.TRIAGE_COMMENT_MARKER}\nLinear: ZEPH-30"
+    ]
+
+
+def test_pr_naming_its_issue_gets_no_link_comment(world: FakeWorld) -> None:
+    world.add_issue("ZEPH-2", RELEASE)
+    world.add_pr(1, "feature", body="Fixes ZEPH-2")
+    assert world.handle(1)
+    assert not world.comments.get(1)
+
+
+def test_github_issue_reference_shows_the_zeph_issue(world: FakeWorld) -> None:
+    world.add_issue("ZEPH-20")
+    world.attachments[f"https://github.com/{REPO}/issues/86"] = ("ZEPH-20", "links")
+    world.add_pr(1, "feature", body="Closes #86")
+    assert world.handle(1)
+    assert world.handle(1)
+    assert world.comments[1] == [f"{ls.LINK_COMMENT_MARKER}\nLinear: ZEPH-20"]

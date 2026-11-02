@@ -4,7 +4,9 @@ Linear is the source of truth for release planning. A PR inherits the release of
 the ZEPH issue it references: a Linear milestone named ``vX.Y ...`` or
 ``vX.Y.Z ...`` becomes the GitHub milestone ``vX.Y`` or ``vX.Y.Z``. Only that
 version string is ever written to GitHub. A PR that references a GitHub issue
-synced to ZEPH (``Fixes #12``) uses that issue.
+synced to ZEPH (``Fixes #12``) uses that issue. A PR whose own text doesn't
+name its issue gets one bot comment ("Linear: ZEPH-12"), edited as the link
+changes.
 
 An unlinked PR gets a triage issue in the team named by ``LINEAR_TRIAGE_TEAM``,
 which must not be issue-synced to GitHub: an issue created in a two-way synced
@@ -60,6 +62,12 @@ MANAGED_MILESTONE_RE = re.compile(r"^v\d+\.\d+(?:\.\d+)?$")
 # triage team, so once triage moves the issue elsewhere GitHub keeps the record.
 # The comment names no issue: the identifier changes when the issue moves.
 TRIAGE_COMMENT_MARKER = "<!-- linear-sync:triage -->"
+# Marks the bot comment naming the PR's Linear issue. It is edited in place, so a
+# PR never collects more than one; a triage record shares the same comment.
+LINK_COMMENT_MARKER = "<!-- linear-sync:link -->"
+# The author of comments made with the workflow's GITHUB_TOKEN, which can only
+# edit its own.
+BOT_LOGIN = "github-actions[bot]"
 # Link kind of the attachments this script adds for inherited issues. Linear only
 # creates "contributes" links itself from a magic word, which needs an ID in the
 # PR, and attaching by hand in Linear creates "links".
@@ -363,11 +371,53 @@ def _record_triage(client: _Client, pr: dict[str, Any], issue: _LinkedIssue) -> 
     if client.dry_run:
         return
     _link_pr(client, issue.identifier, pr["html_url"], "closes")
-    client.github(
-        "POST",
-        f"/repos/{client.repo}/issues/{pr['number']}/comments",
-        {"body": f"{TRIAGE_COMMENT_MARKER}\nTracked in Linear for triage."},
+    _show_link(client, pr, issue, triaged=True)
+
+
+def _bot_comment(client: _Client, pr: dict[str, Any]) -> dict[str, Any] | None:
+    comments = client.github_paged(
+        f"/repos/{client.repo}/issues/{pr['number']}/comments"
     )
+    for comment in comments:
+        body = comment.get("body") or ""
+        ours = LINK_COMMENT_MARKER in body or TRIAGE_COMMENT_MARKER in body
+        if ours and comment["user"]["login"] == BOT_LOGIN:
+            return comment
+    return None
+
+
+def _show_link(
+    client: _Client, pr: dict[str, Any], issue: _LinkedIssue, triaged: bool = False
+) -> None:
+    existing = _bot_comment(client, pr)
+    # A PR naming its issue itself needs no comment, but one already posted is
+    # kept accurate rather than left stale.
+    if not existing and issue.identifier in _referenced_ids(pr):
+        return
+    markers = LINK_COMMENT_MARKER
+    if triaged or (existing and TRIAGE_COMMENT_MARKER in existing["body"]):
+        markers += TRIAGE_COMMENT_MARKER
+    in_triage = client.triage_team and issue.identifier.startswith(
+        f"{client.triage_team}-"
+    )
+    body = f"{markers}\nLinear: {issue.identifier}{' (in triage)' if in_triage else ''}"
+    if existing and existing["body"] == body:
+        return
+    _log(f"  comment: Linear {issue.identifier}")
+    if client.dry_run:
+        return
+    if existing:
+        client.github(
+            "PATCH",
+            f"/repos/{client.repo}/issues/comments/{existing['id']}",
+            {"body": body},
+        )
+    else:
+        client.github(
+            "POST",
+            f"/repos/{client.repo}/issues/{pr['number']}/comments",
+            {"body": body},
+        )
 
 
 def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | None:
@@ -562,6 +612,8 @@ def _handle(
         return False
     _log(f"  linked to {issue.identifier if issue else '-'}")
     _sync_milestone(client, pr, issue)
+    if issue:
+        _show_link(client, pr, issue)
     return True
 
 
