@@ -666,15 +666,15 @@ def test_binary_serializer_validation_happens_at_shard_open(tmp_path: Path) -> N
 
 
 def _write_chunks(
-    root: Path, *, compression: str | None = None, old_writer: bool = False
+    root: Path, *, compression: str | None = None, payload_only_size: bool = False
 ) -> None:
     writer = _binary_writer_for_samples(root, 2, "pytree", compression=compression)
     for idx in range(6):
         writer.add_item(idx, (idx, f"sample-{idx}" * 8))
     writer.done()
     writer.merge()
-    if old_writer:
-        # LitData before 0.2.40 writes the same files, without the header in this number.
+    if payload_only_size:
+        # Model index sizes that count payload bytes without the binary header.
         index_path = root / "index.json"
         index = json.loads(index_path.read_text())
         for chunk in index["chunks"]:
@@ -689,17 +689,17 @@ def _locators(root: Path) -> list[ShardLocator]:
     return list(handler.build_locators(dataset).values())
 
 
-@pytest.mark.parametrize("old_writer", [False, True])
+@pytest.mark.parametrize("payload_only_size", [False, True])
 @pytest.mark.parametrize(
     ("compression", "keep_zip"),
     [(None, False), ("zstd:3", False), ("zstd:3", True)],
 )
 def test_resume_keeps_every_chunk_and_redownloads_a_truncated_one(
-    tmp_path: Path, old_writer: bool, compression: str | None, keep_zip: bool
+    tmp_path: Path, payload_only_size: bool, compression: str | None, keep_zip: bool
 ) -> None:
     remote = tmp_path / "remote"
     remote.mkdir()
-    _write_chunks(remote, compression=compression, old_writer=old_writer)
+    _write_chunks(remote, compression=compression, payload_only_size=payload_only_size)
     locators = _locators(remote)
     catalogs = catalog_set_from_locators(locators, tmp_path / "catalogs")
     cache = tmp_path / "cache"

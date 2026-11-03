@@ -210,11 +210,11 @@ def _derive_raw_basename(basename: str, compression: str) -> str:
 def _stored_sizes(
     storage: StorageBackend, root: str, shard_id: Any, meta: Mapping[str, Any]
 ) -> tuple[int, int]:
-    """Return a chunk's ``(raw_bytes, stored_bytes)``, read from the store.
+    """Return a chunk's ``(raw_bytes, stored_bytes)`` from storage metadata.
 
-    ``chunk_bytes`` leaves out the chunk header before LitData 0.2.40, and the index
-    does not record its writer. Only a chunk with a separate decoded file is one whole
-    frame: newer writers keep the plain name, even when they compress inside the file.
+    Index ``chunk_bytes`` may exclude binary headers, so it is not an exact file
+    size. For whole-file Zstd compression, read the decoded size from the frame
+    header. Files with in-file compression retain their stored size.
     """
     basename = _extract_chunk_basename(meta["chunk"], shard_id)
     path = os.path.join(root, basename)
@@ -451,7 +451,7 @@ class LitDataFormat(FormatHandler):
             raise ValueError("LitData backend missing shard metadata")
 
         measure = partial(_stored_sizes, RouterStorageBackend(), path)
-        # Same cap as _discover_from_files: on S3, 3780 stats took about 3s at this width.
+        # Bound concurrent metadata requests to avoid overwhelming remote storage.
         with ThreadPoolExecutor(max_workers=32) as executor:
             sizes = list(executor.map(measure, shards_meta, shards_meta.values()))
 
