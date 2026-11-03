@@ -813,6 +813,7 @@ class TokenizeText(TokenizeBase):
         backend = self.return_tensors
         if backend is None:
             return value
+        empty = not hasattr(value, "shape") and len(value) == 0
         src_mod = type(value).__module__
         if backend == "pt":
             torch = self._lazy_import("torch")
@@ -827,24 +828,24 @@ class TokenizeText(TokenizeBase):
                     return torch.from_numpy(value)
             if _should_use_tensor_lock():
                 np = self._lazy_import("numpy")
-                arr = np.asarray(value)
+                arr = np.asarray(value, dtype=np.int64 if empty else None)
                 with _tensor_lock_ctx():
                     return torch.from_numpy(arr)
             with _tensor_lock_ctx():
-                return torch.tensor(value)
+                return torch.tensor(value, dtype=torch.int64 if empty else None)
         if backend in ("np", "numpy"):
             np = self._lazy_import("numpy")
             return (
                 value
                 if hasattr(value, "shape") and "numpy" in src_mod
-                else np.asarray(value)
+                else np.asarray(value, dtype=np.int64 if empty else None)
             )
         if backend == "tf":
             tf = self._lazy_import("tensorflow")
             return (
                 value
                 if hasattr(value, "shape") and "tensorflow" in src_mod
-                else tf.convert_to_tensor(value)
+                else tf.convert_to_tensor(value, dtype=tf.int32 if empty else None)
             )
         raise ValueError(f"Unsupported return_tensors backend: {backend}")
 
