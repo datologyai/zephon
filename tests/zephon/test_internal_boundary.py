@@ -113,6 +113,7 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.io.storage:HFBackend",
             "zephon._internal.io.storage._hf_uri:parse_hf_uri",
             "zephon._internal.io.storage.hf:_DATASETS_SERVER_PARQUET_URL",
+            "zephon._internal.io.storage.hf:_xet_downloads_supported",
         }
     ),
     # OFD locking has no public seam; integration coverage exercises OS behavior.
