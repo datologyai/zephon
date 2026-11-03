@@ -542,5 +542,4 @@ __all__ = [
     "ParquetRGCacheOptions",
     "StoreOptions",
     "VortexOptions",
-    "parse_size_bytes",
 ]

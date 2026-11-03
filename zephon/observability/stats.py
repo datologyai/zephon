@@ -965,7 +965,6 @@ __all__ = [
     "FetchTimingDelta",
     "FetchTimingSummary",
     "FetchTimingTotals",
-    "NodeMetricsDelta",
     "NodeSummary",
     "PipelineSummary",
     "PrefetchTimingDelta",

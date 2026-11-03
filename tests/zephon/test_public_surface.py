@@ -171,7 +171,6 @@ EXPECTED_ALL = {
         "dump_semaphore_registry",
     ],
     "zephon.debug.semaphore_tracker": [
-        "RegistrationInfo",
         "dump_semaphore_leak_report",
         "install_debug_hooks",
     ],
@@ -192,7 +191,6 @@ EXPECTED_ALL = {
         "ParquetRGCacheOptions",
         "StoreOptions",
         "VortexOptions",
-        "parse_size_bytes",
     ],
     "zephon.observability.config": [
         "ExecutionTrackingMode",
@@ -207,7 +205,6 @@ EXPECTED_ALL = {
         "FetchTimingDelta",
         "FetchTimingSummary",
         "FetchTimingTotals",
-        "NodeMetricsDelta",
         "NodeSummary",
         "PipelineSummary",
         "PrefetchTimingDelta",
@@ -272,15 +269,10 @@ EXPECTED_ALL = {
         "MixtureSpec",
     ],
     "zephon.work.static_mixture": [
-        "ShuffleBlockSpec",
         "StaticMixtureWorkSource",
     ],
     "zephon.work.token_estimation": [
-        "DEFAULT_FALLBACK_TOKENS_PER_BYTE",
-        "PerShardTokenCost",
         "TokenEstimation",
-        "TokenRatio",
-        "prime_token_ratios",
     ],
 }
 

@@ -2786,4 +2786,4 @@ class StaticMixtureWorkSource(WorkSource):
         self._recompute_total_samples()
 
 
-__all__ = ["ShuffleBlockSpec", "StaticMixtureWorkSource"]
+__all__ = ["StaticMixtureWorkSource"]

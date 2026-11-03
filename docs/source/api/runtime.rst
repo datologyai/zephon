@@ -25,6 +25,12 @@ Observability
    :members:
    :show-inheritance:
 
+.. autoclass:: zephon.observability.stats.StageSummary
+   :members:
+
+.. autoclass:: zephon.observability.stats.NodeSummary
+   :members:
+
 Validation
 ----------
 
