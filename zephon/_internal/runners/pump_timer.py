@@ -106,6 +106,26 @@ class PumpTimer(PumpCounts):
         return delta
 
 
+# Bucket -> attribute names, built once: _Measure is created on the pump hot
+# path, where per-call f-strings were a measurable share of its cost.
+_BUCKET_ATTRS: dict[str, str] = {}
+_EXCLUDE_ATTRS: dict[tuple[str, ...], tuple[str, ...]] = {}
+
+
+def _bucket_attr(bucket: str) -> str:
+    attr = _BUCKET_ATTRS.get(bucket)
+    if attr is None:
+        attr = _BUCKET_ATTRS[bucket] = f"{bucket}_ns"
+    return attr
+
+
+def _exclude_attrs(exclude: tuple[str, ...]) -> tuple[str, ...]:
+    attrs = _EXCLUDE_ATTRS.get(exclude)
+    if attrs is None:
+        attrs = _EXCLUDE_ATTRS[exclude] = tuple(f"{e}_ns" for e in exclude)
+    return attrs
+
+
 class _Measure:
     """Context manager returned by :meth:`PumpTimer.measure[_excluding]`.
 
@@ -118,34 +138,32 @@ class _Measure:
 
     def __init__(self, timer: PumpTimer, bucket: str, exclude: tuple[str, ...]):
         self._p = timer
-        self._bucket_attr = f"{bucket}_ns"
-        self._exclude_attrs = tuple(f"{e}_ns" for e in exclude)
+        self._bucket_attr = _bucket_attr(bucket)
+        self._exclude_attrs = _exclude_attrs(exclude) if exclude else ()
         self._t0 = 0
         self._exclude_before: tuple[int, ...] = ()
 
     def __enter__(self) -> "_Measure":
         if not self._p.enabled:
             return self
-        self._t0 = time.perf_counter_ns()
         if self._exclude_attrs:
-            self._exclude_before = tuple(
-                getattr(self._p, attr) for attr in self._exclude_attrs
-            )
+            p = self._p
+            self._exclude_before = tuple([getattr(p, a) for a in self._exclude_attrs])
+        self._t0 = time.perf_counter_ns()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if not self._p.enabled:
+        p = self._p
+        if not p.enabled:
             return
         elapsed = time.perf_counter_ns() - self._t0
         if self._exclude_attrs:
-            deltas = sum(
-                getattr(self._p, attr) - before
-                for attr, before in zip(self._exclude_attrs, self._exclude_before)
-            )
-            elapsed = max(0, elapsed - deltas)
-        setattr(
-            self._p, self._bucket_attr, getattr(self._p, self._bucket_attr) + elapsed
-        )
+            for attr, before in zip(self._exclude_attrs, self._exclude_before):
+                elapsed -= getattr(p, attr) - before
+            if elapsed < 0:
+                elapsed = 0
+        attr = self._bucket_attr
+        setattr(p, attr, getattr(p, attr) + elapsed)
 
 
 # Singleton returned by PumpTimer.measure/measure_excluding when disabled,
