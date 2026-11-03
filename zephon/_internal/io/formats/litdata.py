@@ -7,8 +7,8 @@ import struct
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from functools import partial
 from pathlib import Path
+from random import SystemRandom
 from typing import TYPE_CHECKING, Any, Iterator, cast
 
 import numpy as np
@@ -196,7 +196,7 @@ def _normalize_hashes(value: Any) -> dict[str, str]:
     return {str(k): str(v) for k, v in value.items()}
 
 
-def _derive_raw_basename(basename: str, compression: str) -> str:
+def _derive_raw_basename(basename: str, compression: str | None) -> str:
     """Return the expected raw chunk basename for a compressed chunk."""
     if not basename or not compression:
         return basename
@@ -207,24 +207,64 @@ def _derive_raw_basename(basename: str, compression: str) -> str:
     return basename
 
 
-def _stored_sizes(
+def _raw_size(
     storage: StorageBackend, root: str, shard_id: Any, meta: Mapping[str, Any]
-) -> tuple[int, int]:
-    """Return a chunk's ``(raw_bytes, stored_bytes)`` from storage metadata.
-
-    Index ``chunk_bytes`` may exclude binary headers, so it is not an exact file
-    size. For whole-file Zstd compression, read the decoded size from the frame
-    header. Files with in-file compression retain their stored size.
-    """
+) -> int:
+    """Read the size of the file the cache will retain after decompression."""
     basename = _extract_chunk_basename(meta["chunk"], shard_id)
     path = os.path.join(root, basename)
-    stored_bytes = int(storage.stat(path)["size"])
     compression = meta["config"].get("compression")
     if _derive_raw_basename(basename, compression) == basename:
-        return stored_bytes, stored_bytes
+        return int(storage.stat(path)["size"])
     # 18 bytes is the zstd magic number plus the largest frame header (RFC 8878).
     frame = storage.read_range(path, 0, length=18)
-    return require_zstd().get_frame_info(frame).decompressed_size, stored_bytes
+    raw_bytes = require_zstd().get_frame_info(frame).decompressed_size
+    if raw_bytes is None:
+        raise ValueError(f"LitData chunk {path!r} has no size in its Zstd frame header")
+    return raw_bytes
+
+
+def _index_omits_header(
+    storage: StorageBackend, root: str, shards: Mapping[Any, Any]
+) -> bool:
+    """Infer the index size convention from up to two distinct random chunks.
+
+    A binary chunk header contains a uint32 item count and chunk_size + 1
+    uint32 offsets. Sampled sizes must either all include that header or all
+    omit it. Sampling does not validate the unsampled chunks.
+    """
+    samples = SystemRandom().sample(list(shards.items()), k=min(2, len(shards)))
+    conventions: set[bool] = set()
+    observations: list[str] = []
+    for shard_id, meta in samples:
+        chunk = meta["chunk"]
+        path = os.path.join(root, _extract_chunk_basename(chunk, shard_id))
+        indexed_bytes = int(chunk["chunk_bytes"])
+        header_bytes = 4 * (int(chunk["chunk_size"]) + 2)
+        raw_bytes = _raw_size(storage, root, shard_id, meta)
+        observation = (
+            f"{path!r}: chunk_bytes={indexed_bytes}, "
+            f"header_bytes={header_bytes}, actual_raw_bytes={raw_bytes}"
+        )
+        if raw_bytes == indexed_bytes:
+            conventions.add(False)
+        elif raw_bytes == indexed_bytes + header_bytes:
+            conventions.add(True)
+        else:
+            raise ValueError(
+                f"Cannot infer LitData index size convention: {observation}. "
+                "Expected chunk_bytes to include the header or omit exactly "
+                "the header size; the chunk or its index metadata may be invalid."
+            )
+        observations.append(observation)
+    if len(conventions) > 1:
+        raise ValueError(
+            "Inconsistent LitData index size conventions in sampled chunks: "
+            + "; ".join(observations)
+            + ". One includes the header and the other omits it; "
+            "the dataset may mix exports with different size conventions."
+        )
+    return True in conventions
 
 
 def _normalize_config(raw: Mapping[str, Any]) -> _StreamingTemplateDict:
@@ -450,19 +490,38 @@ class LitDataFormat(FormatHandler):
         if not isinstance(shards_meta, Mapping):
             raise ValueError("LitData backend missing shard metadata")
 
-        measure = partial(_stored_sizes, RouterStorageBackend(), path)
-        # Bound concurrent metadata requests to avoid overwhelming remote storage.
-        with ThreadPoolExecutor(max_workers=32) as executor:
-            sizes = list(executor.map(measure, shards_meta, shards_meta.values()))
+        storage = RouterStorageBackend()
+        omits_header = _index_omits_header(storage, path, shards_meta)
+
+        stored_sizes: dict[Any, int] = {}
+        compressed_paths: dict[Any, str] = {}
+        for shard_id, meta in shards_meta.items():
+            basename = _extract_chunk_basename(meta["chunk"], shard_id)
+            compression = meta["config"].get("compression")
+            if _derive_raw_basename(basename, compression) != basename:
+                zip_bytes = meta["chunk"].get("chunk_zip_bytes")
+                if isinstance(zip_bytes, (int, float)):
+                    stored_sizes[shard_id] = int(zip_bytes)
+                else:
+                    compressed_paths[shard_id] = os.path.join(path, basename)
+        if compressed_paths:
+            # Compressed sizes are independent of the index's raw size convention.
+            with ThreadPoolExecutor(max_workers=32) as executor:
+                stats = executor.map(storage.stat, compressed_paths.values())
+                stored_sizes.update(
+                    (shard_id, int(stat["size"]))
+                    for shard_id, stat in zip(compressed_paths, stats)
+                )
 
         locators: dict[int, ShardLocator] = {}
-        for (shard_id_obj, meta), (raw_bytes, stored_bytes) in zip(
-            shards_meta.items(), sizes
-        ):
+        for shard_id_obj, meta in shards_meta.items():
             shard_id = int(shard_id_obj)
             config = meta["config"]
             chunk = meta["chunk"]
             interval = meta.get("interval")
+            raw_bytes = int(chunk["chunk_bytes"])
+            if omits_header:
+                raw_bytes += 4 * (int(chunk["chunk_size"]) + 2)
 
             basename = _extract_chunk_basename(chunk, shard_id)
             hashes = _normalize_hashes(chunk.get("hashes"))
@@ -475,7 +534,7 @@ class LitDataFormat(FormatHandler):
                 raw_basename = _derive_raw_basename(basename, compression)
                 zip_file = ShardFile(
                     basename=basename,
-                    bytes=stored_bytes,
+                    bytes=stored_sizes.get(shard_id_obj, raw_bytes),
                     hashes=hashes,
                 )
 
