@@ -640,14 +640,19 @@ class HFBackend(OpenViaDownloadMixin):
         return rpath, size
 
     def _get_hffs(self) -> Any:
-        """Return a process-wide ``HfFileSystem``, so threads share its listings."""
+        """Return a process-wide ``HfFileSystem``, so threads share its listings.
+
+        It uses the same host as the rest of this backend, so the lookup, the
+        Xet token request and the ``http_get`` fallback ignore ``HF_ENDPOINT``
+        alike.
+        """
         token = self._get_token()
         with _memo_lock:
             fs = _hffs.get(token)
             if fs is None:
                 from huggingface_hub import HfFileSystem
 
-                fs = _hffs[token] = HfFileSystem(token=token)
+                fs = _hffs[token] = HfFileSystem(token=token, endpoint=_HUB_URL)
         return fs
 
     def _download_xet(self, rpath: str, size: int, src: str, dst: str) -> bool:

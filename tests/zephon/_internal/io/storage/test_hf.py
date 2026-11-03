@@ -841,7 +841,8 @@ class TestXetDownload:
 
         created: list[str | None] = []
 
-        def recording_fs(token: str | None) -> object:
+        def recording_fs(token: str | None, endpoint: str) -> object:
+            assert endpoint == hf_mod._HUB_URL
             created.append(token)
             return object()
 
@@ -853,6 +854,16 @@ class TestXetDownload:
         assert HFBackend()._get_hffs() is first
         assert HFBackend()._get_hffs() is not first
         assert created == ["a", "b"]
+
+
+@requires_hf_hub
+def test_filesystem_ignores_hf_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    from huggingface_hub import constants
+
+    monkeypatch.setattr(constants, "ENDPOINT", "https://mirror.example")
+    monkeypatch.setattr(HFBackend, "_get_token", lambda self: None)
+    fs = HFBackend()._get_hffs()
+    assert fs.endpoint == hf_mod._HUB_URL
 
 
 @requires_hf_hub
