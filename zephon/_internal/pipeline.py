@@ -851,6 +851,13 @@ class Pipeline:
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
+        """Tokenize a text field.
+
+        Array outputs preserve the dtype supplied by the tokenizer, which may be
+        unsigned; Python lists use the requested framework's dtype inference.
+        Dtype conversion for training should normally happen in ``to_training()``
+        or a custom map op.
+        """
         op = TokenizeText(
             tokenizer,
             tokenizer_id,

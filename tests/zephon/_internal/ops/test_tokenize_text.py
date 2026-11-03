@@ -39,6 +39,100 @@ def test_eos_string_loading_and_numeric_insertion(tmp_path: Any) -> None:
     assert counter.count({"text": "hello <|sep|>"}) == len(result.payload["input_ids"])
 
 
+class _Uint32Tokenizer:
+    name_or_path = "uint32-rows"
+    bos_token_id = 0
+    eos_token_id = 1
+    pad_token_id = 2
+    bos_token = "<bos>"
+    eos_token = "<eos>"
+    pad_token = "<pad>"
+    _supports_numpy_rows = True
+
+    def __call__(self, texts: list[str], **kwargs: Any) -> dict[str, Any]:
+        import numpy as np
+
+        self.kwargs = kwargs
+        ids = [list(range(4, 4 + len(text.split()))) for text in texts]
+        masks = [[1] * len(row) for row in ids]
+        if kwargs.get("return_numpy"):
+            ids = [np.asarray(row, dtype=np.uint32) for row in ids]
+            masks = [np.asarray(row, dtype=np.uint32) for row in masks]
+            for row in ids + masks:
+                row.flags.writeable = False
+        self.rows = {"input_ids": ids, "attention_mask": masks}
+        return self.rows
+
+
+@pytest.mark.parametrize("backend", [None, "np", "pt"])
+def test_numpy_row_capability_preserves_ragged_output_and_buffer_dtype(
+    backend: str | None,
+) -> None:
+    import numpy as np
+
+    torch = pytest.importorskip("torch") if backend == "pt" else None
+    tokenizer = _Uint32Tokenizer()
+    op = _setup(
+        TokenizeText(
+            tokenizer=tokenizer,
+            field="text",
+            special_tokens="none",
+            return_tensors=backend,
+        )
+    )
+    records = op.process_many([_rec("a b"), _rec("a"), _rec("")])
+    assert tokenizer.kwargs.get("return_numpy", False) is (backend is not None)
+    assert "return_tensors" not in tokenizer.kwargs
+    for i, expected in enumerate(([4, 5], [4], [])):
+        payload = _payload_dict(records[i])
+        for field, values in (
+            ("input_ids", expected),
+            ("attention_mask", [1] * len(expected)),
+        ):
+            actual = payload[field]
+            if backend is None:
+                assert isinstance(actual, list)
+                assert actual == values
+            else:
+                assert actual.tolist() == values
+                assert actual.shape == (len(values),)
+                original = tokenizer.rows[field][i]
+                if backend == "np":
+                    assert actual.dtype == np.uint32
+                    assert actual is original
+                else:
+                    assert actual.dtype == torch.uint32
+                    if values:
+                        assert actual.data_ptr() == original.ctypes.data
+
+
+def test_numpy_row_capability_supports_bracketing_split_and_padding() -> None:
+    import numpy as np
+
+    op = _setup(
+        TokenizeText(
+            tokenizer=_Uint32Tokenizer(),
+            field="text",
+            special_tokens="bos_eos",
+            return_tensors="np",
+            split_long_samples=True,
+            max_length=3,
+            padding="max_length",
+        )
+    )
+    records = op.process_one(_rec("a b c"))
+    assert [record.payload["input_ids"].tolist() for record in records] == [
+        [0, 4, 5],
+        [6, 1, 2],
+    ]
+    assert [record.payload["attention_mask"].tolist() for record in records] == [
+        [1, 1, 1],
+        [1, 1, 0],
+    ]
+    assert all(record.payload["input_ids"].dtype == np.uint32 for record in records)
+    assert [record.meta.lineage for record in records] == [(0,), (1,)]
+
+
 def _setup(
     op: TokenizeText,
     ctx_data: dict[str, object] | None = None,
@@ -1839,14 +1933,8 @@ def test_bracket_one_std_existing_mask_extended() -> None:
     assert new_mask == [1, 1, 1, 1]
 
 
-def test_bracket_mode_runs_in_python_lists_then_converts() -> None:
-    """In bracket mode the operator does *not* ask HF for tensors — it pulls
-    lists from HF, brackets/pads in Python (one allocation-free path that
-    works regardless of whether the batch is ragged), and converts to the
-    user's requested backend at the end. The per-backend bracket helpers
-    (``_bracket_numpy`` / ``_bracket_torch`` / ``_bracket_tf``) only fire as
-    a safety net for user-provided tokenizers that emit a backend regardless
-    of the ``return_tensors`` kwarg we passed (which is ``None`` here)."""
+def test_list_tokenizer_brackets_before_output_conversion() -> None:
+    """Bracket list outputs before converting the record to the requested backend."""
     np = pytest.importorskip("numpy")
 
     op = _setup(

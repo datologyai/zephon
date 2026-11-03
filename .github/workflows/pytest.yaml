@@ -102,6 +102,49 @@ jobs:
       with:
         path: .venv
         key: venv-unit-${{ matrix.python_version }}-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+  tokenizers-v1:
+    name: Tokenizers v1 (${{ matrix.python_version }}, ${{ matrix.tokenizers_version }})
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python_version: ["3.10", "3.14t"]
+        tokenizers_version: ["1.0.0rc1", "1.0.0rc2", "1.0.0rc3"]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python_version }}
+        allow-prereleases: true
+        freethreaded: ${{ endsWith(matrix.python_version, 't') }}
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.11.15"
+    - name: Setup tokenizers v1 and Transformers parity reference
+      run: |
+        uv sync --python ${{ matrix.python_version }} --group dev
+        uv venv --python 3.10 "$RUNNER_TEMP/transformers-reference"
+        uv pip install --python "$RUNNER_TEMP/transformers-reference/bin/python" transformers "tokenizers<1"
+        uv pip install transformers pytest-timeout \
+          "${{ matrix.python_version == '3.10' && 'torch==2.5.0' || 'torch' }}"
+        # Keep real Transformers installed to detect when its v1 support arrives.
+        uv pip install --no-deps "tokenizers==${{ matrix.tokenizers_version }}"
+    - name: Run tokenizer and pipeline tests
+      env:
+        PYTHON_GIL: ${{ endsWith(matrix.python_version, 't') && '0' || '' }}
+        TRANSFORMERS_REFERENCE_PYTHON: ${{ runner.temp }}/transformers-reference/bin/python
+      run: |
+        uv run --no-sync pytest \
+          tests/zephon/_internal/utils/test_tokenizer.py \
+          tests/zephon/_internal/utils/test_tokenizer_v1.py \
+          tests/zephon/_internal/ops/test_tokenize_base.py \
+          tests/zephon/_internal/ops/test_tokenize_text.py \
+          tests/zephon/_internal/test_token_counting.py \
+          tests/zephon/test_pipeline_tokenize_decode.py \
+          tests/zephon/test_validation.py --maxfail=5
+        uv run --no-sync pytest --run-integration \
+          tests/integration/test_token_aware_mixture.py::test_saved_tokenizer_token_mixing_and_training --maxfail=1
+
   lowest-bounds:
     # Installs the OLDEST versions allowed by pyproject.toml (instead of uv.lock)
     # to verify the declared `>=` floors; on failure, bump the offending floor.

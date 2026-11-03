@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
@@ -20,6 +21,130 @@ from zephon._internal.utils.tokenizer_cloud import (
     TransientCloudTokenizerError,
     resolve_tokenizer_id_with_retry,
 )
+
+
+@pytest.mark.parametrize("installed", ["0.23.3", "1.0.0rc3"])
+def test_loader_prefers_importable_transformers(
+    installed: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zephon._internal.utils import tokenizer as shared
+
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def loader(provider: str) -> Any:
+        def load(source: str, **kwargs: Any) -> Any:
+            calls.append((provider, source, kwargs))
+            return fallback_tokenizer()
+
+        return load
+
+    monkeypatch.setattr(shared, "version", lambda package: installed)
+    _install_fake_transformers(monkeypatch, loader("hf"))
+    _install_fake_v1_loader(monkeypatch, loader("v1"))
+    shared.load_hf_tokenizer("model/name", eos_token="<end>")
+    assert calls == [("hf", "model/name", {"use_fast": True, "eos_token": "<end>"})]
+
+
+def test_text_fallback_needs_no_installed_tokenizers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zephon._internal.utils import tokenizer as shared
+
+    def missing(package: str) -> str:
+        raise shared.PackageNotFoundError(package)
+
+    monkeypatch.setattr(shared, "version", missing)
+    assert not shared._tokenizers_v1_installed()
+    assert shared.load_hf_tokenizer(None).eos_token == 2
+    with pytest.raises(ValueError, match="fallback"):
+        shared.load_hf_tokenizer("__fallback__", eos_token="<end>")
+
+
+@pytest.mark.parametrize("installed", ["0.23.3", "1.0.0rc3"])
+def test_loader_falls_back_for_v1_import_error_and_resolves_cloud(
+    installed: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import builtins
+
+    from zephon._internal.utils import tokenizer as shared
+
+    original_import = builtins.__import__
+    calls: list[str] = []
+
+    def incompatible(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "transformers":
+            raise ImportError("AddedToken is unavailable")
+        return original_import(name, *args, **kwargs)
+
+    def load_v1(source: str, **kwargs: Any) -> Any:
+        calls.append(source)
+        assert kwargs == {"use_fast": True, "eos_token": "<end>"}
+        return _Tok()
+
+    # The package is installed, but its dependency check prevents importing it.
+    monkeypatch.setitem(sys.modules, "transformers", types.ModuleType("transformers"))
+    monkeypatch.setattr(shared, "version", lambda package: installed)
+    _install_fake_v1_loader(monkeypatch, load_v1)
+    monkeypatch.setattr(
+        "zephon._internal.utils.tokenizer_cloud.resolve_tokenizer_id_with_retry",
+        lambda source: "/resolved/tokenizer",
+    )
+    monkeypatch.setattr(builtins, "__import__", incompatible)
+    if installed.startswith("1."):
+        assert isinstance(
+            shared.load_hf_tokenizer("s3://bucket/tokenizer", eos_token="<end>"), _Tok
+        )
+        assert calls == ["/resolved/tokenizer"]
+        assert caplog.record_tuples == [
+            (
+                shared.__name__,
+                logging.WARNING,
+                "Using the tokenizers v1 workaround because Transformers cannot import; "
+                "saved tokenizer configuration replaces Transformers class defaults: "
+                "AddedToken is unavailable",
+            )
+        ]
+    else:
+        with pytest.raises(ImportError, match="AddedToken"):
+            shared.load_hf_tokenizer("model/name")
+        assert calls == []
+        assert not caplog.records
+
+
+@pytest.mark.parametrize("error_type", [ValueError, ImportError])
+def test_v1_loader_permanent_errors_are_not_retried(
+    error_type: type[Exception],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import builtins
+
+    from zephon._internal.utils import tokenizer as shared
+
+    original_import = builtins.__import__
+    attempts = 0
+
+    def unavailable(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "transformers":
+            raise ImportError("Transformers unavailable")
+        return original_import(name, *args, **kwargs)
+
+    def rejected(source: str, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        raise error_type("cannot load tokenizer")
+
+    _install_fake_v1_loader(monkeypatch, rejected)
+    monkeypatch.setattr(shared, "version", lambda package: "1.0.0rc3")
+    monkeypatch.setattr(builtins, "__import__", unavailable)
+    monkeypatch.setattr(
+        "tenacity.nap.time",
+        types.SimpleNamespace(sleep=lambda _: pytest.fail("retried")),
+    )
+    with pytest.raises(error_type, match="cannot load tokenizer"):
+        shared.load_hf_tokenizer("model/name")
+    assert attempts == 1
 
 
 def test_fallback_content_ids_avoid_reserved_range() -> None:
@@ -56,6 +181,12 @@ def test_fallback_rejects_unknown_return_tensors() -> None:
 # ---------------------------------------------------------------------------
 # load_hf_tokenizer
 # ---------------------------------------------------------------------------
+
+
+def _install_fake_v1_loader(monkeypatch: pytest.MonkeyPatch, load: Any) -> None:
+    module = types.ModuleType("zephon._internal.utils.tokenizer_v1")
+    module.load_v1_tokenizer = load
+    monkeypatch.setitem(sys.modules, module.__name__, module)
 
 
 def _install_fake_transformers(

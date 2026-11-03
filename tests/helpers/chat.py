@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 
-transformers = pytest.importorskip("transformers")
+try:
+    import transformers
+except ImportError as exc:
+    pytest.skip(str(exc), allow_module_level=True)
 tokenizers = pytest.importorskip("tokenizers")
 
 
