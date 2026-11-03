@@ -1,7 +1,9 @@
 import inspect
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -9,11 +11,15 @@ import pytest
 pytest.importorskip("litdata")
 from litdata.streaming.writer import BinaryWriter
 
-from tests._catalog_helpers import catalog_locators
+from tests._catalog_helpers import catalog_locators, catalog_set_from_locators
 from tests._helpers import counts_dict
 from tests.helpers.litdata_chunks import write_litdata_fixture
 from tests.helpers.storage import _install_obstore_stubs
+from zephon._internal.io.catalog import DatasetHeader
+from zephon._internal.io.catalog import handle as catalog_handle
+from zephon._internal.io.catalog.handle import ShardCatalogHandle, finalize
 from zephon._internal.io.formats import ensure_builtin_formats
+from zephon._internal.io.formats import litdata as litdata_format
 from zephon._internal.io.formats.base import get_format
 from zephon._internal.io.formats.litdata import (
     LitDataFormat,
@@ -27,10 +33,12 @@ from zephon._internal.io.formats.litdata_support.pytree import (
     TokensLoader,
 )
 from zephon._internal.io.resolvers import DirectResolver
+from zephon._internal.io.resolvers.cache import CacheManager
 from zephon._internal.io.storage import LocalFSBackend
 from zephon._internal.io.storage.base import StorageBackend
 from zephon._internal.io.storage.s3 import S3Backend
-from zephon._internal.io.types import LocalShardFile, LocalShardRef
+from zephon._internal.io.types import LocalShardFile, LocalShardRef, ShardLocator
+from zephon._internal.utils.compression import require_zstd
 from zephon.io.dataset import Dataset
 
 
@@ -643,7 +651,7 @@ def test_truncated_arrow_chunk_does_not_dispatch_to_binary(
         pytest.fail("Incomplete Arrow chunk was dispatched to the binary decoder")
 
     monkeypatch.setattr(dependencies, "_get_serializers", fail)
-    with pytest.raises(FileNotFoundError, match="not found or incomplete"):
+    with pytest.raises(ValueError, match="Cannot infer LitData index size convention"):
         _open_shard(tmp_path)
 
 
@@ -658,3 +666,294 @@ def test_binary_serializer_validation_happens_at_shard_open(tmp_path: Path) -> N
     assert sizes == {0: 1}
     with pytest.raises(KeyError, match="unknown_serializer"):
         _open_shard(tmp_path)
+
+
+def _write_chunks(
+    root: Path,
+    *,
+    compression: str | None = None,
+    payload_only_size: bool = False,
+    num_samples: int = 6,
+) -> None:
+    writer = _binary_writer_for_samples(root, 2, "pytree", compression=compression)
+    for idx in range(num_samples):
+        writer.add_item(idx, (idx, f"sample-{idx}" * 8))
+    writer.done()
+    writer.merge()
+    if payload_only_size:
+        # Model index sizes that count payload bytes without the binary header.
+        index_path = root / "index.json"
+        index = json.loads(index_path.read_text())
+        for chunk in index["chunks"]:
+            chunk["chunk_bytes"] -= 4 * (chunk["chunk_size"] + 2)
+        index_path.write_text(json.dumps(index))
+
+
+def _locators(root: Path) -> list[ShardLocator]:
+    handler = LitDataFormat()
+    _, metadata = handler.discover(str(root), LocalFSBackend(root=root))
+    dataset = Dataset("lit", {"kind": "litdata", "path": str(root), "shards": metadata})
+    return list(handler.build_locators(dataset).values())
+
+
+@pytest.mark.parametrize("payload_only_size", [False, True])
+@pytest.mark.parametrize("compression", [None, "zstd:3"])
+def test_size_convention_probes_only_two_distinct_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload_only_size: bool,
+    compression: str | None,
+) -> None:
+    _write_chunks(
+        tmp_path,
+        compression=compression,
+        payload_only_size=payload_only_size,
+        num_samples=7,
+    )
+    storage = Mock(wraps=LocalFSBackend(root=tmp_path))
+    monkeypatch.setattr(litdata_format, "RouterStorageBackend", lambda: storage)
+    locators = _locators(tmp_path)
+
+    assert len(locators) == 4
+    probes = (
+        storage.read_range.call_args_list
+        if compression
+        else storage.stat.call_args_list
+    )
+    assert len(probes) == 2
+    assert len({call.args[0] for call in probes}) == 2
+    storage.download.assert_not_called()
+    storage.open.assert_not_called()
+    if compression:
+        assert storage.stat.call_count == len(locators)
+        assert all(
+            call.args[1] == 0 and call.kwargs == {"length": 18} for call in probes
+        )
+    else:
+        storage.read_range.assert_not_called()
+
+    for locator in locators:
+        if locator.zip is None:
+            assert locator.raw.bytes == (tmp_path / locator.raw.basename).stat().st_size
+        else:
+            data = (tmp_path / locator.zip.basename).read_bytes()
+            assert locator.zip.bytes == len(data)
+            assert locator.raw.bytes == len(require_zstd().decompress(data))
+
+
+@pytest.mark.parametrize("compression", [None, "zstd:3"])
+def test_conflicting_size_conventions_fail_initialization(
+    tmp_path: Path, compression: str | None
+) -> None:
+    _write_chunks(tmp_path, compression=compression, num_samples=3)
+    index_path = tmp_path / "index.json"
+    index = json.loads(index_path.read_text())
+    first, second = index["chunks"]
+    first["chunk_bytes"] -= 4 * (first["chunk_size"] + 2)
+    index_path.write_text(json.dumps(index))
+
+    header = DatasetHeader(
+        name="lit", root=str(tmp_path), format="litdata", path=str(tmp_path)
+    )
+    with pytest.raises(
+        ValueError, match="Inconsistent LitData index size conventions"
+    ) as exc:
+        ShardCatalogHandle(dataset=header).ensure_attached()
+    message = str(exc.value)
+    assert first["filename"] in message and second["filename"] in message
+    assert "includes the header" in message and "omits it" in message
+    assert "chunk_bytes=" in message and "actual_raw_bytes=" in message
+
+
+@pytest.mark.parametrize("compression", [None, "zstd:3"])
+def test_unrecognized_size_convention_fails_initialization(
+    tmp_path: Path, compression: str | None
+) -> None:
+    _write_chunks(tmp_path, compression=compression, num_samples=1)
+    index_path = tmp_path / "index.json"
+    index = json.loads(index_path.read_text())
+    chunk = index["chunks"][0]
+    chunk["chunk_bytes"] += 1
+    index_path.write_text(json.dumps(index))
+
+    with pytest.raises(
+        ValueError, match="Cannot infer LitData index size convention"
+    ) as exc:
+        _locators(tmp_path)
+    message = str(exc.value)
+    assert chunk["filename"] in message
+    assert "header_bytes=12" in message
+    assert f"chunk_bytes={chunk['chunk_bytes']}" in message
+
+
+@pytest.mark.parametrize("payload_only_size", [False, True])
+def test_single_chunk_size_convention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload_only_size: bool
+) -> None:
+    _write_chunks(tmp_path, payload_only_size=payload_only_size, num_samples=1)
+    storage = Mock(wraps=LocalFSBackend(root=tmp_path))
+    monkeypatch.setattr(litdata_format, "RouterStorageBackend", lambda: storage)
+
+    [locator] = _locators(tmp_path)
+
+    assert locator.raw.bytes == (tmp_path / locator.raw.basename).stat().st_size
+    assert storage.stat.call_count == 1
+
+
+def test_empty_index_does_not_probe_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = Mock()
+    monkeypatch.setattr(litdata_format, "RouterStorageBackend", lambda: storage)
+    dataset = Dataset("lit", {"kind": "litdata", "path": str(tmp_path), "shards": {}})
+
+    assert LitDataFormat().build_locators(dataset) == {}
+    assert storage.mock_calls == []
+
+
+@pytest.mark.parametrize("payload_only_size", [False, True])
+@pytest.mark.parametrize("compression", [None, "zstd:3"])
+def test_catalog_fingerprint_does_not_depend_on_sampled_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload_only_size: bool,
+    compression: str | None,
+) -> None:
+    root = tmp_path / "remote"
+    _write_chunks(
+        root,
+        compression=compression,
+        payload_only_size=payload_only_size,
+        num_samples=7,
+    )
+    monkeypatch.setattr(
+        litdata_format.SystemRandom, "sample", lambda _, population, k: population[:k]
+    )
+    first = catalog_set_from_locators(_locators(root), tmp_path / "first")
+    monkeypatch.setattr(
+        litdata_format.SystemRandom, "sample", lambda _, population, k: population[-k:]
+    )
+    second = catalog_set_from_locators(_locators(root), tmp_path / "second")
+
+    assert first.global_fingerprint == second.global_fingerprint
+
+
+def test_compressed_sizes_recorded_in_index_avoid_stats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_chunks(tmp_path, compression="zstd:3")
+    index_path = tmp_path / "index.json"
+    index = json.loads(index_path.read_text())
+    for chunk in index["chunks"]:
+        chunk["chunk_zip_bytes"] = (tmp_path / chunk["filename"]).stat().st_size
+    index_path.write_text(json.dumps(index))
+    storage = Mock(wraps=LocalFSBackend(root=tmp_path))
+    monkeypatch.setattr(litdata_format, "RouterStorageBackend", lambda: storage)
+
+    locators = _locators(tmp_path)
+
+    storage.stat.assert_not_called()
+    assert storage.read_range.call_count == 2
+    assert [loc.zip.bytes for loc in locators if loc.zip] == [
+        chunk["chunk_zip_bytes"] for chunk in index["chunks"]
+    ]
+
+
+def test_zstd_frame_without_content_size_fails_with_chunk_path(tmp_path: Path) -> None:
+    _write_chunks(tmp_path, compression="zstd:3", num_samples=1)
+    [path] = tmp_path.glob("*.bin")
+    zstd = require_zstd()
+    data = zstd.decompress(path.read_bytes())
+    with zstd.open(path, "wb") as stream:
+        stream.write(data)
+    assert zstd.get_frame_info(path.read_bytes()[:18]).decompressed_size is None
+
+    with pytest.raises(ValueError, match="no size in its Zstd frame header") as exc:
+        _locators(tmp_path)
+    assert str(path) in str(exc.value)
+
+
+@pytest.mark.parametrize("payload_only_size", [False, True])
+@pytest.mark.parametrize(
+    ("compression", "keep_zip"),
+    [(None, False), ("zstd:3", False), ("zstd:3", True)],
+)
+def test_resume_keeps_every_chunk_and_redownloads_a_truncated_one(
+    tmp_path: Path, payload_only_size: bool, compression: str | None, keep_zip: bool
+) -> None:
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _write_chunks(remote, compression=compression, payload_only_size=payload_only_size)
+    locators = _locators(remote)
+    catalogs = catalog_set_from_locators(locators, tmp_path / "catalogs")
+    cache = tmp_path / "cache"
+
+    def manager() -> CacheManager:
+        return CacheManager(
+            cache,
+            LocalFSBackend(root=remote),
+            catalog_set=catalogs,
+            persist_state=True,
+            keep_zip=keep_zip,
+        )
+
+    first = manager()
+    whole = [first.resolve(locator).raw.path.read_bytes() for locator in locators]
+    first.close()
+
+    resumed = manager()
+    assert [resumed.resolve(loc).cache_hit for loc in locators] == [True, True, True]
+    resumed.close()
+
+    (cache / "lit" / locators[0].raw.basename).write_bytes(whole[0][:-1])
+    repaired = manager()
+    try:
+        refs = [repaired.resolve(locator) for locator in locators]
+        assert [ref.cache_hit for ref in refs] == [False, True, True]
+        assert [ref.raw.path.read_bytes() for ref in refs] == whole
+    finally:
+        repaired.close()
+
+
+def test_chunk_labelled_compressed_but_not_named_so_is_measured_as_stored(
+    tmp_path: Path,
+) -> None:
+    _write_chunks(tmp_path)
+    index_path = tmp_path / "index.json"
+    index = json.loads(index_path.read_text())
+    index["config"]["compression"] = "zstd"
+    index_path.write_text(json.dumps(index))
+
+    locator = _locators(tmp_path)[0]
+
+    assert locator.raw.bytes == (tmp_path / locator.raw.basename).stat().st_size
+
+
+def test_catalog_from_the_previous_schema_is_not_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "ds"
+    root.mkdir()
+    _write_chunks(root)
+    header = DatasetHeader(name="ds", root=str(root), format="litdata", path=str(root))
+    real_build_locators = LitDataFormat.build_locators
+
+    with monkeypatch.context() as previous:
+        previous.setattr(
+            catalog_handle, "SCHEMA_VERSION", catalog_handle.SCHEMA_VERSION - 1
+        )
+        previous.setattr(
+            LitDataFormat,
+            "build_locators",
+            lambda _, dataset: {
+                shard_id: replace(locator, raw=replace(locator.raw, bytes=1))
+                for shard_id, locator in real_build_locators(
+                    LitDataFormat(), dataset
+                ).items()
+            },
+        )
+        finalize(ShardCatalogHandle(dataset=header))
+
+    catalog = ShardCatalogHandle(dataset=header).ensure_attached()
+    sizes = {path.stat().st_size for path in root.glob("*.bin")}
+    assert set(catalog.raw_bytes().tolist()) == sizes
