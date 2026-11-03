@@ -127,7 +127,7 @@ def test_warn_missing_index_is_quiet_for_few_shards(
 
     assert [r.levelno for r in caplog.records] == [logging.INFO]
     assert "SLOW DATASET DISCOVERY" not in caplog.text
-    assert "zephon.build_index parquet" in caplog.text
+    assert "zephon index parquet" in caplog.text
 
 
 @pytest.mark.parametrize("num_shards", [64, None])

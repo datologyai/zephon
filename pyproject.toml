@@ -38,6 +38,9 @@ dependencies = [
     "wrapt>=1.11.0",
 ]
 
+[project.scripts]
+zephon = "zephon.cli:main"
+
 [project.optional-dependencies]
 parquet = [
     "pyarrow>=8.0.0",  # For Parquet format support

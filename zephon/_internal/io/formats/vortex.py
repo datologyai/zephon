@@ -362,7 +362,7 @@ class VortexFormat(FormatHandler):
         single shard.
 
         If an ``index.json`` file exists (created by
-        ``python -m zephon.build_index vortex``), it will be used for O(1)
+        ``zephon index vortex``), it will be used for O(1)
         discovery instead of opening each file.
         """
         result = find_and_load_index(path, storage)
