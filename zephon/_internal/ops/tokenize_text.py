@@ -264,19 +264,15 @@ class TokenizeText(TokenizeBase):
         self._warned_preserve_non_mapping = False
         # Cache kwargs to avoid building dict per batch
         self._cached_kwargs: dict[str, Any] = {}
-        # On free-threaded Python + old PyTorch, we intercept return_tensors='pt'
-        # to avoid HF tokenizer creating tensors (which races with our code).
-        self._convert_np_to_pt = False
 
     def setup(self, ctx: OpContext) -> None:
         super().setup(ctx)
         # We do NOT set up the tokenizer here to avoid problems in multiprocessing:
         # hf tokenizers don't like if we fork after creating the object
 
-        # In bracket mode we ask HF for ragged lists (no specials, no padding,
-        # no return_tensors) and own bracketing/padding ourselves. Forwarding
-        # ``return_tensors`` here would force HF to stack a ragged batch and
-        # raise.
+        # Request lists and convert each output record ourselves so different
+        # sequence lengths never require stacking into a rectangular tensor.
+        # In bracket mode we also own special-token insertion and padding.
         self._cached_kwargs = self._tokenization_kwargs()
         add_specials = not self._zephon_owns_brackets
 
@@ -287,18 +283,6 @@ class TokenizeText(TokenizeBase):
         self._cached_kwargs["padding"] = (
             self.padding if (add_specials and not self.split_long_samples) else False
         )
-
-        # On free-threaded Python + old PyTorch, HF tokenizer's tensor creation
-        # races with our code. Request numpy from HF and convert ourselves
-        # under lock.
-        # See: https://github.com/pytorch/pytorch/issues/171992
-        forward_return_tensors = add_specials and not self.split_long_samples
-        if forward_return_tensors and self.return_tensors is not None:
-            if self.return_tensors == "pt" and _should_use_tensor_lock():
-                self._convert_np_to_pt = True
-                self._cached_kwargs["return_tensors"] = "np"
-            else:
-                self._cached_kwargs["return_tensors"] = self.return_tensors
 
     def _tokenization_kwargs(self) -> dict[str, Any]:
         """Build the tokenizer options shared by execution and calibration."""
@@ -344,19 +328,10 @@ class TokenizeText(TokenizeBase):
         return self._num_specials_to_prepend() + self._num_specials_to_append()
 
     def traits(self) -> OpTraits:
-        # HF batch tensors require equal lengths; Zephon converts each row separately.
-        batch_tensors = (
-            not self._zephon_owns_brackets and self.return_tensors is not None
-        )
-        fixed_length = self.padding == "max_length" and self.truncation
         return OpTraits(
             # Batch padding changes payloads; split mode pads each chunk separately.
             calibration_replayable=(
-                self.split_long_samples
-                or (
-                    self.padding in (False, "max_length")
-                    and (not batch_tensors or fixed_length)
-                )
+                self.split_long_samples or self.padding in (False, "max_length")
             ),
             indexable=True,
             preserves_cursor_order=True,
@@ -695,11 +670,6 @@ class TokenizeText(TokenizeBase):
 
         encoded = self._tokenize_texts(texts)
 
-        # On free-threaded Python + old PyTorch, we requested numpy from HF tokenizer
-        # and convert to torch ourselves under lock to avoid allocator race condition.
-        if self._convert_np_to_pt:
-            encoded = self._convert_batch_np_to_torch(encoded)
-
         # Use type ignores here as TokenBatch is complex;
         # _normalize_batch handles the runtime safety.
         raw_input_ids: TokenBatch = encoded.get("input_ids", [])  # type: ignore[assignment]
@@ -734,8 +704,9 @@ class TokenizeText(TokenizeBase):
                 input_ids, attention_mask
             )
 
-        # Bracket mode pulled lists from HF; lift to the user's backend now.
-        if self._zephon_owns_brackets and self.return_tensors is not None and input_ids:
+        # Convert each record independently; ragged batches need no padding.
+        # Splitting converts each output chunk after slicing instead.
+        if self.return_tensors is not None and not self.split_long_samples:
             input_ids = [self._convert_tensor(seq) for seq in input_ids]
             if attention_mask is not None:
                 attention_mask = [self._convert_tensor(seq) for seq in attention_mask]
@@ -792,22 +763,6 @@ class TokenizeText(TokenizeBase):
             raise RuntimeError(msg)
         self._ensure_padding_token()
         return tokenizer(texts, **self._cached_kwargs)
-
-    def _convert_batch_np_to_torch(
-        self, encoded: TokenizerOutput
-    ) -> dict[str, TokenBatch]:
-        """Convert numpy arrays to torch tensors under the lock.
-
-        Used on free-threaded Python + old PyTorch to avoid allocator race
-        condition when HF tokenizer creates tensors internally.
-        """
-        import torch
-
-        with _tensor_lock_ctx():
-            return {
-                k: torch.from_numpy(v) if "numpy" in type(v).__module__ else v
-                for k, v in encoded.items()
-            }
 
     def _convert_tensor(self, value: TokenSeq) -> TokenSeq:
         backend = self.return_tensors
