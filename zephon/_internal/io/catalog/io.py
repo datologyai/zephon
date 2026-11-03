@@ -38,7 +38,7 @@ import numpy as np
 from zephon._internal.utils.atomic import atomic_write_bytes
 
 MAGIC = b"ZEPHCAT1"
-SCHEMA_VERSION = 1  # on-disk catalog format version (read by builder/handle)
+SCHEMA_VERSION = 2  # on-disk format; bump when earlier catalogs must not be reused
 _HEADER_LEN_STRUCT = struct.Struct("<Q")
 _ALIGN = 8
 

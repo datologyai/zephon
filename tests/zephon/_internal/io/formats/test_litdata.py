@@ -1,6 +1,7 @@
 import inspect
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -9,10 +10,13 @@ import pytest
 pytest.importorskip("litdata")
 from litdata.streaming.writer import BinaryWriter
 
-from tests._catalog_helpers import catalog_locators
+from tests._catalog_helpers import catalog_locators, catalog_set_from_locators
 from tests._helpers import counts_dict
 from tests.helpers.litdata_chunks import write_litdata_fixture
 from tests.helpers.storage import _install_obstore_stubs
+from zephon._internal.io.catalog import DatasetHeader
+from zephon._internal.io.catalog import handle as catalog_handle
+from zephon._internal.io.catalog.handle import ShardCatalogHandle, finalize
 from zephon._internal.io.formats import ensure_builtin_formats
 from zephon._internal.io.formats.base import get_format
 from zephon._internal.io.formats.litdata import (
@@ -27,10 +31,11 @@ from zephon._internal.io.formats.litdata_support.pytree import (
     TokensLoader,
 )
 from zephon._internal.io.resolvers import DirectResolver
+from zephon._internal.io.resolvers.cache import CacheManager
 from zephon._internal.io.storage import LocalFSBackend
 from zephon._internal.io.storage.base import StorageBackend
 from zephon._internal.io.storage.s3 import S3Backend
-from zephon._internal.io.types import LocalShardFile, LocalShardRef
+from zephon._internal.io.types import LocalShardFile, LocalShardRef, ShardLocator
 from zephon.io.dataset import Dataset
 
 
@@ -658,3 +663,111 @@ def test_binary_serializer_validation_happens_at_shard_open(tmp_path: Path) -> N
     assert sizes == {0: 1}
     with pytest.raises(KeyError, match="unknown_serializer"):
         _open_shard(tmp_path)
+
+
+def _write_chunks(
+    root: Path, *, compression: str | None = None, old_writer: bool = False
+) -> None:
+    writer = _binary_writer_for_samples(root, 2, "pytree", compression=compression)
+    for idx in range(6):
+        writer.add_item(idx, (idx, f"sample-{idx}" * 8))
+    writer.done()
+    writer.merge()
+    if old_writer:
+        # LitData before 0.2.40 writes the same files, without the header in this number.
+        index_path = root / "index.json"
+        index = json.loads(index_path.read_text())
+        for chunk in index["chunks"]:
+            chunk["chunk_bytes"] -= 4 * (chunk["chunk_size"] + 2)
+        index_path.write_text(json.dumps(index))
+
+
+def _locators(root: Path) -> list[ShardLocator]:
+    handler = LitDataFormat()
+    _, metadata = handler.discover(str(root), LocalFSBackend(root=root))
+    dataset = Dataset("lit", {"kind": "litdata", "path": str(root), "shards": metadata})
+    return list(handler.build_locators(dataset).values())
+
+
+@pytest.mark.parametrize("old_writer", [False, True])
+@pytest.mark.parametrize(
+    ("compression", "keep_zip"),
+    [(None, False), ("zstd:3", False), ("zstd:3", True)],
+)
+def test_resume_keeps_every_chunk_and_redownloads_a_truncated_one(
+    tmp_path: Path, old_writer: bool, compression: str | None, keep_zip: bool
+) -> None:
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _write_chunks(remote, compression=compression, old_writer=old_writer)
+    locators = _locators(remote)
+    catalogs = catalog_set_from_locators(locators, tmp_path / "catalogs")
+    cache = tmp_path / "cache"
+
+    def manager() -> CacheManager:
+        return CacheManager(
+            cache,
+            LocalFSBackend(root=remote),
+            catalog_set=catalogs,
+            persist_state=True,
+            keep_zip=keep_zip,
+        )
+
+    first = manager()
+    whole = [first.resolve(locator).raw.path.read_bytes() for locator in locators]
+    first.close()
+
+    resumed = manager()
+    assert [resumed.resolve(loc).cache_hit for loc in locators] == [True, True, True]
+    resumed.close()
+
+    (cache / "lit" / locators[0].raw.basename).write_bytes(whole[0][:-1])
+    repaired = manager()
+    try:
+        refs = [repaired.resolve(locator) for locator in locators]
+        assert [ref.cache_hit for ref in refs] == [False, True, True]
+        assert [ref.raw.path.read_bytes() for ref in refs] == whole
+    finally:
+        repaired.close()
+
+
+def test_chunk_labelled_compressed_but_not_named_so_is_measured_as_stored(
+    tmp_path: Path,
+) -> None:
+    _write_chunks(tmp_path)
+    index_path = tmp_path / "index.json"
+    index = json.loads(index_path.read_text())
+    index["config"]["compression"] = "zstd"
+    index_path.write_text(json.dumps(index))
+
+    locator = _locators(tmp_path)[0]
+
+    assert locator.raw.bytes == (tmp_path / locator.raw.basename).stat().st_size
+
+
+def test_catalog_from_the_previous_schema_is_not_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "ds"
+    root.mkdir()
+    _write_chunks(root)
+    header = DatasetHeader(name="ds", root=str(root), format="litdata", path=str(root))
+    real_build_locators = LitDataFormat.build_locators
+
+    with monkeypatch.context() as previous:
+        previous.setattr(catalog_handle, "SCHEMA_VERSION", 1)
+        previous.setattr(
+            LitDataFormat,
+            "build_locators",
+            lambda _, dataset: {
+                shard_id: replace(locator, raw=replace(locator.raw, bytes=1))
+                for shard_id, locator in real_build_locators(
+                    LitDataFormat(), dataset
+                ).items()
+            },
+        )
+        finalize(ShardCatalogHandle(dataset=header))
+
+    catalog = ShardCatalogHandle(dataset=header).ensure_attached()
+    sizes = {path.stat().st_size for path in root.glob("*.bin")}
+    assert set(catalog.raw_bytes().tolist()) == sizes

@@ -7,6 +7,7 @@ import struct
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, cast
 
@@ -23,12 +24,13 @@ from zephon._internal.io.formats.base import FormatHandler, ShardOpener, registe
 from zephon._internal.io.index import find_and_load_index
 from zephon._internal.io.index.index_types import LitDataIndex, is_litdata_index
 from zephon._internal.io.protocols import RandomAccessShard
-from zephon._internal.io.storage import StorageBackend
+from zephon._internal.io.storage import RouterStorageBackend, StorageBackend
 from zephon._internal.io.suffixes import (
     LITDATA_CHUNK_SUFFIX,
     LITDATA_COMPRESSED_CHUNK_SUFFIX,
 )
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.utils.compression import require_zstd
 from zephon.types import SamplePayload
 
 # Shared metadata support requires optree; payload readers load optional deps lazily.
@@ -188,17 +190,6 @@ def _generate_intervals(
     return _ensure_litdata_support().row_intervals(chunks)
 
 
-def _extract_chunk_bytes(chunk: Mapping[str, Any], root: str, basename: str) -> int:
-    """Return the expected byte size for a chunk."""
-    bytes_value = chunk.get("chunk_bytes")
-    if isinstance(bytes_value, (int, float)):
-        return int(bytes_value)
-    file_path = os.path.join(root, basename)
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"LitData chunk file not found: {file_path}")
-    return os.path.getsize(file_path)
-
-
 def _normalize_hashes(value: Any) -> dict[str, str]:
     if not isinstance(value, Mapping):
         return {}
@@ -216,20 +207,24 @@ def _derive_raw_basename(basename: str, compression: str) -> str:
     return basename
 
 
-def _extract_zip_bytes(chunk: Mapping[str, Any], root: str, basename: str) -> int:
-    """Return the byte size of the compressed chunk when available."""
-    bytes_value = chunk.get("chunk_zip_bytes")
-    if isinstance(bytes_value, (int, float)):
-        return int(bytes_value)
-    file_path = os.path.join(root, basename)
-    try:
-        return os.path.getsize(file_path)
-    except OSError:
-        pass
-    fallback = chunk.get("chunk_bytes")
-    if isinstance(fallback, (int, float)):
-        return int(fallback)
-    return 0
+def _stored_sizes(
+    storage: StorageBackend, root: str, shard_id: Any, meta: Mapping[str, Any]
+) -> tuple[int, int]:
+    """Return a chunk's ``(raw_bytes, stored_bytes)``, read from the store.
+
+    ``chunk_bytes`` leaves out the chunk header before LitData 0.2.40, and the index
+    does not record its writer. Only a chunk with a separate decoded file is one whole
+    frame: newer writers keep the plain name, even when they compress inside the file.
+    """
+    basename = _extract_chunk_basename(meta["chunk"], shard_id)
+    path = os.path.join(root, basename)
+    stored_bytes = int(storage.stat(path)["size"])
+    compression = meta["config"].get("compression")
+    if _derive_raw_basename(basename, compression) == basename:
+        return stored_bytes, stored_bytes
+    # 18 bytes is the zstd magic number plus the largest frame header (RFC 8878).
+    frame = storage.read_range(path, 0, length=18)
+    return require_zstd().get_frame_info(frame).decompressed_size, stored_bytes
 
 
 def _normalize_config(raw: Mapping[str, Any]) -> _StreamingTemplateDict:
@@ -455,21 +450,21 @@ class LitDataFormat(FormatHandler):
         if not isinstance(shards_meta, Mapping):
             raise ValueError("LitData backend missing shard metadata")
 
+        measure = partial(_stored_sizes, RouterStorageBackend(), path)
+        # Same cap as _discover_from_files: on S3, 3780 stats took about 3s at this width.
+        with ThreadPoolExecutor(max_workers=32) as executor:
+            sizes = list(executor.map(measure, shards_meta, shards_meta.values()))
+
         locators: dict[int, ShardLocator] = {}
-        for shard_id_obj, meta in shards_meta.items():
+        for (shard_id_obj, meta), (raw_bytes, stored_bytes) in zip(
+            shards_meta.items(), sizes
+        ):
             shard_id = int(shard_id_obj)
-            if not isinstance(meta, Mapping):
-                raise ValueError(f"LitData shard {shard_id} metadata must be mapping")
-            config = meta.get("config")
-            chunk = meta.get("chunk")
+            config = meta["config"]
+            chunk = meta["chunk"]
             interval = meta.get("interval")
-            if not isinstance(config, Mapping) or not isinstance(chunk, Mapping):
-                raise ValueError(
-                    f"LitData shard {shard_id} missing config or chunk data"
-                )
 
             basename = _extract_chunk_basename(chunk, shard_id)
-            chunk_bytes = _extract_chunk_bytes(chunk, path, basename)
             hashes = _normalize_hashes(chunk.get("hashes"))
             compression: str | None = None
             zip_file: ShardFile | None = None
@@ -478,10 +473,9 @@ class LitDataFormat(FormatHandler):
             if isinstance(compression_value, str) and compression_value:
                 compression = compression_value
                 raw_basename = _derive_raw_basename(basename, compression)
-                zip_bytes = _extract_zip_bytes(chunk, path, basename)
                 zip_file = ShardFile(
                     basename=basename,
-                    bytes=zip_bytes,
+                    bytes=stored_bytes,
                     hashes=hashes,
                 )
 
@@ -492,7 +486,7 @@ class LitDataFormat(FormatHandler):
                 root=path,
                 raw=ShardFile(
                     basename=raw_basename,
-                    bytes=chunk_bytes,
+                    bytes=raw_bytes,
                     hashes=hashes,
                 ),
                 zip=zip_file,
