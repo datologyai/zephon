@@ -63,7 +63,6 @@ class BaseOperatorState:
     node: Node
     deterministic: bool
     ctx_proto: dict[str, Any]
-    allow_latency_flush: bool = False
     stage_index: int = 0
     stage_name: str = ""
     op_index: int = 0
@@ -414,7 +413,6 @@ class StageRunnerBase(Generic[StateT], ABC):
         *,
         prefetch_capacity: int = 0,
         deterministic: bool = False,
-        allow_latency_flush_in_deterministic: bool = True,
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         measure_bytes: bool | None = None,
@@ -449,7 +447,6 @@ class StageRunnerBase(Generic[StateT], ABC):
                     op_index=op_index,
                     deterministic=deterministic,
                     ctx_proto=self._ctx_services,
-                    allow_latency_flush=allow_latency_flush_in_deterministic,
                     stage_index=stage_index,
                     stage_name=self._stage_name,
                     collect_op_stats=collect_op_stats,
@@ -470,7 +467,6 @@ class StageRunnerBase(Generic[StateT], ABC):
         op_index: int,
         deterministic: bool,
         ctx_proto: dict[str, Any],
-        allow_latency_flush: bool,
         stage_index: int,
         stage_name: str,
         collect_op_stats: bool,

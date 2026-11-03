@@ -34,10 +34,11 @@ class OpTraits:
 
     ``batch_shape_sensitive`` — if True, the operator's outputs can depend
     on how inputs are grouped into micro-batches (e.g., per-batch RNG or
-    statistics). In deterministic mode, stages that contain at least one
-    such operator will have time-based flush disabled to preserve strong
-    determinism. When False, ordering determinism suffices and latency
-    flush may be kept for performance.
+    statistics). This is descriptive metadata; the runtime does not act on
+    it. Micro-batch boundaries are set by the operator's accumulator, so a
+    batch-shape-sensitive operator stays deterministic by dropping any
+    latency bound when ``accumulator()`` receives ``deterministic=True``
+    (every built-in operator does this).
 
     ``requires_serial_state`` — if True, the operator maintains
     cross-invocation state (e.g., buffers) that must be confined to a single

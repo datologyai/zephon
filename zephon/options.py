@@ -92,11 +92,6 @@ class RuntimeOptions:
     ipc_buffer_bytes: int = DEFAULT_IPC_BUFFER_BYTES
     mixture_config: MixtureReadConfig | None = None
     io_options: StoreOptions = field(default_factory=StoreOptions)
-    # Expert knob:
-    # Keep latency-based flush in deterministic mode when True unless a stage contains
-    # a batch-shape sensitive operator (in which case we auto-disable it for that stage).
-    # When False, latency flush is always disabled in deterministic mode.
-    allow_latency_flush_in_deterministic: bool = True
 
     # === Epoch flush ===
     # Flush sentinel cadence: inject a flush sentinel every K chunks per lane.

@@ -49,7 +49,6 @@ class StageRuntimeSpec:
     queue_capacity: int
     prefetch_capacity: int
     output_mode: str  # "microbatches" | "stream_items"
-    allow_latency_flush: bool
     memory_policy: PayloadMemoryPolicy | None = DEFAULT_PAYLOAD_MEMORY_POLICY
     # See RuntimeOptions.max_worker_retries; ignored by non-process runners.
     max_worker_retries: int = 0
@@ -407,16 +406,6 @@ def resolve_runtime_spec(
             _resolve_default_stage_prefetch(opts, runner_type=chosen),
         )
 
-        # Latency flush in deterministic mode
-        allow_latency = opts.allow_latency_flush_in_deterministic
-        if opts.deterministic:
-            has_sensitive = any(
-                getattr(nd.op.traits(), "batch_shape_sensitive", False)
-                for nd in stg.nodes
-            )
-            if has_sensitive and allow_latency:
-                allow_latency = False
-
         output_mode = "stream_items" if is_last else "microbatches"
 
         stage_specs.append(
@@ -427,7 +416,6 @@ def resolve_runtime_spec(
                 queue_capacity=op_queue_capacity,
                 prefetch_capacity=prefetch,
                 output_mode=output_mode,
-                allow_latency_flush=allow_latency,
                 memory_policy=memory_policy,
                 max_worker_retries=opts.max_worker_retries,
                 ipc_transport=opts.ipc_transport,
