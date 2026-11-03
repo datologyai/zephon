@@ -52,6 +52,41 @@ def test_to_torch_dataset_iterates_pipeline(monkeypatch: pytest.MonkeyPatch) -> 
     assert all(isinstance(x, SampleRecord) for x in out)
 
 
+@pytest.mark.parametrize("mtp", [False, True])
+def test_stateful_torch_dataset_state_dict_after_exhaustion(
+    monkeypatch: pytest.MonkeyPatch, mtp: bool
+) -> None:
+    _install_torch_stubs(monkeypatch)
+
+    def make_pipe() -> PublicPipeline:
+        rows = [{"text": f"s{i}"} for i in range(6)]
+        ws = FakeIndexableWorkSource(make_inmem_dataset("tiny", rows), chunk_size=3)
+        return (
+            PublicPipeline(ws)
+            .decode_text()
+            .options(
+                deterministic=True,
+                max_workers=1,
+                default_stage_prefetch=0,
+                mtp_mode=mtp,
+            )
+        )
+
+    pipe = make_pipe()
+    torch_ds = pipe.to_torch_dataset(stateful=True)
+    assert len(list(iter(torch_ds))) == 6
+
+    # An end-of-epoch checkpoint must carry the final position, not None.
+    state = torch_ds.state_dict()
+    assert state["engine"] is not None
+    assert state["engine"]["progress"] == pipe.checkpoint()["progress"]
+
+    # Resuming from it yields nothing more instead of replaying the epoch.
+    resumed = make_pipe().to_torch_dataset(stateful=True)
+    resumed.load_state_dict(state)
+    assert list(iter(resumed)) == []
+
+
 def test_to_indexable_torch_dataset_with_indexable_pipeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

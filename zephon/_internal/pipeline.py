@@ -164,9 +164,16 @@ class _TorchPipelineIterableDataset(_RTIterableDatasetBase):
                 "Warning! You seem to be using neither torchdata.StatefulDataloader nor torch.DataLoader. You might want to consider iterating over the Pipeline directly, as the TorchDataset wrapper is mostly used as a tool to integrate with legacy setups that require the DataLoader class."
             )
 
-        # If an active iteration exists (inline engine or subprocess), use pipeline.checkpoint().
-        if self._pipeline._engine is not None or self._pipeline._sp is not None:
-            return {"engine": self._pipeline.checkpoint()}
+        # If an iteration exists (inline engine or live subprocess), or a
+        # finished MTP iteration cached its final state, use pipeline.checkpoint().
+        p = self._pipeline
+        if (
+            p._engine is not None
+            or p._sp is not None
+            or p._last_local_state is not None
+            or p._last_state is not None
+        ):
+            return {"engine": p.checkpoint()}
         # If iteration hasn’t begun in this process, return whatever pending state we have (or None).
         return {"engine": self._pending_ckpt}
 
