@@ -10,11 +10,16 @@ from pathlib import Path
 
 from sphinx.util.inventory import InventoryFile
 
-from tests.zephon.test_public_surface import EXPECTED_PUBLIC_MODULES
+# The public module list lives in the test suite; make it importable when run
+# as ``python scripts/check_docs_coverage.py`` from anywhere.
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:
     """Report public names missing from the built docs' ``objects.inv``."""
+    sys.path.insert(0, str(_PROJECT_ROOT))
+    from tests.zephon.test_public_surface import EXPECTED_PUBLIC_MODULES
+
     build_dir = Path(sys.argv[1])
     with open(build_dir / "objects.inv", "rb") as f:
         inventory = InventoryFile.load(f, "", lambda base, uri: uri)
