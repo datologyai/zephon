@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import queue
 from dataclasses import dataclass, field
-from typing import Generic, Sequence, TypeVar
+from typing import ClassVar, Generic, Sequence, TypeVar
 
 from zephon._internal.runners.concurrent import (
     ConcurrentOperatorState,
@@ -73,34 +73,44 @@ class QueueDrainStageRunner(ConcurrentStageRunner[SQueueDrain], Generic[SQueueDr
     draining before the termination check re-runs.
     """
 
+    # Whether _drain_results takes its first result_queue read outside the
+    # idle_drain timer. Only worth it where reads are in-memory and cheap
+    # (threads); an IPC read receives and unpickles, which idle_drain must
+    # keep counting.
+    _UNTIMED_FIRST_POLL: ClassVar[bool] = False
+
     def _drain_results(
         self,
         state: SQueueDrain,
         next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
         context: ConcurrentRunContext,
     ) -> None:
-        # The pump calls this about once per input item and the queue is
-        # usually empty, so poll before starting the idle_drain timer: timing
-        # every empty poll cost more than the poll itself.
-        try:
-            item = self._queue_get_nowait(state.result_queue)
-        except queue.Empty:
-            return
-        except FileNotFoundError as exc:
-            self._record_error(context, exc)
-            return
+        item: RunnerResult | None = None
+        if self._UNTIMED_FIRST_POLL:
+            # The pump calls this about once per input item and the queue is
+            # usually empty, so poll before starting the idle_drain timer:
+            # timing an empty in-memory poll cost more than the poll itself.
+            try:
+                item = self._queue_get_nowait(state.result_queue)
+            except queue.Empty:
+                return
+            except FileNotFoundError as exc:
+                self._record_error(context, exc)
+                return
         with state.pump_timer.measure_excluding("idle_drain", "result_handle"):
             while True:
+                if item is None:
+                    try:
+                        item = self._queue_get_nowait(state.result_queue)
+                    except queue.Empty:
+                        break
+                    except FileNotFoundError as exc:
+                        self._record_error(context, exc)
+                        return
                 state.pump_timer.note("batches_completed")
                 with state.pump_timer.measure("result_handle"):
                     self._handle_result(state, item, next_queue, context)
-                try:
-                    item = self._queue_get_nowait(state.result_queue)
-                except queue.Empty:
-                    break
-                except FileNotFoundError as exc:
-                    self._record_error(context, exc)
-                    return
+                item = None
 
     def _await_one_result(
         self,

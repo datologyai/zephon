@@ -229,6 +229,7 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
     """
 
     _OperatorState = _ThreadOperatorState
+    _UNTIMED_FIRST_POLL = True
 
     def __init__(
         self,
