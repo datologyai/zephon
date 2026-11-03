@@ -22,48 +22,8 @@ from zephon._internal.token_counting import (
 from zephon._internal.utils.tokenizer import fallback_tokenizer
 
 # ---------------------------------------------------------------------------
-# Delivered-token arithmetic
+# Counting settings
 # ---------------------------------------------------------------------------
-
-
-def test_delivered_tokens_bracket_modes_add_specials():
-    assert TextTokenCountingSpec(special_tokens="bos_eos").delivered_tokens(100) == 102
-    assert TextTokenCountingSpec(special_tokens="bos").delivered_tokens(100) == 101
-    assert TextTokenCountingSpec(special_tokens="eos").delivered_tokens(100) == 101
-    assert TextTokenCountingSpec(special_tokens="none").delivered_tokens(100) == 100
-
-
-def test_delivered_tokens_truncation_destroys_mass():
-    cfg = TextTokenCountingSpec(
-        special_tokens="bos_eos", truncation=True, max_length=50
-    )
-    # Specials reserve two slots, so content truncates to 48.
-    assert cfg.delivered_tokens(100) == 50
-    assert cfg.delivered_tokens(10) == 12
-
-
-def test_delivered_tokens_split_preserves_mass():
-    cfg = TextTokenCountingSpec(
-        special_tokens="bos_eos", split_long_samples=True, max_length=50
-    )
-    assert cfg.delivered_tokens(1000) == 1002
-
-
-def test_delivered_tokens_tokenizer_default_counts_template():
-    cfg = TextTokenCountingSpec(special_tokens="tokenizer_default")
-    assert cfg.delivered_tokens(100) == 100
-    truncating = TextTokenCountingSpec(
-        special_tokens="tokenizer_default", truncation=True, max_length=64
-    )
-    assert truncating.delivered_tokens(100) == 64
-
-
-@pytest.mark.parametrize(
-    "mode,prepend,append",
-    [("bos_eos", 1, 1), ("bos", 1, 0), ("eos", 0, 1), ("none", 0, 0)],
-)
-def test_num_specials_by_mode(mode, prepend, append):
-    assert TextTokenCountingSpec(special_tokens=mode).num_specials == prepend + append
 
 
 def test_text_spec_from_op_captures_count_fields():
@@ -80,15 +40,29 @@ def test_text_spec_from_op_captures_count_fields():
     assert spec.tokenizer is tok
     assert spec.field == "text"
     assert spec.missing_field == "empty"
-    assert spec.max_length == 128
-    assert spec.truncation is True
-    assert spec.split_long_samples is False
-    assert spec.special_tokens == "bos"
+    assert spec.tokenizer_kwargs == {
+        "add_special_tokens": False,
+        "truncation": True,
+        "max_length": 127,
+    }
+    assert spec.num_specials == 1
 
 
 def test_spec_from_op_captures_use_fast():
     op = TokenizeText(tokenizer_id="__fallback__", field="text", use_fast=False)
     assert TextTokenCountingSpec.from_op(op).use_fast is False
+
+
+def test_spec_carries_additional_tokenizer_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def tokenizer(text: str, *, extra_tokens: int) -> dict[str, list[int]]:
+        return {"input_ids": [0] * (len(text.split()) + extra_tokens)}
+
+    op = TokenizeText(tokenizer=tokenizer, field="text", special_tokens="none")
+    monkeypatch.setattr(op, "_tokenization_kwargs", lambda: {"extra_tokens": 2})
+    spec = pickle.loads(pickle.dumps(op.token_counting_spec()))
+    assert spec.build_counter().plan([]).count({"text": "hello world"}) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -250,24 +224,25 @@ def test_build_counter_delegates_to_shared_loader(monkeypatch):
 
 def test_count_raw_tokens_counts_whitespace_words():
     tok = fallback_tokenizer()
-    profile = TextTokenCountingSpec(special_tokens="none")
+    profile = TextTokenCountingSpec(num_specials=0)
     assert _count_raw_tokens(tok, "one two three four", profile) == 4
 
 
-def test_count_raw_tokens_passes_add_special_tokens_by_mode():
+def test_count_raw_tokens_passes_saved_kwargs():
     class _SpecialsAware:
         def __call__(self, text, add_special_tokens=False):
             n = len(text.split())
             return {"input_ids": list(range(n + (2 if add_special_tokens else 0)))}
 
     tok = _SpecialsAware()
-    assert (
-        _count_raw_tokens(tok, "a b c", TextTokenCountingSpec(special_tokens="bos_eos"))
-        == 3
-    )
+    assert _count_raw_tokens(tok, "a b c", TextTokenCountingSpec()) == 3
     assert (
         _count_raw_tokens(
-            tok, "a b c", TextTokenCountingSpec(special_tokens="tokenizer_default")
+            tok,
+            "a b c",
+            TextTokenCountingSpec(
+                tokenizer_kwargs={"add_special_tokens": True}, num_specials=0
+            ),
         )
         == 5
     )
@@ -282,7 +257,7 @@ def test_count_raw_tokens_reads_input_ids_attribute():
         def __call__(self, text, add_special_tokens=False):
             return _AttrResult(list(range(len(text.split()))))
 
-    profile = TextTokenCountingSpec(special_tokens="none")
+    profile = TextTokenCountingSpec(num_specials=0)
     assert _count_raw_tokens(_AttrTokenizer(), "a b c d", profile) == 4
 
 
@@ -297,9 +272,7 @@ def _plan(payloads, field: str | None = None):
 
 
 def test_text_plan_treats_empty_text_as_unmeasurable():
-    plan = _TextPlan(
-        fallback_tokenizer(), TextTokenCountingSpec(special_tokens="none"), None
-    )
+    plan = _TextPlan(fallback_tokenizer(), TextTokenCountingSpec(num_specials=0), None)
     assert plan.count("") is None
 
 
@@ -398,7 +371,7 @@ class _ClosureTokenizer:
 
 
 def test_counting_spec_std_pickles_with_closure_tokenizer():
-    spec = TextTokenCountingSpec(tokenizer=_ClosureTokenizer(), special_tokens="none")
+    spec = TextTokenCountingSpec(tokenizer=_ClosureTokenizer(), num_specials=0)
     restored = pickle.loads(pickle.dumps(spec))
     assert restored.tokenizer is not None
     assert restored.tokenizer("a b c")["input_ids"] == ["a", "b", "c"]

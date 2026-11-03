@@ -277,35 +277,16 @@ class TokenizeText(TokenizeBase):
         # no return_tensors) and own bracketing/padding ourselves. Forwarding
         # ``return_tensors`` here would force HF to stack a ragged batch and
         # raise.
+        self._cached_kwargs = self._tokenization_kwargs()
         add_specials = not self._zephon_owns_brackets
 
         # ``split_long_samples`` also owns padding (per-chunk, see
-        # ``_split_long_samples``). Padding the full sequence on the HF side
-        # before we slice it would inflate every chunk to the original
-        # padded length — force HF padding off whenever splitting, regardless
-        # of bracket-vs-default mode.
-        hf_padding: bool | str = (
+        # ``_split_segments``). Padding the full sequence on the HF side
+        # before we slice it can create padding-only chunks — force HF padding
+        # off whenever splitting, regardless of bracket-vs-default mode.
+        self._cached_kwargs["padding"] = (
             self.padding if (add_specials and not self.split_long_samples) else False
         )
-        hf_truncation = False if self.split_long_samples else self.truncation
-        hf_max_length: int | None = None if self.split_long_samples else self.max_length
-
-        if (
-            not add_specials
-            and self.truncation
-            and self.max_length is not None
-            and not self.split_long_samples
-        ):
-            # Reserve room for the BOS/EOS we splice in after HF returns.
-            hf_max_length = self.max_length - self._num_specials_total()
-
-        self._cached_kwargs = {
-            "add_special_tokens": add_specials,
-            "padding": hf_padding,
-            "truncation": hf_truncation,
-        }
-        if hf_max_length is not None:
-            self._cached_kwargs["max_length"] = hf_max_length
 
         # On free-threaded Python + old PyTorch, HF tokenizer's tensor creation
         # races with our code. Request numpy from HF and convert ourselves
@@ -318,6 +299,20 @@ class TokenizeText(TokenizeBase):
                 self._cached_kwargs["return_tensors"] = "np"
             else:
                 self._cached_kwargs["return_tensors"] = self.return_tensors
+
+    def _tokenization_kwargs(self) -> dict[str, Any]:
+        """Build the tokenizer options shared by execution and calibration."""
+        # Splitting needs the full sequence; Zephon applies max_length per chunk.
+        kwargs: dict[str, Any] = {
+            "add_special_tokens": not self._zephon_owns_brackets,
+            "truncation": self.truncation and not self.split_long_samples,
+        }
+        if self.max_length is not None and not self.split_long_samples:
+            # Reserve room for the BOS/EOS Zephon inserts after tokenization.
+            kwargs["max_length"] = self.max_length - (
+                self._num_specials_total() if self.truncation else 0
+            )
+        return kwargs
 
     def _finalize_setup(self) -> None:
         # _ensure_padding_token may set pad_token=eos_token (the HF pattern

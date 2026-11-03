@@ -417,7 +417,11 @@ def test_prime_cache_key_stable_and_input_sensitive():
         {"a": 0}, by_name, TokenEstimation(calibration_samples=999), None, seed=0
     )
     assert key != _prime_cache_key(
-        {"a": 0}, by_name, est, TextTokenCountingSpec(max_length=128), seed=0
+        {"a": 0},
+        by_name,
+        est,
+        TextTokenCountingSpec(tokenizer_kwargs={"max_length": 128}),
+        seed=0,
     )
     assert key != _prime_cache_key(
         {"a": 0},
@@ -439,7 +443,7 @@ def test_prime_cache_key_tracks_chat_config():
     a = key(ChatTokenCountingSpec(tokenizer_id="t", max_length=8))
     b = key(ChatTokenCountingSpec(tokenizer_id="t", max_length=16))
     c = key(ChatTokenCountingSpec(tokenizer_id="t", max_length=8))
-    d = key(TextTokenCountingSpec(tokenizer_id="t", max_length=8))
+    d = key(TextTokenCountingSpec(tokenizer_id="t", tokenizer_kwargs={"max_length": 8}))
     assert a != b
     assert a == c
     assert a != d
@@ -603,7 +607,7 @@ def test_measure_dataset_text_path_tokenizes():
     row = {"text": "one two three four five"}
     ds = _uniform_dataset("d", row)
     store = build_multi_dataset_store({0: ds})
-    spec = TextTokenCountingSpec(special_tokens="none")
+    spec = TextTokenCountingSpec(num_specials=0)
     m = _measure_dataset(
         ds,
         0,
@@ -711,9 +715,7 @@ def test_measure_dataset_falls_back_when_plan_coverage_is_low():
         est,
         _TextCounter(
             fallback_tokenizer(),
-            TextTokenCountingSpec(
-                field="text", missing_field="empty", special_tokens="none"
-            ),
+            TextTokenCountingSpec(field="text", missing_field="empty", num_specials=0),
         ),
         seed=1,
     )
@@ -765,7 +767,7 @@ def test_measure_dataset_skips_docs_that_crash_the_tokenizer():
         0,
         store,
         TokenEstimation(calibration_samples=100),
-        _TextCounter(tok, TextTokenCountingSpec(special_tokens="none")),
+        _TextCounter(tok, TextTokenCountingSpec(num_specials=0)),
         seed=1,
     )
     assert tok.raised > 0
@@ -782,7 +784,7 @@ def test_measure_dataset_falls_back_when_tokenizer_always_crashes():
         0,
         store,
         est,
-        _TextCounter(_PoisonTokenizer(), TextTokenCountingSpec(special_tokens="none")),
+        _TextCounter(_PoisonTokenizer(), TextTokenCountingSpec(num_specials=0)),
         seed=1,
     )
     assert m.ratio.source == "fallback"
@@ -939,7 +941,7 @@ def test_prime_token_ratios_live_tokenizer_survives_spawn(tmp_path, monkeypatch)
             calibration_shards_min=1,
             calibration_shards_max=2,
         ),
-        counting_spec=TextTokenCountingSpec(tokenizer=tok, special_tokens="none"),
+        counting_spec=TextTokenCountingSpec(tokenizer=tok, num_specials=0),
         seed=1,
     )
     assert ratios["web"].source == "measured"
@@ -1004,7 +1006,7 @@ def test_prime_token_ratios_unpicklable_tokenizer_degrades_to_fallback(
                 calibration_shards_max=1,
             ),
             counting_spec=TextTokenCountingSpec(
-                tokenizer=_UnpicklableTokenizer(), special_tokens="none"
+                tokenizer=_UnpicklableTokenizer(), num_specials=0
             ),
             seed=1,
         )
@@ -1043,7 +1045,7 @@ def test_prime_token_ratios_broken_pool_degrades_to_fallback(tmp_path, monkeypat
                 calibration_shards_max=1,
             ),
             counting_spec=TextTokenCountingSpec(
-                tokenizer=_ExplodesOnUnpickle(), special_tokens="none"
+                tokenizer=_ExplodesOnUnpickle(), num_specials=0
             ),
             seed=1,
         )
@@ -1103,7 +1105,7 @@ def _int_rows_dataset(n_rows: int = 40) -> Dataset:
 
 def _fallback_text_counter() -> DeliveredTokenCounter:
     return TextTokenCountingSpec(
-        tokenizer=fallback_tokenizer(), special_tokens="none"
+        tokenizer=fallback_tokenizer(), num_specials=0
     ).build_counter()
 
 

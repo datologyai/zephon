@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import cloudpickle
@@ -141,8 +142,7 @@ def _field_label(path: tuple[str, ...] | None) -> str:
 
 
 def _count_raw_tokens(tokenizer: Any, text: str, spec: "TextTokenCountingSpec") -> int:
-    add_specials = spec.special_tokens == "tokenizer_default"
-    result = tokenizer(text, add_special_tokens=add_specials)
+    result = tokenizer(text, **spec.tokenizer_kwargs)
     input_ids = result["input_ids"] if isinstance(result, Mapping) else result.input_ids
     return len(input_ids)
 
@@ -224,10 +224,10 @@ class TextTokenCountingSpec(TokenCountingSpec):
 
     field: str | None = None
     missing_field: MissingFieldMode = "error"
-    max_length: int | None = None
-    truncation: bool = False
-    split_long_samples: bool = False
-    special_tokens: str = "bos_eos"
+    tokenizer_kwargs: dict[str, Any] = dataclass_field(
+        default_factory=lambda: {"add_special_tokens": False}
+    )
+    num_specials: int = 2
     use_fast: bool | None = True
     eos_token: str | None = None
 
@@ -246,38 +246,11 @@ class TextTokenCountingSpec(TokenCountingSpec):
             tokenizer_id=op.tokenizer_id,
             field=op.field,
             missing_field=op.missing_field,
-            max_length=op.max_length,
-            truncation=op.truncation,
-            split_long_samples=op.split_long_samples,
-            special_tokens=op.special_tokens,
+            tokenizer_kwargs=op._tokenization_kwargs(),
+            num_specials=op._num_specials_total(),
             use_fast=op.use_fast,
             eos_token=op.eos_token,
         )
-
-    @property
-    def num_specials(self) -> int:
-        prepend = 1 if self.special_tokens in ("bos_eos", "bos") else 0
-        append = 1 if self.special_tokens in ("bos_eos", "eos") else 0
-        return prepend + append
-
-    def delivered_tokens(self, raw_tokens: int) -> int:
-        """Compute delivery length from a content-token count.
-
-        In ``tokenizer_default`` mode, ``raw_tokens`` already includes
-        tokenizer-added special tokens.
-        """
-        if self.special_tokens == "tokenizer_default":
-            if self.truncation and self.max_length is not None:
-                return min(raw_tokens, self.max_length)
-            return raw_tokens
-
-        specials = self.num_specials
-        if self.split_long_samples:
-            # Splitting preserves token mass; BOS/EOS land on the first/last chunk.
-            return raw_tokens + specials
-        if self.truncation and self.max_length is not None:
-            return min(raw_tokens, self.max_length - specials) + specials
-        return raw_tokens + specials
 
     def build_counter(self) -> DeliveredTokenCounter:
         tokenizer = self.tokenizer
@@ -330,8 +303,10 @@ class _TextPlan(CountPlan):
             text = extract_text(payload, self.path)
         if text is None:
             return None
-        delivered = self.spec.delivered_tokens(
-            _count_raw_tokens(self.tokenizer, text, self.spec)
+        # Tokenizer truncation and postprocessing are already reflected in the
+        # returned IDs; only special tokens inserted by Zephon remain to count.
+        delivered = (
+            _count_raw_tokens(self.tokenizer, text, self.spec) + self.spec.num_specials
         )
         # Empty text is unmeasurable, not a zero-yield sample.
         return delivered or None

@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from tests.helpers.tokenizers import write_wordlevel_tokenizer
 from tests.integration.test_elastic_continuation import consume_until
 from zephon import Pipeline
 from zephon._internal.ops.tokenize_chat import TokenizeChat
@@ -144,6 +145,73 @@ def test_token_mode_delivers_token_target_sample_mode_shows_skew(tmp_path) -> No
     sample_share = token_share_by_dataset(sample_records)
     expected_skew = SHORT_WORDS / (SHORT_WORDS + LONG_WORDS)  # 0.2 for 12/48
     assert sample_share[0] == pytest.approx(expected_skew, abs=0.05)
+
+
+def test_saved_tokenizer_token_mixing_and_training(tmp_path: Path) -> None:
+    """Calibration and mixing honor tokenizer truncation through training output."""
+    pytest.importorskip("tokenizers")
+    torch = pytest.importorskip("torch")
+    folder = tmp_path / "tokenizer"
+    folder.mkdir()
+    write_wordlevel_tokenizer(folder, model_max_length=4)
+    datasets = []
+    for name, text in (("short", "hello world"), ("long", "data loader hello world !")):
+        path = tmp_path / name
+        path.mkdir()
+        (path / "data.jsonl").write_text(
+            (json.dumps({"text": text}) + "\n") * 48, encoding="utf-8"
+        )
+        datasets.append(Dataset.from_path(name, str(path)))
+    work = StaticMixtureWorkSource(
+        datasets,
+        {"short": 0.5, "long": 0.5},
+        chunk_size=4,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+        token_estimation=TokenEstimation(calibration_samples=8),
+    )
+    pipe = (
+        Pipeline(work)
+        .tokenize(
+            tokenizer_id=str(folder),
+            field="text",
+            special_tokens="tokenizer_default",
+            truncation=True,
+            return_tensors="pt",
+        )
+        .ensure_mixture(max_buffer_size=32)
+        .batch(8)
+        .options(
+            runner="process",
+            mp_context=mp.get_context("spawn"),
+            max_workers=1,
+            canonical_replicas=1,
+        )
+    )
+    assert pipe.preflight_tokenizers().ok
+    records = []
+    for batch in pipe:
+        training = batch.to_training(
+            dtype=torch.long, return_labels=True, pad_to_length=5, pad_token_id=2
+        )
+        assert training["input_ids"].dtype == training["labels"].dtype == torch.long
+        for index, record in enumerate(batch.records):
+            expected = ([0, 4, 5, 1], [0, 6, 7, 1])[record.meta.sample_id[0]]
+            assert isinstance(record.payload["input_ids"], torch.Tensor)
+            assert record.payload["input_ids"].tolist() == expected
+            assert training["input_ids"][index].tolist() == expected
+            assert training["labels"][index].tolist() == expected[1:] + [-100]
+        records.extend(batch.records)
+
+    ratios = work.state_dict()["token_ratios"]
+    for dataset in datasets:
+        ratio, source = ratios[dataset.name]
+        assert source == "measured"
+        assert (
+            ratio * dataset.raw_bytes().sum() / dataset.counts().sum()
+            == pytest.approx(4)
+        )
+    assert token_share_by_dataset(records)[0] == pytest.approx(0.5, abs=0.03)
 
 
 def _chat_messages(answer_words: int) -> list[dict[str, str]]:
@@ -399,7 +467,7 @@ def test_token_mode_is_lossless_with_bounded_buffer(tmp_path) -> None:
     )
     twin.prime(
         counting_spec=TextTokenCountingSpec(
-            tokenizer_id="__fallback__", field="text", special_tokens="none"
+            tokenizer_id="__fallback__", field="text", num_specials=0
         )
     )
     lane = twin.clone_for_lane(0, canonical_replicas=1)
@@ -576,7 +644,7 @@ def _prime_one_rank(catalog_dir: Path, root: Path, marker: Path, result: Path) -
         dataset_ids={"short": 0, "long": 1},
         estimation=TokenEstimation(calibration_samples=16),
         counting_spec=TextTokenCountingSpec(
-            tokenizer_id="__fallback__", field="text", special_tokens="none"
+            tokenizer_id="__fallback__", field="text", num_specials=0
         ),
         seed=11,
     )
