@@ -8,6 +8,3 @@ builds an index in :doc:`../datasets/parquet` and
 .. automodule:: zephon.build_index
    :members:
    :show-inheritance:
-
-.. automodule:: zephon.cli
-   :members:

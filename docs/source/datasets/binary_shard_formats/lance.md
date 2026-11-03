@@ -14,7 +14,7 @@ they are two separate files. You control shard size when you write the dataset, 
 
 Because the manifest already records each fragment's file, byte size and row count, it
 *is* the index: Zephon discovers a Lance dataset in two range reads, with no `index.json`
-to build and without opening a single data file. `zephon index` therefore
+to build and without opening a single data file. `python -m zephon.build_index` therefore
 has no Lance mode.
 
 **Preparing Lance datasets.** Install Zephon with the `lance` extra, which adds the

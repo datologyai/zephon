@@ -45,14 +45,13 @@ You can build an index for JSONL, Parquet, or Vortex at a local path or a remote
 storage root using the same command:
 
 ```bash
-zephon index parquet s3://my-bucket/dataset
-zephon index jsonl gs://my-bucket/dataset
-zephon index vortex /data/dataset
+python -m zephon.build_index parquet s3://my-bucket/dataset
+python -m zephon.build_index jsonl gs://my-bucket/dataset
+python -m zephon.build_index vortex /data/dataset
 ```
 
 The command indexes matching files directly under that root, in filename order,
-and writes `index.json` alongside them (pass `--output` to write it elsewhere; see
-`zephon index --help` for the other options). Listing, reading, and writing all use
+and writes `index.json` alongside them. Listing, reading, and writing all use
 Zephon's storage backends and their configured credentials. The output backend
 must support writes; for a read-only source, the Python API accepts an
 `output_path` pointing to a writable location.
