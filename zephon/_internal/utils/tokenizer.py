@@ -314,7 +314,11 @@ def load_hf_tokenizer(
             from zephon._internal.utils.tokenizer_v1 import load_v1_tokenizer
 
             factory = load_v1_tokenizer
-            logging.getLogger(__name__).info("Using tokenizers v1: %s", exc)
+            logging.getLogger(__name__).warning(
+                "Using the tokenizers v1 workaround because Transformers cannot import; "
+                "saved tokenizer configuration replaces Transformers class defaults: %s",
+                exc,
+            )
 
     # Resolve before the HF retry — nesting would re-list the bucket on every
     # HF retry attempt.

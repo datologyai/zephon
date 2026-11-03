@@ -72,12 +72,13 @@ class TokenizerV1:
     name_or_path: str | None
     _supports_numpy_rows = True
 
-    # fmt: off
     def __init__(self, folder: str, eos_token: str | None = None) -> None:
         root = Path(folder)
         path = root / "tokenizer.json"
         if not path.is_file():
-            raise ValueError(f"tokenizers v1 requires {path}; use a repository with tokenizer.json")
+            raise ValueError(
+                f"tokenizers v1 requires {path}; use a repository with tokenizer.json"
+            )
         # Preserve the loaded JSON for worker restores even if cached files change.
         self._source = path.read_bytes()
         self._tokenizer, spec = _load_tokenizer(self._source)
@@ -88,7 +89,9 @@ class TokenizerV1:
             config |= _read_json(root / "special_tokens_map.json")
         for token_id, token in (config.get("added_tokens_decoder") or {}).items():
             if self._ids.get(token["content"]) != int(token_id):
-                raise ValueError("tokenizer_config.json declares added tokens absent from tokenizer.json; save an up-to-date tokenizer.json")
+                raise ValueError(
+                    "tokenizer_config.json declares added tokens absent from tokenizer.json; save an up-to-date tokenizer.json"
+                )
         roles = (spec.get("role_to_token") or {}) | config
         if eos_token is not None:
             roles["eos_token"] = eos_token
@@ -112,22 +115,33 @@ class TokenizerV1:
                 if token_id is not None:
                     token = by_id.get(token_id) if type(token_id) is int else None
                     if token is None:
-                        raise ValueError(f"v1 {key}_id={token_id!r} must identify an existing added token of tokenizer.json")
-            if token is not None and (not isinstance(token, str) or token not in self._ids):
-                raise ValueError(f"v1 {key}={token!r} must name an existing added token of tokenizer.json")
+                        raise ValueError(
+                            f"v1 {key}_id={token_id!r} must identify an existing added token of tokenizer.json"
+                        )
+            if token is not None and (
+                not isinstance(token, str) or token not in self._ids
+            ):
+                raise ValueError(
+                    f"v1 {key}={token!r} must name an existing added token of tokenizer.json"
+                )
             return token
 
         self.bos_token = role("bos_token")
         self.eos_token = role("eos_token")
         self.pad_token = role("pad_token")
         truncation = spec.get("truncation") or {}
-        self._padding_side = config.get("padding_side", padding.get("direction", "right").lower())
-        self._truncation_side = config.get("truncation_side", truncation.get("direction", "right").lower())
+        self._padding_side = config.get(
+            "padding_side", padding.get("direction", "right").lower()
+        )
+        self._truncation_side = config.get(
+            "truncation_side", truncation.get("direction", "right").lower()
+        )
         length = config.get("model_max_length")
-        self._max_length = length if type(length) is int and 0 < length < 10**20 else None
+        self._max_length = (
+            length if type(length) is int and 0 < length < 10**20 else None
+        )
         self._split_special = bool(config.get("split_special_tokens", False))
         self.name_or_path = folder
-    # fmt: on
 
     @property
     def bos_token_id(self) -> int | None:

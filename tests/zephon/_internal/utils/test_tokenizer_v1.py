@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import builtins
+import inspect
 import json
 import os
 import pickle
+import subprocess
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -46,6 +48,136 @@ def _update_json(path: Path, **changes: Any) -> None:
 @pytest.fixture
 def tokenizer_dir(tmp_path: Path) -> Path:
     return write_wordlevel_tokenizer(tmp_path)
+
+
+def test_v1_workaround_is_still_needed(tokenizer_dir: Path) -> None:
+    try:
+        version("transformers")
+    except PackageNotFoundError:
+        pytest.skip("requires real Transformers alongside tokenizers v1")
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(str(tokenizer_dir), local_files_only=True)
+        output = tok("hello world")
+    except (ImportError, AttributeError, TypeError):
+        return  # Transformers still rejects v1 or requires its removed APIs.
+    assert output["input_ids"] == [0, 4, 5, 1]
+    assert tok.eos_token_id == 1
+    pytest.fail(
+        "Transformers now loads and tokenizes correctly with tokenizers v1; "
+        "remove the v1 workaround and its compatibility test"
+    )
+
+
+def _transformers_reference() -> None:
+    """Build saved tokenizers and reference outputs in an isolated v0 interpreter."""
+    import json
+    import sys
+    from importlib.metadata import version
+    from pathlib import Path
+
+    from tokenizers import (
+        AddedToken,
+        Tokenizer,
+        models,
+        normalizers,
+        pre_tokenizers,
+        processors,
+        trainers,
+    )
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+    assert int(version("tokenizers").split(".", 1)[0]) == 0, "reference requires v0"
+    root, family = Path(sys.argv[1]), sys.argv[2]
+    cases = json.load(sys.stdin)
+    tokenizer = Tokenizer(getattr(models, family)(unk_token="<unk>"))
+    tokenizer.normalizer = normalizers.NFC()
+    tokenizer.pre_tokenizer = (
+        pre_tokenizers.ByteLevel(add_prefix_space=False)
+        if family == "BPE"
+        else pre_tokenizers.Whitespace()
+    )
+    trainer = getattr(trainers, ("Bpe" if family == "BPE" else family) + "Trainer")(
+        vocab_size=320,
+        special_tokens=["<bos>", "<eos>", "<pad>", "<unk>"],
+        **(
+            {"initial_alphabet": pre_tokenizers.ByteLevel.alphabet()}
+            if family == "BPE"
+            else {}
+        ),
+    )
+    tokenizer.train_from_iterator(
+        ["hello world data loader ! café Ελληνικά 中文"], trainer=trainer
+    )
+    tokenizer.add_tokens(
+        [
+            AddedToken("  ", normalized=False),
+            AddedToken("<tag>", lstrip=True, rstrip=True),
+        ]
+    )
+    tokenizer.post_processor = processors.TemplateProcessing(
+        single="<bos> $A <eos>", special_tokens=[("<bos>", 0), ("<eos>", 1)]
+    )
+    wrapped = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        bos_token="<bos>",
+        eos_token="<eos>",
+        pad_token="<pad>",
+        unk_token="<unk>",
+        model_max_length=8,
+    )
+    results = {}
+    for side in ("left", "right"):
+        wrapped.padding_side = wrapped.truncation_side = side
+        folder = root / side
+        wrapped.save_pretrained(folder)
+        loaded = AutoTokenizer.from_pretrained(folder, local_files_only=True)
+        results[side] = {
+            "roles": [loaded.bos_token_id, loaded.eos_token_id, loaded.pad_token_id],
+            "outputs": [dict(loaded(texts, **kwargs)) for texts, kwargs in cases],
+        }
+    print(json.dumps(results))
+
+
+@pytest.mark.parametrize("family", ["BPE", "WordPiece", "WordLevel"])
+def test_v1_matches_transformers_saved_tokenizers(tmp_path: Path, family: str) -> None:
+    """Compare supported saved configurations, without model-specific class defaults."""
+    reference_python = os.environ.get("TRANSFORMERS_REFERENCE_PYTHON")
+    if not reference_python:
+        pytest.skip(
+            "set TRANSFORMERS_REFERENCE_PYTHON to a Transformers/v0 interpreter"
+        )
+    texts = ["hello world", "", "hello  world", "cafe\u0301 中文", "hello <tag> world"]
+    cases = [
+        ("hello <eos> world", {"add_special_tokens": False}),
+        (texts, {"add_special_tokens": False}),
+        (texts, {"padding": True}),
+        (texts, {"padding": "max_length", "max_length": 12}),
+        (["hello world data loader ! " * 4, "hello"], {"truncation": True}),
+        (texts, {"truncation": True, "max_length": 5, "padding": "max_length"}),
+    ]
+    # Execute only the helper's source so the v0 environment needs no Zephon or
+    # pytest dependencies. Both loaders read the same files without patched APIs.
+    script = inspect.getsource(_transformers_reference) + "\n_transformers_reference()"
+    reference = subprocess.run(
+        [reference_python, "-c", script, str(tmp_path), family],
+        input=json.dumps(cases),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert reference.returncode == 0, reference.stderr
+    for side, expected in json.loads(reference.stdout).items():
+        tok = load_v1_tokenizer(str(tmp_path / side))
+        assert [tok.bos_token_id, tok.eos_token_id, tok.pad_token_id] == expected[
+            "roles"
+        ]
+        for (texts, kwargs), output in zip(cases, expected["outputs"]):
+            # Transformers also returns token_type_ids, which Zephon does not emit.
+            assert tok(texts, **kwargs) == {
+                key: output[key] for key in ("input_ids", "attention_mask")
+            }, (family, side, texts, kwargs)
 
 
 def test_v1_roles_and_single_or_ragged_batch(tokenizer_dir: Path) -> None:
@@ -272,7 +404,7 @@ def test_v1_rejects_added_token_id_renumbering(tokenizer_dir: Path) -> None:
         }
     )
     _write_json(path, spec)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="changed the ID of '<gapped>'"):
         TokenizerV1(str(tokenizer_dir))
 
 

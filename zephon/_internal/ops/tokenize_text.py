@@ -62,7 +62,13 @@ T_TokenSeq = TypeVar("T_TokenSeq", bound=TokenSeq)
 
 
 class TokenizeText(TokenizeBase):
-    """Tokenize text fields using a provided or auto-resolved tokenizer."""
+    """Tokenize text fields using a provided or auto-resolved tokenizer.
+
+    Array outputs preserve the dtype supplied by the tokenizer, which may be
+    unsigned; Python lists use the requested framework's dtype inference.
+    Dtype conversion for training should normally happen in ``to_training()``
+    or a custom map op.
+    """
 
     def __init__(
         self,

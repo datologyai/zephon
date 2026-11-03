@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
@@ -63,6 +64,7 @@ def test_text_fallback_needs_no_installed_tokenizers(
 def test_loader_falls_back_for_v1_import_error_and_resolves_cloud(
     installed: str,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     import builtins
 
@@ -95,10 +97,20 @@ def test_loader_falls_back_for_v1_import_error_and_resolves_cloud(
             shared.load_hf_tokenizer("s3://bucket/tokenizer", eos_token="<end>"), _Tok
         )
         assert calls == ["/resolved/tokenizer"]
+        assert caplog.record_tuples == [
+            (
+                shared.__name__,
+                logging.WARNING,
+                "Using the tokenizers v1 workaround because Transformers cannot import; "
+                "saved tokenizer configuration replaces Transformers class defaults: "
+                "AddedToken is unavailable",
+            )
+        ]
     else:
         with pytest.raises(ImportError, match="AddedToken"):
             shared.load_hf_tokenizer("model/name")
         assert calls == []
+        assert not caplog.records
 
 
 @pytest.mark.parametrize("error_type", [ValueError, ImportError])
