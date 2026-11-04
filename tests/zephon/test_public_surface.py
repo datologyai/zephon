@@ -205,6 +205,7 @@ EXPECTED_ALL = {
         "FetchTimingDelta",
         "FetchTimingSummary",
         "FetchTimingTotals",
+        "NodeMetricsDelta",
         "NodeSummary",
         "PipelineSummary",
         "PrefetchTimingDelta",
@@ -269,6 +270,7 @@ EXPECTED_ALL = {
         "MixtureSpec",
     ],
     "zephon.work.static_mixture": [
+        "ShuffleBlockSpec",
         "StaticMixtureWorkSource",
     ],
     "zephon.work.token_estimation": [

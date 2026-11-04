@@ -31,6 +31,9 @@ Observability
 .. autoclass:: zephon.observability.stats.NodeSummary
    :members:
 
+.. autoclass:: zephon.observability.stats.NodeMetricsDelta
+   :members:
+
 Validation
 ----------
 

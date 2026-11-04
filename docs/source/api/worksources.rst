@@ -8,6 +8,20 @@ The guide covers these in :doc:`../worksources/index`.
    :members:
    :show-inheritance:
 
+Shuffle block size
+------------------
+
+.. py:currentmodule:: zephon.work.static_mixture
+
+.. py:data:: ShuffleBlockSpec
+   :type: int | Literal['auto', 'global'] | None
+
+   Accepted values for ``StaticMixtureWorkSource(shuffle_block_size=...)``:
+   ``None`` disables cross-shard shuffling, a positive ``int`` sets the block
+   size in samples, ``"auto"`` uses eight times the largest shard, and
+   ``"global"`` shuffles across the whole mixture. Sizes are clamped to the
+   total sample count.
+
 Work chunk types
 ----------------
 
