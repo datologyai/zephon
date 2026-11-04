@@ -963,6 +963,42 @@ See <code class="xref py py-data docutils literal notranslate"><span class="pre"
 
 </dd></dl>
 
+<section id="shuffle-block-size">
+<h2>Shuffle block size<a class="headerlink" href="#shuffle-block-size" title="Link to this heading">¶</a></h2>
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.work.static_mixture.ShuffleBlockSpec">
+<span class="sig-name descname"><span class="pre">ShuffleBlockSpec</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'auto'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'global'</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/constants.html#None" title="(in Python v3.15)"><span class="pre">None</span></a></span><a class="headerlink" href="#zephon.work.static_mixture.ShuffleBlockSpec" title="Link to this definition">¶</a></dt>
+<dd><p>Accepted values for <code class="docutils literal notranslate"><span class="pre">StaticMixtureWorkSource(shuffle_block_size=...)</span></code>:
+<code class="docutils literal notranslate"><span class="pre">None</span></code> disables cross-shard shuffling, a positive <code class="docutils literal notranslate"><span class="pre">int</span></code> sets the block
+size in samples, <code class="docutils literal notranslate"><span class="pre">&quot;auto&quot;</span></code> uses eight times the largest shard, and
+<code class="docutils literal notranslate"><span class="pre">&quot;global&quot;</span></code> shuffles across the whole mixture. Sizes are clamped to the
+total sample count.</p>
+</dd></dl>
+
+</section>
+<section id="work-chunk-types">
+<h2>Work chunk types<a class="headerlink" href="#work-chunk-types" title="Link to this heading">¶</a></h2>
+<p>The aliases <a class="reference internal" href="#zephon.work.WorkChunk" title="zephon.work.WorkChunk"><code class="xref py py-class docutils literal notranslate"><span class="pre">WorkChunk</span></code></a> uses for its components and the
+sample ids it yields.</p>
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.work.base.MixtureComponent">
+<span class="sig-name descname"><span class="pre">MixtureComponent</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a></span><a class="headerlink" href="#zephon.work.base.MixtureComponent" title="Link to this definition">¶</a></dt>
+<dd><p>Name of one component of a dataset mixture.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.work.base.SourcedSampleId">
+<span class="sig-name descname"><span class="pre">SourcedSampleId</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="records.html#zephon.types.SampleId" title="zephon.types.SampleId"><span class="pre">SampleId</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.work.base.MixtureComponent" title="zephon.work.base.MixtureComponent"><span class="pre">MixtureComponent</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.work.base.SourcedSampleId" title="Link to this definition">¶</a></dt>
+<dd><p>A sample id paired with the mixture component it came from.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.work.base.SamplesPerComponent">
+<span class="sig-name descname"><span class="pre">SamplesPerComponent</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">MutableMapping</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#zephon.work.base.MixtureComponent" title="zephon.work.base.MixtureComponent"><span class="pre">MixtureComponent</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><span class="pre">list</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="records.html#zephon.types.SampleId" title="zephon.types.SampleId"><span class="pre">SampleId</span></a><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.work.base.SamplesPerComponent" title="Link to this definition">¶</a></dt>
+<dd><p>Sample ids grouped by mixture component, as in <code class="docutils literal notranslate"><span class="pre">WorkChunk.components</span></code>.</p>
+</dd></dl>
+
+</section>
 </section>
 
         </article>
@@ -1097,6 +1133,16 @@ See <code class="xref py py-data docutils literal notranslate"><span class="pre"
 <li><a class="reference internal" href="#zephon.work.TokenEstimation.calibration_shards_min"><code class="docutils literal notranslate"><span class="pre">calibration_shards_min</span></code></a></li>
 <li><a class="reference internal" href="#zephon.work.TokenEstimation.calibration_shards_max"><code class="docutils literal notranslate"><span class="pre">calibration_shards_max</span></code></a></li>
 <li><a class="reference internal" href="#zephon.work.TokenEstimation.fallback_tokens_per_byte"><code class="docutils literal notranslate"><span class="pre">fallback_tokens_per_byte</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#shuffle-block-size">Shuffle block size</a><ul>
+<li><a class="reference internal" href="#zephon.work.static_mixture.ShuffleBlockSpec"><code class="docutils literal notranslate"><span class="pre">ShuffleBlockSpec</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#work-chunk-types">Work chunk types</a><ul>
+<li><a class="reference internal" href="#zephon.work.base.MixtureComponent"><code class="docutils literal notranslate"><span class="pre">MixtureComponent</span></code></a></li>
+<li><a class="reference internal" href="#zephon.work.base.SourcedSampleId"><code class="docutils literal notranslate"><span class="pre">SourcedSampleId</span></code></a></li>
+<li><a class="reference internal" href="#zephon.work.base.SamplesPerComponent"><code class="docutils literal notranslate"><span class="pre">SamplesPerComponent</span></code></a></li>
 </ul>
 </li>
 </ul>

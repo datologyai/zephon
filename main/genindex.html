@@ -364,11 +364,15 @@
 </li>
           <li><a href="api/runtime.html#zephon.observability.FetchTimingTotals.apply">(FetchTimingTotals method)</a>
 </li>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.apply">(NodeSummary method)</a>
+</li>
           <li><a href="api/runtime.html#zephon.observability.PipelineSummary.apply">(PipelineSummary method)</a>
 </li>
           <li><a href="api/runtime.html#zephon.observability.PrefetchTimingSummary.apply">(PrefetchTimingSummary method)</a>
 </li>
           <li><a href="api/runtime.html#zephon.observability.PrefetchTimingTotals.apply">(PrefetchTimingTotals method)</a>
+</li>
+          <li><a href="api/runtime.html#zephon.observability.stats.StageSummary.apply">(StageSummary method)</a>
 </li>
         </ul></li>
     </ul></td>
@@ -390,6 +394,8 @@
         <li><a href="api/runtime.html#zephon.observability.FetchTimingTotals.avg_group_ns">avg_group_ns (FetchTimingTotals property)</a>
 </li>
         <li><a href="api/runtime.html#zephon.observability.FetchTimingTotals.avg_open_ns">avg_open_ns (FetchTimingTotals property)</a>
+</li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.avg_processing_ns">avg_processing_ns (NodeSummary property)</a>
 </li>
         <li><a href="api/runtime.html#zephon.observability.FetchTimingTotals.avg_read_ns">avg_read_ns (FetchTimingTotals property)</a>
 </li>
@@ -551,6 +557,18 @@
 </li>
         <li><a href="api/runtime.html#zephon.observability.PipelineSummary.compute_wait_ratios">compute_wait_ratios() (PipelineSummary method)</a>
 </li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.consumed_bytes">consumed_bytes (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.consumed_bytes">(NodeSummary attribute)</a>
+</li>
+        </ul></li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.consumed_elements">consumed_elements (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.consumed_elements">(NodeSummary attribute)</a>
+</li>
+        </ul></li>
         <li><a href="api/worksources.html#zephon.work.StaticMixtureWorkSource.continues_after_exhaustion">continues_after_exhaustion() (StaticMixtureWorkSource method)</a>
 
         <ul>
@@ -575,6 +593,8 @@
           <li><a href="api/runtime.html#zephon.observability.FetchTimingTotals.copy">(FetchTimingTotals method)</a>
 </li>
           <li><a href="api/runtime.html#zephon.observability.PrefetchTimingTotals.copy">(PrefetchTimingTotals method)</a>
+</li>
+          <li><a href="api/runtime.html#zephon.observability.stats.StageSummary.copy">(StageSummary method)</a>
 </li>
         </ul></li>
         <li><a href="api/operators.html#zephon.ops.CountingAccumulator">CountingAccumulator (class in zephon.ops)</a>
@@ -649,6 +669,8 @@
   <h2>E</h2>
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.empty">empty() (NodeMetricsDelta class method)</a>
+</li>
         <li><a href="api/pipeline.html#zephon.Pipeline.enable_observability">enable_observability() (Pipeline method)</a>
 </li>
         <li><a href="api/datasets.html#zephon.io.CacheOptions.enabled">enabled (CacheOptions attribute)</a>
@@ -659,10 +681,12 @@
         </ul></li>
         <li><a href="api/pipeline.html#zephon.Pipeline.ensure_mixture">ensure_mixture() (Pipeline method)</a>
 </li>
-        <li><a href="api/runtime.html#zephon.validation.ValidationReport.errors">errors (ValidationReport property)</a>
+        <li><a href="api/tools.html#zephon.cli.ENTRY_POINT_GROUP">ENTRY_POINT_GROUP (in module zephon.cli)</a>
 </li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/runtime.html#zephon.validation.ValidationReport.errors">errors (ValidationReport property)</a>
+</li>
         <li><a href="api/runtime.html#zephon.options.RuntimeOptions.execution_tracking">execution_tracking (RuntimeOptions attribute)</a>
 </li>
         <li><a href="api/runtime.html#zephon.observability.ExecutionTrackingMode">ExecutionTrackingMode (class in zephon.observability)</a>
@@ -789,6 +813,8 @@
         </ul></li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.has_samples">has_samples (NodeSummary property)</a>
+</li>
         <li><a href="api/runtime.html#zephon.observability.FetchTimingSummary.has_samples">has_samples() (FetchTimingSummary method)</a>
 
         <ul>
@@ -812,7 +838,11 @@
         <li><a href="api/runtime.html#zephon.observability.MetricsSinkMode.includes_statsd">includes_statsd() (MetricsSinkMode method)</a>
 </li>
         <li><a href="api/runtime.html#zephon.observability.FetchStageSummary.index">index (FetchStageSummary attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.StageSummary.index">(StageSummary attribute)</a>
 </li>
+        </ul></li>
         <li><a href="api/operators.html#zephon.ops.OpTraits.indexable">indexable (OpTraits attribute)</a>
 </li>
         <li><a href="api/pipeline.html#zephon.Pipeline.inflight_summary">inflight_summary() (Pipeline method)</a>
@@ -844,6 +874,8 @@
         <li><a href="api/runtime.html#zephon.validation.Issue">Issue (class in zephon.validation)</a>
 </li>
         <li><a href="api/runtime.html#zephon.validation.ValidationReport.issues">issues (ValidationReport attribute)</a>
+</li>
+        <li><a href="api/runtime.html#zephon.observability.stats.StageSummary.iter_nodes">iter_nodes() (StageSummary method)</a>
 </li>
         <li><a href="api/worksources.html#zephon.work.WorkChunk.iter_samples">iter_samples() (WorkChunk method)</a>
 </li>
@@ -931,6 +963,8 @@
   <h2>M</h2>
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/tools.html#zephon.cli.main">main() (in module zephon.cli)</a>
+</li>
         <li><a href="api/pipeline.html#zephon.Pipeline.map_batch">map_batch() (Pipeline method)</a>
 </li>
         <li><a href="api/pipeline.html#zephon.Pipeline.map_transform">map_transform() (Pipeline method)</a>
@@ -945,6 +979,18 @@
 </li>
         <li><a href="api/datasets.html#zephon.io.Dataset.max_count">max_count() (Dataset method)</a>
 </li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.max_processing_ns">max_processing_ns (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.max_processing_ns">(NodeSummary attribute)</a>
+</li>
+        </ul></li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.max_queue_depth">max_queue_depth (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.max_queue_depth">(NodeSummary attribute)</a>
+</li>
+        </ul></li>
         <li><a href="api/datasets.html#zephon.io.CacheOptions.max_slack_bytes">max_slack_bytes (CacheOptions attribute)</a>
 </li>
         <li><a href="api/runtime.html#zephon.options.RuntimeOptions.max_worker_retries">max_worker_retries (RuntimeOptions attribute)</a>
@@ -980,6 +1026,8 @@
 </li>
           <li><a href="api/runtime.html#zephon.observability.PrefetchTimingTotals.merge">(PrefetchTimingTotals method)</a>
 </li>
+          <li><a href="api/runtime.html#zephon.observability.stats.StageSummary.merge">(StageSummary method)</a>
+</li>
           <li><a href="api/datasets.html#zephon.io.StoreOptions.merge">(StoreOptions method)</a>
 </li>
           <li><a href="api/datasets.html#zephon.io.VortexOptions.merge">(VortexOptions method)</a>
@@ -991,10 +1039,10 @@
 </li>
         <li><a href="api/datasets.html#zephon.io.StoreOptions.metadata_cache_entries">metadata_cache_entries (StoreOptions attribute)</a>
 </li>
-        <li><a href="api/runtime.html#zephon.options.RuntimeOptions.metrics_sink_config">metrics_sink_config (RuntimeOptions attribute)</a>
-</li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/runtime.html#zephon.options.RuntimeOptions.metrics_sink_config">metrics_sink_config (RuntimeOptions attribute)</a>
+</li>
         <li><a href="api/pipeline.html#zephon.Pipeline.metrics_snapshot">metrics_snapshot() (Pipeline method)</a>
 </li>
         <li><a href="api/runtime.html#zephon.observability.MetricsSinkConfig">MetricsSinkConfig (class in zephon.observability)</a>
@@ -1003,6 +1051,12 @@
 </li>
         <li><a href="api/datasets.html#zephon.io.ParquetRGCacheOptions.min_free_bytes">min_free_bytes (ParquetRGCacheOptions attribute)</a>
 </li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.min_processing_ns">min_processing_ns (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.min_processing_ns">(NodeSummary attribute)</a>
+</li>
+        </ul></li>
         <li><a href="api/datasets.html#zephon.io.CacheOptions.min_slack_bytes">min_slack_bytes (CacheOptions attribute)</a>
 </li>
         <li><a href="api/operators.html#zephon.ops.MissingFieldMode">MissingFieldMode (in module zephon.ops)</a>
@@ -1010,6 +1064,8 @@
         <li><a href="api/worksources.html#zephon.work.WorkChunk.mixture">mixture (WorkChunk property)</a>
 </li>
         <li><a href="api/runtime.html#zephon.options.RuntimeOptions.mixture_config">mixture_config (RuntimeOptions attribute)</a>
+</li>
+        <li><a href="api/worksources.html#zephon.work.base.MixtureComponent">MixtureComponent (in module zephon.work.base)</a>
 </li>
         <li><a href="api/worksources.html#zephon.work.MixtureReadConfig">MixtureReadConfig (class in zephon.work)</a>
 </li>
@@ -1028,6 +1084,8 @@
 
         <ul>
           <li><a href="api/tools.html#module-zephon.build_index">zephon.build_index</a>
+</li>
+          <li><a href="api/tools.html#module-zephon.cli">zephon.cli</a>
 </li>
           <li><a href="api/datasets.html#module-zephon.io">zephon.io</a>
 </li>
@@ -1069,7 +1127,15 @@
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/datasets.html#zephon.io.Dataset.name">name (Dataset attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.name">(NodeMetricsDelta attribute)</a>
 </li>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.name">(NodeSummary attribute)</a>
+</li>
+          <li><a href="api/runtime.html#zephon.observability.stats.StageSummary.name">(StageSummary attribute)</a>
+</li>
+        </ul></li>
         <li><a href="api/runtime.html#zephon.observability.MetricsSinkConfig.namespace">namespace (MetricsSinkConfig attribute)</a>
 </li>
         <li><a href="api/worksources.html#zephon.work.StaticMixtureWorkSource.next_chunk">next_chunk() (StaticMixtureWorkSource method)</a>
@@ -1080,7 +1146,13 @@
         </ul></li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta">NodeMetricsDelta (class in zephon.observability.stats)</a>
+</li>
         <li><a href="api/runtime.html#zephon.observability.ExecutionTrackingMode.NODES">NODES (ExecutionTrackingMode attribute)</a>
+</li>
+        <li><a href="api/runtime.html#zephon.observability.stats.StageSummary.nodes">nodes (StageSummary attribute)</a>
+</li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary">NodeSummary (class in zephon.observability.stats)</a>
 </li>
         <li><a href="api/worksources.html#zephon.work.MixtureSpec.normalized">normalized (MixtureSpec property)</a>
 </li>
@@ -1100,16 +1172,22 @@
 </li>
         <li><a href="api/operators.html#zephon.ops.Accumulator.on_source_exhausted">on_source_exhausted() (Accumulator method)</a>
 </li>
-        <li><a href="api/operators.html#zephon.ops.StageInfo.op_index">op_index (StageInfo attribute)</a>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.op_index">op_index (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.op_index">(NodeSummary attribute)</a>
 </li>
+          <li><a href="api/operators.html#zephon.ops.StageInfo.op_index">(StageInfo attribute)</a>
+</li>
+        </ul></li>
         <li><a href="api/runtime.html#zephon.validation.Issue.op_name">op_name (Issue attribute)</a>
 </li>
         <li><a href="api/runtime.html#zephon.options.RuntimeOptions.op_queue_capacity">op_queue_capacity (RuntimeOptions attribute)</a>
 </li>
-        <li><a href="api/operators.html#zephon.ops.OpContext">OpContext (class in zephon.ops)</a>
-</li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/operators.html#zephon.ops.OpContext">OpContext (class in zephon.ops)</a>
+</li>
         <li><a href="api/runtime.html#zephon.observability.FetchTimingDelta.open_ns">open_ns (FetchTimingDelta attribute)</a>
 
         <ul>
@@ -1182,8 +1260,6 @@
 </li>
         <li><a href="api/pipeline.html#zephon.Pipeline.prefetch">prefetch() (Pipeline method)</a>
 </li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/runtime.html#zephon.options.RuntimeOptions.prefetch_batches">prefetch_batches (RuntimeOptions attribute)</a>
 </li>
         <li><a href="api/runtime.html#zephon.observability.MTPQueueStats.prefetch_depth">prefetch_depth (MTPQueueStats attribute)</a>
@@ -1194,6 +1270,8 @@
           <li><a href="api/runtime.html#zephon.observability.PrefetchTimingTotals.prefetch_failed">(PrefetchTimingTotals attribute)</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/runtime.html#zephon.observability.PrefetchTimingDelta.prefetch_requests">prefetch_requests (PrefetchTimingDelta attribute)</a>
 
         <ul>
@@ -1234,6 +1312,26 @@
 </li>
         <li><a href="api/operators.html#zephon.ops.BaseOp.process_one">process_one() (BaseOp method)</a>
 </li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.processed_ns">processed_ns (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.processed_ns">(NodeSummary attribute)</a>
+</li>
+        </ul></li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.produced_bytes">produced_bytes (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.produced_bytes">(NodeSummary attribute)</a>
+</li>
+        </ul></li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.produced_elements">produced_elements (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.produced_elements">(NodeSummary attribute)</a>
+</li>
+          <li><a href="api/runtime.html#zephon.observability.stats.StageSummary.produced_elements">(StageSummary property)</a>
+</li>
+        </ul></li>
         <li><a href="api/operators.html#zephon.ops.Accumulator.push_many">push_many() (Accumulator method)</a>
 
         <ul>
@@ -1374,6 +1472,8 @@
           <li><a href="api/runtime.html#zephon.observability.PrefetchTimingTotals.samples">(PrefetchTimingTotals attribute)</a>
 </li>
         </ul></li>
+        <li><a href="api/worksources.html#zephon.work.base.SamplesPerComponent">SamplesPerComponent (in module zephon.work.base)</a>
+</li>
         <li><a href="api/worksources.html#zephon.work.MixtureReadConfig.seed">seed (MixtureReadConfig attribute)</a>
 
         <ul>
@@ -1410,12 +1510,12 @@
 </li>
         <li><a href="api/runtime.html#zephon.options.RuntimeOptions.shm_max_coalesced_bytes">shm_max_coalesced_bytes (RuntimeOptions attribute)</a>
 </li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/runtime.html#zephon.options.RuntimeOptions.shm_min_forward_bytes">shm_min_forward_bytes (RuntimeOptions attribute)</a>
 </li>
         <li><a href="api/runtime.html#zephon.options.RuntimeOptions.shm_min_item_bytes">shm_min_item_bytes (RuntimeOptions attribute)</a>
 </li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/runtime.html#zephon.options.RuntimeOptions.shm_min_new_allocation_bytes">shm_min_new_allocation_bytes (RuntimeOptions attribute)</a>
 </li>
         <li><a href="api/runtime.html#zephon.observability.MetricsSinkConfig.should_emit_statsd">should_emit_statsd() (MetricsSinkConfig method)</a>
@@ -1426,9 +1526,13 @@
 </li>
         <li><a href="api/pipeline.html#zephon.Pipeline.shuffle">shuffle() (Pipeline method)</a>
 </li>
+        <li><a href="api/worksources.html#zephon.work.static_mixture.ShuffleBlockSpec">ShuffleBlockSpec (in module zephon.work.static_mixture)</a>
+</li>
         <li><a href="api/runtime.html#zephon.options.RuntimeOptions.shutdown_mode">shutdown_mode (RuntimeOptions attribute)</a>
 </li>
         <li><a href="api/worksources.html#zephon.work.WorkChunk.source_exhausted">source_exhausted (WorkChunk attribute)</a>
+</li>
+        <li><a href="api/worksources.html#zephon.work.base.SourcedSampleId">SourcedSampleId (in module zephon.work.base)</a>
 </li>
         <li><a href="api/operators.html#zephon.ops.accumulators.SourceExhaustion">SourceExhaustion (class in zephon.ops.accumulators)</a>
 </li>
@@ -1441,13 +1545,21 @@
         <li><a href="api/runtime.html#zephon.observability.FetchTimingDelta.stage_index">stage_index (FetchTimingDelta attribute)</a>
 
         <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.stage_index">(NodeMetricsDelta attribute)</a>
+</li>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.stage_index">(NodeSummary attribute)</a>
+</li>
           <li><a href="api/runtime.html#zephon.observability.PrefetchTimingDelta.stage_index">(PrefetchTimingDelta attribute)</a>
 </li>
           <li><a href="api/operators.html#zephon.ops.StageInfo.stage_index">(StageInfo attribute)</a>
 </li>
         </ul></li>
-        <li><a href="api/operators.html#zephon.ops.StageInfo.stage_name">stage_name (StageInfo attribute)</a>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.stage_name">stage_name (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/operators.html#zephon.ops.StageInfo.stage_name">(StageInfo attribute)</a>
 </li>
+        </ul></li>
         <li><a href="api/runtime.html#zephon.observability.MTPQueueStats.staged_bytes">staged_bytes (MTPQueueStats attribute)</a>
 </li>
         <li><a href="api/operators.html#zephon.ops.StageInfo">StageInfo (class in zephon.ops)</a>
@@ -1462,6 +1574,8 @@
           <li><a href="api/runtime.html#zephon.observability.PrefetchTimingSummary.stages">(PrefetchTimingSummary attribute)</a>
 </li>
         </ul></li>
+        <li><a href="api/runtime.html#zephon.observability.stats.StageSummary">StageSummary (class in zephon.observability.stats)</a>
+</li>
         <li><a href="api/worksources.html#zephon.work.StaticMixtureWorkSource.state_dict">state_dict() (StaticMixtureWorkSource method)</a>
 
         <ul>
@@ -1506,6 +1620,8 @@
 </li>
         <li><a href="api/operators.html#zephon.ops.BaseOp.teardown">teardown() (BaseOp method)</a>
 </li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.to_dict">to_dict() (NodeSummary method)</a>
+</li>
         <li><a href="api/pipeline.html#zephon.Pipeline.to_indexable_torch_dataset">to_indexable_torch_dataset() (Pipeline method)</a>
 </li>
         <li><a href="api/operators.html#zephon.ops.DomainGroups.to_member_map">to_member_map() (DomainGroups method)</a>
@@ -1526,10 +1642,10 @@
 </li>
         <li><a href="api/pipeline.html#zephon.Pipeline.tokenize">tokenize() (Pipeline method)</a>
 </li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/pipeline.html#zephon.Pipeline.tokenize_chat">tokenize_chat() (Pipeline method)</a>
 </li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/records.html#zephon.types.SampleMeta.tombstone">tombstone (SampleMeta property)</a>
 </li>
         <li><a href="api/operators.html#zephon.ops.tombstone_meta">tombstone_meta() (in module zephon.ops)</a>
@@ -1538,7 +1654,11 @@
 </li>
         <li><a href="api/datasets.html#zephon.io.Dataset.total">total() (Dataset method)</a>
 </li>
+        <li><a href="api/runtime.html#zephon.observability.stats.StageSummary.total_processing_ns">total_processing_ns (StageSummary property)</a>
+</li>
         <li><a href="api/worksources.html#zephon.work.StaticMixtureWorkSource.total_samples">total_samples (StaticMixtureWorkSource property)</a>
+</li>
+        <li><a href="api/runtime.html#zephon.observability.stats.StageSummary.total_wait_ns">total_wait_ns (StageSummary property)</a>
 </li>
         <li><a href="api/runtime.html#zephon.observability.PipelineSummary.total_wait_ratio">total_wait_ratio (PipelineSummary attribute)</a>
 </li>
@@ -1602,6 +1722,14 @@
   <h2>W</h2>
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeMetricsDelta.wait_ns">wait_ns (NodeMetricsDelta attribute)</a>
+
+        <ul>
+          <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.wait_ns">(NodeSummary attribute)</a>
+</li>
+        </ul></li>
+        <li><a href="api/runtime.html#zephon.observability.stats.NodeSummary.wait_ratio">wait_ratio (NodeSummary attribute)</a>
+</li>
         <li><a href="api/runtime.html#zephon.validation.ValidationReport.warnings">warnings (ValidationReport property)</a>
 </li>
         <li><a href="api/worksources.html#zephon.work.MixtureReadMode.WEIGHTED_RANDOM">WEIGHTED_RANDOM (MixtureReadMode attribute)</a>
@@ -1614,10 +1742,10 @@
 </li>
         <li><a href="api/records.html#zephon.types.SampleMeta.with_contributors">with_contributors() (SampleMeta method)</a>
 </li>
-        <li><a href="api/records.html#zephon.types.SampleMeta.with_lineage">with_lineage() (SampleMeta method)</a>
-</li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/records.html#zephon.types.SampleMeta.with_lineage">with_lineage() (SampleMeta method)</a>
+</li>
         <li><a href="api/records.html#zephon.types.SampleMeta.with_tombstone">with_tombstone() (SampleMeta method)</a>
 </li>
         <li><a href="api/worksources.html#zephon.work.MixtureReadConfig.within_component">within_component (MixtureReadConfig attribute)</a>
@@ -1649,6 +1777,13 @@
 
         <ul>
           <li><a href="api/tools.html#module-zephon.build_index">module</a>
+</li>
+        </ul></li>
+        <li>
+    zephon.cli
+
+        <ul>
+          <li><a href="api/tools.html#module-zephon.cli">module</a>
 </li>
         </ul></li>
         <li>

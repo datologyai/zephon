@@ -343,6 +343,8 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">ExecutionTrackingMode</span>
 
 
+<div class="viewcode-block" id="NodeMetricsDelta">
+<a class="viewcode-back" href="../../../api/runtime.html#zephon.observability.NodeMetricsDelta">[docs]</a>
 <span class="nd">@dataclass</span><span class="p">(</span><span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 <span class="k">class</span><span class="w"> </span><span class="nc">NodeMetricsDelta</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">"""Incremental metrics produced by a runner for a single operator."""</span>
@@ -361,6 +363,8 @@
     <span class="n">min_processing_ns</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
     <span class="n">max_processing_ns</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
 
+<div class="viewcode-block" id="NodeMetricsDelta.empty">
+<a class="viewcode-back" href="../../../api/runtime.html#zephon.observability.NodeMetricsDelta.empty">[docs]</a>
     <span class="nd">@classmethod</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">empty</span><span class="p">(</span>
         <span class="bp">cls</span><span class="p">,</span> <span class="n">stage_index</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">op_index</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">stage_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
@@ -370,9 +374,13 @@
             <span class="n">op_index</span><span class="o">=</span><span class="n">op_index</span><span class="p">,</span>
             <span class="n">stage_name</span><span class="o">=</span><span class="n">stage_name</span><span class="p">,</span>
             <span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span>
-        <span class="p">)</span>
+        <span class="p">)</span></div>
+</div>
 
 
+
+<div class="viewcode-block" id="NodeSummary">
+<a class="viewcode-back" href="../../../api/runtime.html#zephon.observability.NodeSummary">[docs]</a>
 <span class="nd">@dataclass</span><span class="p">(</span><span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 <span class="k">class</span><span class="w"> </span><span class="nc">NodeSummary</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">"""Aggregated metrics for an operator."""</span>
@@ -392,6 +400,8 @@
     <span class="n">wait_ratio</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
 
     <span class="c1"># Derived metrics.</span>
+<div class="viewcode-block" id="NodeSummary.apply">
+<a class="viewcode-back" href="../../../api/runtime.html#zephon.observability.NodeSummary.apply">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">apply</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">delta</span><span class="p">:</span> <span class="n">NodeMetricsDelta</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">processed_ns</span> <span class="o">+=</span> <span class="n">delta</span><span class="o">.</span><span class="n">processed_ns</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">produced_elements</span> <span class="o">+=</span> <span class="n">delta</span><span class="o">.</span><span class="n">produced_elements</span>
@@ -409,7 +419,8 @@
         <span class="k">if</span> <span class="n">delta</span><span class="o">.</span><span class="n">max_processing_ns</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">max_processing_ns</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">max_processing_ns</span><span class="p">,</span> <span class="n">delta</span><span class="o">.</span><span class="n">max_processing_ns</span>
-            <span class="p">)</span>
+            <span class="p">)</span></div>
+
 
     <span class="nd">@property</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">has_samples</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
@@ -421,6 +432,8 @@
             <span class="k">return</span> <span class="mf">0.0</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">processed_ns</span> <span class="o">/</span> <span class="nb">max</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">produced_elements</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
 
+<div class="viewcode-block" id="NodeSummary.to_dict">
+<a class="viewcode-back" href="../../../api/runtime.html#zephon.observability.NodeSummary.to_dict">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">to_dict</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
         <span class="k">return</span> <span class="p">{</span>
             <span class="s2">"stage"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">stage_index</span><span class="p">,</span>
@@ -439,9 +452,13 @@
             <span class="s2">"avg_processing_ns"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">avg_processing_ns</span><span class="p">,</span>
             <span class="s2">"max_queue_depth"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_queue_depth</span><span class="p">,</span>
             <span class="s2">"wait_ratio"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">wait_ratio</span><span class="p">,</span>
-        <span class="p">}</span>
+        <span class="p">}</span></div>
+</div>
 
 
+
+<div class="viewcode-block" id="StageSummary">
+<a class="viewcode-back" href="../../../api/runtime.html#zephon.observability.StageSummary">[docs]</a>
 <span class="nd">@dataclass</span><span class="p">(</span><span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 <span class="k">class</span><span class="w"> </span><span class="nc">StageSummary</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">"""Aggregated metrics for a pipeline stage."""</span>
@@ -450,6 +467,8 @@
     <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
     <span class="n">nodes</span><span class="p">:</span> <span class="n">MutableMapping</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="n">NodeSummary</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">dict</span><span class="p">)</span>
 
+<div class="viewcode-block" id="StageSummary.apply">
+<a class="viewcode-back" href="../../../api/runtime.html#zephon.observability.StageSummary.apply">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">apply</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">delta</span><span class="p">:</span> <span class="n">NodeMetricsDelta</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">if</span> <span class="n">delta</span><span class="o">.</span><span class="n">stage_name</span> <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="n">delta</span><span class="o">.</span><span class="n">stage_name</span>
@@ -461,8 +480,11 @@
                 <span class="n">name</span><span class="o">=</span><span class="n">delta</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
             <span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">delta</span><span class="o">.</span><span class="n">op_index</span><span class="p">]</span> <span class="o">=</span> <span class="n">node</span>
-        <span class="n">node</span><span class="o">.</span><span class="n">apply</span><span class="p">(</span><span class="n">delta</span><span class="p">)</span>
+        <span class="n">node</span><span class="o">.</span><span class="n">apply</span><span class="p">(</span><span class="n">delta</span><span class="p">)</span></div>
 
+
+<div class="viewcode-block" id="StageSummary.merge">
+<a class="viewcode-back" href="../../../api/runtime.html#zephon.observability.StageSummary.merge">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">merge</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="s2">"StageSummary"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">for</span> <span class="n">op_index</span><span class="p">,</span> <span class="n">node</span> <span class="ow">in</span> <span class="n">other</span><span class="o">.</span><span class="n">nodes</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">apply</span><span class="p">(</span>
@@ -485,12 +507,18 @@
                     <span class="p">),</span>
                     <span class="n">max_processing_ns</span><span class="o">=</span><span class="n">node</span><span class="o">.</span><span class="n">max_processing_ns</span><span class="p">,</span>
                 <span class="p">)</span>
-            <span class="p">)</span>
+            <span class="p">)</span></div>
 
+
+<div class="viewcode-block" id="StageSummary.iter_nodes">
+<a class="viewcode-back" href="../../../api/runtime.html#zephon.observability.StageSummary.iter_nodes">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">iter_nodes</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">NodeSummary</span><span class="p">]:</span>
         <span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">node</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">nodes</span><span class="o">.</span><span class="n">items</span><span class="p">()):</span>
-            <span class="k">yield</span> <span class="n">node</span>
+            <span class="k">yield</span> <span class="n">node</span></div>
 
+
+<div class="viewcode-block" id="StageSummary.copy">
+<a class="viewcode-back" href="../../../api/runtime.html#zephon.observability.StageSummary.copy">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">copy</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"StageSummary"</span><span class="p">:</span>
         <span class="n">clone</span> <span class="o">=</span> <span class="n">StageSummary</span><span class="p">(</span><span class="n">index</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">index</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
         <span class="k">for</span> <span class="n">node</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">iter_nodes</span><span class="p">():</span>
@@ -515,7 +543,8 @@
                     <span class="n">max_processing_ns</span><span class="o">=</span><span class="n">node</span><span class="o">.</span><span class="n">max_processing_ns</span> <span class="ow">or</span> <span class="kc">None</span><span class="p">,</span>
                 <span class="p">)</span>
             <span class="p">)</span>
-        <span class="k">return</span> <span class="n">clone</span>
+        <span class="k">return</span> <span class="n">clone</span></div>
+
 
     <span class="nd">@property</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">total_processing_ns</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
@@ -527,7 +556,8 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">produced_elements</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
-        <span class="k">return</span> <span class="nb">sum</span><span class="p">(</span><span class="n">node</span><span class="o">.</span><span class="n">produced_elements</span> <span class="k">for</span> <span class="n">node</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">nodes</span><span class="o">.</span><span class="n">values</span><span class="p">())</span>
+        <span class="k">return</span> <span class="nb">sum</span><span class="p">(</span><span class="n">node</span><span class="o">.</span><span class="n">produced_elements</span> <span class="k">for</span> <span class="n">node</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">nodes</span><span class="o">.</span><span class="n">values</span><span class="p">())</span></div>
+
 
 
 <div class="viewcode-block" id="FetchTimingDelta">

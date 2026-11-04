@@ -1197,7 +1197,7 @@ unsupported there), <code class="docutils literal notranslate"><span class="pre"
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="zephon.observability.PipelineSummary.stages">
-<span class="sig-name descname"><span class="pre">stages</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.MutableMapping" title="(in Python v3.15)"><span class="pre">MutableMapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">StageSummary</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.observability.PipelineSummary.stages" title="Link to this definition">¶</a></dt>
+<span class="sig-name descname"><span class="pre">stages</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.MutableMapping" title="(in Python v3.15)"><span class="pre">MutableMapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.observability.stats.StageSummary" title="zephon.observability.stats.StageSummary"><span class="pre">StageSummary</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.observability.PipelineSummary.stages" title="Link to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
@@ -1224,7 +1224,7 @@ unsupported there), <code class="docutils literal notranslate"><span class="pre"
 <span class="sig-name descname"><span class="pre">iter_stages</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#PipelineSummary.iter_stages"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.PipelineSummary.iter_stages" title="Link to this definition">¶</a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Iterator" title="(in Python v3.15)"><em>Iterator</em></a>[<em>StageSummary</em>]</p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Iterator" title="(in Python v3.15)"><em>Iterator</em></a>[<a class="reference internal" href="#zephon.observability.stats.StageSummary" title="zephon.observability.stats.StageSummary"><em>StageSummary</em></a>]</p>
 </dd>
 </dl>
 </dd></dl>
@@ -1413,6 +1413,261 @@ unsupported there), <code class="docutils literal notranslate"><span class="pre"
 <dd><dl class="field-list simple">
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
 <dd class="field-odd"><p><a class="reference internal" href="#zephon.observability.PrefetchTimingTotals" title="zephon.observability.stats.PrefetchTimingTotals"><em>PrefetchTimingTotals</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">StageSummary</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nodes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#StageSummary"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.stats.StageSummary" title="Link to this definition">¶</a></dt>
+<dd><p>Aggregated metrics for a pipeline stage.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary.index">
+<span class="sig-name descname"><span class="pre">index</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.StageSummary.index" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary.name">
+<span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a></span><a class="headerlink" href="#zephon.observability.stats.StageSummary.name" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary.nodes">
+<span class="sig-name descname"><span class="pre">nodes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.MutableMapping" title="(in Python v3.15)"><span class="pre">MutableMapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.observability.stats.NodeSummary" title="zephon.observability.stats.NodeSummary"><span class="pre">NodeSummary</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.observability.stats.StageSummary.nodes" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary.apply">
+<span class="sig-name descname"><span class="pre">apply</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">delta</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#StageSummary.apply"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.stats.StageSummary.apply" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary.merge">
+<span class="sig-name descname"><span class="pre">merge</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">other</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#StageSummary.merge"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.stats.StageSummary.merge" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary.iter_nodes">
+<span class="sig-name descname"><span class="pre">iter_nodes</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#StageSummary.iter_nodes"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.stats.StageSummary.iter_nodes" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Iterator" title="(in Python v3.15)"><em>Iterator</em></a>[<a class="reference internal" href="#zephon.observability.stats.NodeSummary" title="zephon.observability.stats.NodeSummary"><em>NodeSummary</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary.copy">
+<span class="sig-name descname"><span class="pre">copy</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#StageSummary.copy"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.stats.StageSummary.copy" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#zephon.observability.stats.StageSummary" title="zephon.observability.stats.StageSummary"><em>StageSummary</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary.total_processing_ns">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">total_processing_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.StageSummary.total_processing_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary.total_wait_ns">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">total_wait_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.StageSummary.total_wait_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.observability.stats.StageSummary.produced_elements">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">produced_elements</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.StageSummary.produced_elements" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">NodeSummary</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">processed_ns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">produced_elements</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">consumed_elements</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">produced_bytes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">consumed_bytes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wait_ns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_processing_ns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_processing_ns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_queue_depth</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wait_ratio</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#NodeSummary"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.stats.NodeSummary" title="Link to this definition">¶</a></dt>
+<dd><p>Aggregated metrics for an operator.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.stage_index">
+<span class="sig-name descname"><span class="pre">stage_index</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.stage_index" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.op_index">
+<span class="sig-name descname"><span class="pre">op_index</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.op_index" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.name">
+<span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.name" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.processed_ns">
+<span class="sig-name descname"><span class="pre">processed_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.processed_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.produced_elements">
+<span class="sig-name descname"><span class="pre">produced_elements</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.produced_elements" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.consumed_elements">
+<span class="sig-name descname"><span class="pre">consumed_elements</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.consumed_elements" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.produced_bytes">
+<span class="sig-name descname"><span class="pre">produced_bytes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.produced_bytes" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.consumed_bytes">
+<span class="sig-name descname"><span class="pre">consumed_bytes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.consumed_bytes" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.wait_ns">
+<span class="sig-name descname"><span class="pre">wait_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.wait_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.min_processing_ns">
+<span class="sig-name descname"><span class="pre">min_processing_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.min_processing_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.max_processing_ns">
+<span class="sig-name descname"><span class="pre">max_processing_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.max_processing_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.max_queue_depth">
+<span class="sig-name descname"><span class="pre">max_queue_depth</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.max_queue_depth" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.wait_ratio">
+<span class="sig-name descname"><span class="pre">wait_ratio</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.15)"><span class="pre">float</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.wait_ratio" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.apply">
+<span class="sig-name descname"><span class="pre">apply</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">delta</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#NodeSummary.apply"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.stats.NodeSummary.apply" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.has_samples">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">has_samples</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.has_samples" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.avg_processing_ns">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">avg_processing_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.15)"><span class="pre">float</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeSummary.avg_processing_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeSummary.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#NodeSummary.to_dict"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.stats.NodeSummary.to_dict" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)"><em>dict</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a>, <a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><em>Any</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">NodeMetricsDelta</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">processed_ns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">produced_elements</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">consumed_elements</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">produced_bytes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">consumed_bytes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wait_ns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_queue_depth</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_processing_ns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_processing_ns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#NodeMetricsDelta"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta" title="Link to this definition">¶</a></dt>
+<dd><p>Incremental metrics produced by a runner for a single operator.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.stage_index">
+<span class="sig-name descname"><span class="pre">stage_index</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.stage_index" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.op_index">
+<span class="sig-name descname"><span class="pre">op_index</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.op_index" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.stage_name">
+<span class="sig-name descname"><span class="pre">stage_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.stage_name" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.name">
+<span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.name" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.processed_ns">
+<span class="sig-name descname"><span class="pre">processed_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.processed_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.produced_elements">
+<span class="sig-name descname"><span class="pre">produced_elements</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.produced_elements" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.consumed_elements">
+<span class="sig-name descname"><span class="pre">consumed_elements</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.consumed_elements" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.produced_bytes">
+<span class="sig-name descname"><span class="pre">produced_bytes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.produced_bytes" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.consumed_bytes">
+<span class="sig-name descname"><span class="pre">consumed_bytes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.consumed_bytes" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.wait_ns">
+<span class="sig-name descname"><span class="pre">wait_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.wait_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.max_queue_depth">
+<span class="sig-name descname"><span class="pre">max_queue_depth</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/constants.html#None" title="(in Python v3.15)"><span class="pre">None</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.max_queue_depth" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.min_processing_ns">
+<span class="sig-name descname"><span class="pre">min_processing_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/constants.html#None" title="(in Python v3.15)"><span class="pre">None</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.min_processing_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.max_processing_ns">
+<span class="sig-name descname"><span class="pre">max_processing_ns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/constants.html#None" title="(in Python v3.15)"><span class="pre">None</span></a></span><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.max_processing_ns" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.observability.stats.NodeMetricsDelta.empty">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">empty</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/observability/stats.html#NodeMetricsDelta.empty"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.observability.stats.NodeMetricsDelta.empty" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta" title="zephon.observability.stats.NodeMetricsDelta"><em>NodeMetricsDelta</em></a></p>
 </dd>
 </dl>
 </dd></dl>
@@ -1843,6 +2098,56 @@ Also called automatically via weakref finalizer at shutdown.</p>
 <li><a class="reference internal" href="#zephon.observability.PrefetchTimingTotals.apply"><code class="docutils literal notranslate"><span class="pre">apply()</span></code></a></li>
 <li><a class="reference internal" href="#zephon.observability.PrefetchTimingTotals.merge"><code class="docutils literal notranslate"><span class="pre">merge()</span></code></a></li>
 <li><a class="reference internal" href="#zephon.observability.PrefetchTimingTotals.copy"><code class="docutils literal notranslate"><span class="pre">copy()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary"><code class="docutils literal notranslate"><span class="pre">StageSummary</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary.index"><code class="docutils literal notranslate"><span class="pre">index</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary.name"><code class="docutils literal notranslate"><span class="pre">name</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary.nodes"><code class="docutils literal notranslate"><span class="pre">nodes</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary.apply"><code class="docutils literal notranslate"><span class="pre">apply()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary.merge"><code class="docutils literal notranslate"><span class="pre">merge()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary.iter_nodes"><code class="docutils literal notranslate"><span class="pre">iter_nodes()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary.copy"><code class="docutils literal notranslate"><span class="pre">copy()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary.total_processing_ns"><code class="docutils literal notranslate"><span class="pre">total_processing_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary.total_wait_ns"><code class="docutils literal notranslate"><span class="pre">total_wait_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.StageSummary.produced_elements"><code class="docutils literal notranslate"><span class="pre">produced_elements</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary"><code class="docutils literal notranslate"><span class="pre">NodeSummary</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.stage_index"><code class="docutils literal notranslate"><span class="pre">stage_index</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.op_index"><code class="docutils literal notranslate"><span class="pre">op_index</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.name"><code class="docutils literal notranslate"><span class="pre">name</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.processed_ns"><code class="docutils literal notranslate"><span class="pre">processed_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.produced_elements"><code class="docutils literal notranslate"><span class="pre">produced_elements</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.consumed_elements"><code class="docutils literal notranslate"><span class="pre">consumed_elements</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.produced_bytes"><code class="docutils literal notranslate"><span class="pre">produced_bytes</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.consumed_bytes"><code class="docutils literal notranslate"><span class="pre">consumed_bytes</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.wait_ns"><code class="docutils literal notranslate"><span class="pre">wait_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.min_processing_ns"><code class="docutils literal notranslate"><span class="pre">min_processing_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.max_processing_ns"><code class="docutils literal notranslate"><span class="pre">max_processing_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.max_queue_depth"><code class="docutils literal notranslate"><span class="pre">max_queue_depth</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.wait_ratio"><code class="docutils literal notranslate"><span class="pre">wait_ratio</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.apply"><code class="docutils literal notranslate"><span class="pre">apply()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.has_samples"><code class="docutils literal notranslate"><span class="pre">has_samples</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.avg_processing_ns"><code class="docutils literal notranslate"><span class="pre">avg_processing_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeSummary.to_dict"><code class="docutils literal notranslate"><span class="pre">to_dict()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta"><code class="docutils literal notranslate"><span class="pre">NodeMetricsDelta</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.stage_index"><code class="docutils literal notranslate"><span class="pre">stage_index</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.op_index"><code class="docutils literal notranslate"><span class="pre">op_index</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.stage_name"><code class="docutils literal notranslate"><span class="pre">stage_name</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.name"><code class="docutils literal notranslate"><span class="pre">name</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.processed_ns"><code class="docutils literal notranslate"><span class="pre">processed_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.produced_elements"><code class="docutils literal notranslate"><span class="pre">produced_elements</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.consumed_elements"><code class="docutils literal notranslate"><span class="pre">consumed_elements</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.produced_bytes"><code class="docutils literal notranslate"><span class="pre">produced_bytes</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.consumed_bytes"><code class="docutils literal notranslate"><span class="pre">consumed_bytes</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.wait_ns"><code class="docutils literal notranslate"><span class="pre">wait_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.max_queue_depth"><code class="docutils literal notranslate"><span class="pre">max_queue_depth</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.min_processing_ns"><code class="docutils literal notranslate"><span class="pre">min_processing_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.max_processing_ns"><code class="docutils literal notranslate"><span class="pre">max_processing_ns</span></code></a></li>
+<li><a class="reference internal" href="#zephon.observability.stats.NodeMetricsDelta.empty"><code class="docutils literal notranslate"><span class="pre">empty()</span></code></a></li>
 </ul>
 </li>
 </ul>
