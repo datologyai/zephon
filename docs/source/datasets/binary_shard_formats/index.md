@@ -28,6 +28,7 @@ compression settings for a collection of shards in that format. Vortex does not 
 `index.json` file that ships with the format itself, but similar to Parquet and JSONL,
 Zephon still supports having such an index to speed up the instantiation. We added an
 indexing tool in Zephon to construct these indexes offline from a set of Vortex shards.
+ArrayRecord works the same way as Vortex: an index is optional, and the same tool builds it.
 Lance needs neither: its own table manifest already lists every fragment, its data file
 and its row count, which is exactly what an index would hold.
 
@@ -41,5 +42,6 @@ a small dataset in that format, configures a `Dataset` to collect its metadata, 
 litdata
 mosaic
 vortex
+array_record
 lance
 ```

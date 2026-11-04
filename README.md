@@ -62,6 +62,7 @@ Most of what Zephon can read is behind optional extras, so you only install what
 | `zephon[streaming]` | MosaicML Streaming / MDS shards (Python 3.11+) |
 | `zephon[litdata]` | LitData shards |
 | `zephon[vortex]` | Vortex shards (Python 3.11+) |
+| `zephon[array_record]` | ArrayRecord shards (Python 3.11+, Linux or Apple-silicon macOS) |
 | `zephon[lance]` | Lance datasets, one shard per fragment |
 | `zephon[ray]` | The experimental Ray runner |
 

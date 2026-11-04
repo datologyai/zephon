@@ -276,3 +276,22 @@ def test_dataset_raw_bytes_file_backed_matches_catalog(tmp_path: Path) -> None:
         (tmp_path / "shard0.jsonl").stat().st_size,
         (tmp_path / "shard1.jsonl").stat().st_size,
     ]
+
+
+@pytest.mark.parametrize(
+    ("first_shard", "expected"),
+    [
+        ({"basename": "a.jsonl.zst", "num_rows": 1}, "jsonl"),
+        ({"basename": "a.vortex", "num_rows": 1}, "vortex"),
+        ({"basename": "a.array_record", "num_rows": 1}, "array_record"),
+        ({"basename": "a.parquet", "extra": {"row_groups": []}}, "parquet"),
+        ({"samples": 3, "raw": {"basename": "shard.00000.mds"}}, "mds"),
+    ],
+)
+def test_index_payload_classified_by_data_file_suffix(
+    first_shard: dict[str, object], expected: str
+) -> None:
+    """Zephon-built indexes identify their format by the shards they name."""
+    from zephon.io.dataset import _classify_index_payload
+
+    assert _classify_index_payload({"shards": [first_shard]}) == expected

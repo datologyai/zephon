@@ -19,6 +19,7 @@ JSONL_SUFFIXES: tuple[str, ...] = (
 )
 PARQUET_SUFFIXES: tuple[str, ...] = (".parquet",)
 VORTEX_SUFFIXES: tuple[str, ...] = (".vortex",)
+ARRAY_RECORD_SUFFIXES: tuple[str, ...] = (".array_record",)
 LITDATA_CHUNK_SUFFIX = ".bin"
 LITDATA_COMPRESSED_CHUNK_SUFFIX = ".bin.zst"
 
@@ -28,10 +29,12 @@ AUTO_DETECT_ORDER: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("jsonl", JSONL_SUFFIXES),
     ("vortex", VORTEX_SUFFIXES),
     ("parquet", PARQUET_SUFFIXES),
+    ("array_record", ARRAY_RECORD_SUFFIXES),
 )
 
 # Formats whose index-less discovery works through any StorageBackend. Vortex
 # is absent: its discovery opens ``file://`` paths, so it only works locally.
+# ArrayRecord is absent: counting a remote shard's records downloads it whole.
 REMOTE_SCAN_FORMATS: frozenset[str] = frozenset({"jsonl", "parquet"})
 
 
@@ -53,6 +56,7 @@ def detect_format(names: Iterable[str]) -> str | None:
 
 
 __all__ = [
+    "ARRAY_RECORD_SUFFIXES",
     "AUTO_DETECT_ORDER",
     "JSONL_SUFFIXES",
     "LITDATA_CHUNK_SUFFIX",

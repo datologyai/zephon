@@ -40,8 +40,8 @@ from zephon._internal.io.storage import (
 from zephon._internal.io.storage import (
     StorageBackend as _StorageBackend,
 )
-from zephon._internal.io.suffixes import JSONL_SUFFIXES as _JSONL_SUFFIXES
 from zephon._internal.io.suffixes import detect_format as _detect_format
+from zephon._internal.io.suffixes import format_of as _format_of
 from zephon.io.memory import InMemoryShard
 
 
@@ -65,7 +65,8 @@ class Dataset:
 
     Backend kinds used by the internal store builder:
 
-    - ``litdata``/``mds``/``jsonl``/``parquet``/``vortex``/``lance``: ``kind`` and
+    - ``litdata``/``mds``/``jsonl``/``parquet``/``vortex``/``array_record``/``lance``:
+      ``kind`` and
       ``path`` (no per-shard ``shards`` graph — that lives in the catalog now)
     - ``inmem``: ``kind`` and ``shards`` (``dict[int, InMemoryShard]``)
 
@@ -175,6 +176,9 @@ class Dataset:
           ``shards``
         - ``jsonl`` directories where ``*.jsonl`` files act as shards, with an
           optional Zephon ``index.json`` for fast discovery
+        - ``array_record`` directories where ``*.array_record`` files act as
+          shards, with an optional Zephon ``index.json`` for fast discovery.
+          Each sample is ``{"data": <record bytes>}``
         - ``lance`` dataset directories, one shard per fragment. Discovery pins
           the dataset to its latest version and ``path`` becomes that version's
           manifest; pass a ``_versions/*.manifest`` path to pin an earlier one.
@@ -316,7 +320,7 @@ def _classify_index_payload(data: _IndexData) -> str:
         if "chunks" in data and "config" in data:
             return "litdata"
         if "shards" in data:
-            # Could be MDS, JSONL, Parquet, or Vortex index.
+            # Could be MDS, JSONL, Parquet, Vortex, or ArrayRecord index.
             # Check if shards have Parquet-specific fields in extra
             shards = data.get("shards", [])
             if shards:
@@ -325,8 +329,11 @@ def _classify_index_payload(data: _IndexData) -> str:
                     extra = first_shard.get("extra", {})
                     if isinstance(extra, dict) and "row_groups" in extra:
                         return "parquet"
+                    # Zephon-built indexes name the data file; MDS shards
+                    # (``*.mds``) match no auto-detected suffix.
                     basename = first_shard.get("basename")
-                    if isinstance(basename, str) and basename.endswith(_JSONL_SUFFIXES):
-                        return "jsonl"
+                    kind = _format_of(basename) if isinstance(basename, str) else None
+                    if kind is not None:
+                        return kind
             return "mds"
     return "mds"

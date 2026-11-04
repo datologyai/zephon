@@ -26,6 +26,7 @@ def test_jsonl_suffixes_cover_every_compression() -> None:
         (["a.parquet"], "parquet"),
         (["a.parquet", "b.jsonl.gz"], "jsonl"),
         (["a.parquet", "b.vortex"], "vortex"),
+        (["a.array_record"], "array_record"),
         (["a.json", "b.json.gz", "index.json"], None),
         ([], None),
     ],
@@ -40,6 +41,7 @@ def test_detect_format(names: list[str], expected: str | None) -> None:
         ("data%2Ftrain.jsonl.zst", "jsonl"),
         ("0000.parquet", "parquet"),
         ("a.vortex", "vortex"),
+        ("shard-00000.array_record", "array_record"),
         ("index.json", None),
         ("c4-train.00000.json.gz", None),
     ],
@@ -51,3 +53,4 @@ def test_format_of(name: str, expected: str | None) -> None:
 def test_remote_scan_formats_are_detectable() -> None:
     assert REMOTE_SCAN_FORMATS <= {kind for kind, _ in AUTO_DETECT_ORDER}
     assert "vortex" not in REMOTE_SCAN_FORMATS
+    assert "array_record" not in REMOTE_SCAN_FORMATS
