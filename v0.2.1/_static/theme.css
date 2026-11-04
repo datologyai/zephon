@@ -1,0 +1,54 @@
+/* Zephon's palette applied to the guide's chrome, so the docs and the blog post
+ * read as the same product. The colours come from the post's own stylesheet,
+ * ../datology-web/src/features/ZephonBlog/styles.css, and the dark variants from
+ * the figures' shared/theme.css in zephon-blogpost-figures.
+ *
+ * Most of it is set through furo's own variables in conf.py; this file carries
+ * the few things furo has no variable for. */
+
+:root {
+  --zephon-ink: #112a2b;
+  --zephon-teal: #096361;
+  --zephon-mint: #d8f8f3;
+  --zephon-muted: #526e6b;
+  --zephon-line: #cee2dd;
+  --zephon-wash: #f0f9f6;
+}
+
+body[data-theme="dark"] {
+  --zephon-teal: #00efb5;
+  --zephon-mint: #1b3a38;
+  --zephon-line: #456260;
+  --zephon-wash: #22403e;
+}
+
+@media (prefers-color-scheme: dark) {
+  body:not([data-theme="light"]) {
+    --zephon-teal: #00efb5;
+    --zephon-mint: #1b3a38;
+    --zephon-line: #456260;
+    --zephon-wash: #22403e;
+  }
+}
+
+/* Inline code reads as Zephon's teal on its wash, the way the post sets it. */
+code.literal {
+  color: var(--zephon-teal);
+}
+
+/* A link is teal rather than underlined-blue, and keeps its colour once
+   visited; a guide is read back and forth too often for visited links to be
+   worth tracking visually. */
+a.reference.internal code.literal,
+a.reference.external code.literal {
+  color: inherit;
+}
+
+/* Pygments paints its own background on the block, which leaves the code grey
+   under a caption bar that has taken the tint. Its dark rules are scoped to the
+   body, so matching them takes the same shape rather than a bare class. */
+div.highlight,
+body[data-theme="dark"] div.highlight,
+body:not([data-theme="light"]) div.highlight {
+  background: var(--color-code-background);
+}

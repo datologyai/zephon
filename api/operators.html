@@ -86,7 +86,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="v0.2.0" data-page="api/operators.html"></script>
+</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="v0.2.1" data-page="api/operators.html"></script>
 </head>
   <body>
     
@@ -1070,6 +1070,13 @@ base offset, so the engine doesn’t need a signal for them.</p>
 </dd></dl>
 
 <dl class="py data">
+<dt class="sig sig-object py" id="zephon.ops.ChatSpecialTokensMode">
+<span class="sig-name descname"><span class="pre">ChatSpecialTokensMode</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="pre">SpecialTokensMode</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'assistant_eos'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.ChatSpecialTokensMode" title="Link to this definition">¶</a></dt>
+<dd><p>Which special tokens <code class="docutils literal notranslate"><span class="pre">tokenize_chat</span></code> adds. <code class="docutils literal notranslate"><span class="pre">assistant_eos</span></code> appends EOS after
+each assistant message when no chat template is applied.</p>
+</dd></dl>
+
+<dl class="py data">
 <dt class="sig sig-object py" id="zephon.ops.MissingFieldMode">
 <span class="sig-name descname"><span class="pre">MissingFieldMode</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'error'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'empty'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.MissingFieldMode" title="Link to this definition">¶</a></dt>
 <dd><p>What <code class="docutils literal notranslate"><span class="pre">tokenize</span></code> does when a record lacks the field it was given.</p>
@@ -1083,9 +1090,12 @@ base offset, so the engine doesn’t need a signal for them.</p>
 
 <dl class="py data">
 <dt class="sig sig-object py" id="zephon.ops.LossScope">
-<span class="sig-name descname"><span class="pre">LossScope</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'all_assistant'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'last_span'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'after_last_user'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.LossScope" title="Link to this definition">¶</a></dt>
-<dd><p>Which assistant spans <code class="docutils literal notranslate"><span class="pre">tokenize_chat</span></code> supervises. <code class="docutils literal notranslate"><span class="pre">after_last_user</span></code>
-automatically verifies generation ownership before producing output.</p>
+<span class="sig-name descname"><span class="pre">LossScope</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'all_assistant'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'last_span'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'after_last_user'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'all_tokens'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.LossScope" title="Link to this definition">¶</a></dt>
+<dd><p>Which tokens <code class="docutils literal notranslate"><span class="pre">tokenize_chat</span></code> supervises. Assistant scopes select spans;
+<code class="docutils literal notranslate"><span class="pre">all_tokens</span></code> selects the complete conversation except its first token.
+Masking the first token prevents packing from turning a conversation boundary
+into a supervised next-token prediction.
+<code class="docutils literal notranslate"><span class="pre">after_last_user</span></code> automatically verifies generation ownership before output.</p>
 <p>With generation tags, samples whose selected source content disappears during
 rendering are dropped and logged at ERROR, counting zero delivered tokens
 during calibration. Setup failures, wrong ownership and incorrect supervision
@@ -1257,6 +1267,7 @@ A lane may finish without observing a final EOD, so do not wait for it to flush.
 <li><a class="reference internal" href="#argument-types">Argument types</a><ul>
 <li><a class="reference internal" href="#zephon.ops.PackingAlgorithm"><code class="docutils literal notranslate"><span class="pre">PackingAlgorithm</span></code></a></li>
 <li><a class="reference internal" href="#zephon.ops.SpecialTokensMode"><code class="docutils literal notranslate"><span class="pre">SpecialTokensMode</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.ChatSpecialTokensMode"><code class="docutils literal notranslate"><span class="pre">ChatSpecialTokensMode</span></code></a></li>
 <li><a class="reference internal" href="#zephon.ops.MissingFieldMode"><code class="docutils literal notranslate"><span class="pre">MissingFieldMode</span></code></a></li>
 <li><a class="reference internal" href="#zephon.ops.SpanSource"><code class="docutils literal notranslate"><span class="pre">SpanSource</span></code></a></li>
 <li><a class="reference internal" href="#zephon.ops.LossScope"><code class="docutils literal notranslate"><span class="pre">LossScope</span></code></a></li>

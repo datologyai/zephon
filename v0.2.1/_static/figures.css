@@ -1,0 +1,296 @@
+/* Figure embedding, ported from the Zephon blog post so the guide and the post
+ * present the same figures the same way.
+ *
+ * Sources in ../datology-web:
+ *   src/payload/blocks/FigureCarousel/styles.css  (the carousel)
+ *   src/features/StudioBlog/styles.css            (iframes and captions)
+ *   src/features/ZephonBlog/styles.css            (the post's teal palette)
+ *
+ * Two deliberate departures. The post is always light, so it gives only the
+ * fault-resume figure a white card; here every figure gets one, because the
+ * figures ship a light palette on a transparent background and only go dark
+ * when their own document carries data-theme="dark", which a parent page cannot
+ * set across a frame. And the post's hash deep-linking into a slide is dropped,
+ * since the guide does not link to individual slides. */
+
+.zephon-post {
+  --zephon-ink: #112a2b;
+  --zephon-teal: #096361;
+  --zephon-mint: #d8f8f3;
+  --zephon-muted: #526e6b;
+  --zephon-line: #cee2dd;
+  --zephon-wash: #f0f9f6;
+}
+
+/* ---- a figure on its own ------------------------------------------------ */
+
+.zephon-post.zephon-embed {
+  margin-block: 2rem;
+}
+
+/* The backdrop is what the post does not need: it is always light, whereas a
+   figure here has to stay legible when the guide is read in dark mode, and it
+   only goes dark when its own document carries data-theme="dark", which a
+   parent page cannot set across a frame. The radius matches the frame most of
+   the figures draw for themselves. */
+.zephon-post iframe {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: #fff;
+}
+
+/* Most figures arrive with their own frame; the fault-resume comparison does
+   not, which is why the post gives that one a card. Adding a card to a figure
+   that already has a frame draws the border twice. */
+.zephon-post.zephon-framed {
+  border: 1px solid var(--zephon-line);
+  border-radius: 0.75rem;
+  padding: 0.875rem 0.625rem 1rem;
+  background: #fff;
+}
+
+.zephon-post figcaption {
+  margin-top: 0.75rem;
+  font-size: 0.8125rem;
+  line-height: 1.65;
+  color: var(--zephon-muted);
+}
+
+.zephon-post.zephon-framed figcaption {
+  padding-inline: 0.625rem;
+}
+
+.zephon-post figcaption strong {
+  color: var(--zephon-ink);
+}
+
+/* ---- the carousel ------------------------------------------------------- */
+
+/* The post gets this from Tailwind's preflight. Without it a slide is its 100%
+   width *plus* its padding, so it hangs 40px past the viewport that clips it and
+   the figure inside sits off-centre. */
+.figure-carousel,
+.figure-carousel * {
+  box-sizing: border-box;
+}
+
+.zephon-post.figure-carousel {
+  --carousel-ink: var(--zephon-ink);
+  --carousel-muted: var(--zephon-muted);
+  margin-block: 2rem;
+  min-width: 0;
+  border: 1px solid var(--zephon-line);
+  border-radius: 0.875rem;
+  background: #fff;
+  box-shadow: none;
+}
+
+.figure-carousel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--zephon-line);
+  color: var(--carousel-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+/* The post weights this at 500, where it labels the carousel's chrome. Here it
+   is the figure's subtitle, so it matches the bold lead-in the other figures
+   put at the head of their captions. */
+.figure-carousel-title {
+  font-weight: 700;
+  color: var(--carousel-ink);
+}
+
+.figure-carousel-count {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.figure-carousel-viewport {
+  position: relative;
+  overflow: hidden;
+}
+
+/* A hidden slide keeps its width and its DOM, so the figure inside it keeps
+   its layout and its state instead of being rebuilt on every switch. */
+.figure-carousel-item {
+  display: flow-root;
+  width: 100%;
+  padding: 1.25rem;
+  position: absolute;
+  inset: 0 0 auto;
+  opacity: 0;
+  visibility: hidden;
+}
+
+.figure-carousel-item[data-active="true"] {
+  position: relative;
+  opacity: 1;
+  visibility: visible;
+}
+
+.figure-carousel-item > :first-child {
+  margin-top: 0;
+}
+
+.figure-carousel-item > :last-child {
+  margin-bottom: 0;
+}
+
+.figure-carousel-navigation {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border-top: 1px solid var(--zephon-line);
+  border-radius: 0 0 0.875rem 0.875rem;
+  background: var(--zephon-wash);
+}
+
+.figure-carousel-navigation button {
+  cursor: pointer;
+  min-height: 44px;
+  color: var(--carousel-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 0.5rem;
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  transition:
+    background 150ms,
+    color 150ms,
+    box-shadow 150ms;
+}
+
+.figure-carousel-arrow {
+  display: grid;
+  place-items: center;
+  flex: 0 0 44px;
+  width: 44px;
+  background: #fff;
+  border: 1px solid var(--zephon-line);
+}
+
+.figure-carousel-choices {
+  display: flex;
+  justify-content: center;
+  gap: 0.25rem;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.figure-carousel-choices button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.625rem 0.875rem;
+}
+
+.figure-carousel-dot {
+  width: 5px;
+  height: 5px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+
+.figure-carousel-navigation button:hover {
+  background: var(--zephon-mint);
+  color: var(--carousel-ink);
+}
+
+.figure-carousel-choices button[aria-pressed="true"] {
+  color: var(--zephon-teal);
+  background: var(--zephon-mint);
+  font-weight: 500;
+}
+
+.figure-carousel-choices button[aria-pressed="true"] .figure-carousel-dot {
+  opacity: 1;
+}
+
+.figure-carousel-navigation button:focus-visible,
+.figure-carousel:focus-visible {
+  outline: 2px solid var(--zephon-teal);
+  outline-offset: 3px;
+}
+
+/* The post gets this from Tailwind; furo has no equivalent, and without it the
+   carousel's live region reads as visible text under the caption. */
+.figure-carousel-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Each slide carries its own caption, so the two switch together. */
+.figure-carousel .figure-caption {
+  margin: 1.5rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.65;
+  color: var(--zephon-muted);
+}
+
+.figure-carousel .figure-caption strong {
+  color: var(--zephon-ink);
+}
+
+@media (max-width: 640px) {
+  .figure-carousel-header {
+    padding: 0.875rem 1rem;
+  }
+  .figure-carousel-item {
+    padding: 0.875rem;
+  }
+  .figure-carousel-navigation {
+    gap: 0.25rem;
+    padding: 0.5rem;
+  }
+  .figure-carousel-choices button {
+    padding-inline: 0.5rem;
+    font-size: 0.75rem;
+  }
+  .figure-carousel-dot {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .figure-carousel-navigation button {
+    transition: none;
+  }
+}
+
+@media print {
+  .figure-carousel-viewport {
+    height: auto !important;
+    overflow: visible;
+  }
+  .figure-carousel-item {
+    position: relative;
+    visibility: visible;
+    opacity: 1;
+    break-inside: avoid;
+  }
+  .figure-carousel-navigation,
+  .figure-carousel-count {
+    display: none;
+  }
+}

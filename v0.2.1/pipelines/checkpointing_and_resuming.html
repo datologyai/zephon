@@ -1,0 +1,615 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="User-defined operators" href="user_defined_operators.html"><link rel="prev" title="Distributed training" href="distributed_training.html">
+        <link rel="prefetch" href="../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Checkpointing and resuming pipelines - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="v0.2.1" data-page="pipelines/checkpointing_and_resuming.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 current has-children"><a class="reference internal" href="index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" checked="" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2 current current-page"><a class="current reference internal" href="#">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../internals/index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../api/datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/operators.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/pipelines/checkpointing_and_resuming.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="checkpointing-and-resuming-pipelines">
+<h1>Checkpointing and resuming pipelines<a class="headerlink" href="#checkpointing-and-resuming-pipelines" title="Link to this heading">¶</a></h1>
+<p>Model training jobs can be interrupted for any number of reasons: there could be a
+hardware or networking failure, the job could be preempted by a higher priority run that
+needed its resources, or the available time on the training cluster might expire or become
+too expensive to continue training right now. For all of these reasons (and for all of the
+other reasons that I can’t think of right now), model training systems all include a
+mechanism for checkpointing the state of a training run, saving it away, and then
+restoring that state later so as to be able to pick up the run from exactly where it left
+off. For the data pipeline, this means keeping track of which samples the training loop
+has seen and determining where to pick things up again when the training run is restored.</p>
+<p>We will now go over how to checkpoint and restore the state of a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> during a
+training run. We will also explain how Zephon supports elastic resumption, which allows
+you to continue the same data curriculum on a different number of data-parallel workers.</p>
+<p id="checkpointing-a-pipeline"><strong>Checkpointing a pipeline.</strong> The <code class="docutils literal notranslate"><span class="pre">Pipeline.checkpoint()</span></code> method returns a dictionary that
+describes the current progress of a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> object. Your training code is responsible
+for persisting that dictionary with the rest of the state for your training run (the model
+weights, the state of the optimizer, etc.) Checkpoints should be taken at a completed
+training step boundary once the batches associated with that step have been incorporated
+into the model:</p>
+<div class="literal-block-wrapper docutils container" id="id1">
+<div class="code-block-caption"><span class="caption-text">examples/guide/pipelines/checkpoint_pipeline.py</span><a class="headerlink" href="#id1" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Save the Pipeline's progress with the rest of the training state."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+
+<span class="n">pipeline</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">Pipeline</span><span class="p">(</span><span class="n">work_source</span><span class="p">)</span>
+    <span class="o">.</span><span class="n">tokenize</span><span class="p">(</span><span class="n">tokenizer_id</span><span class="o">=</span><span class="s2">"gpt2"</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="s2">"text"</span><span class="p">)</span>
+    <span class="o">.</span><span class="n">pack_flat</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">4097</span><span class="p">,</span> <span class="n">algorithm</span><span class="o">=</span><span class="s2">"wrap"</span><span class="p">,</span> <span class="n">pad_token_id</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+    <span class="o">.</span><span class="n">batch</span><span class="p">(</span><span class="n">microbatch_size</span><span class="o">=</span><span class="mi">32</span><span class="p">)</span>
+<span class="p">)</span>
+
+<span class="k">for</span> <span class="n">step</span><span class="p">,</span> <span class="n">sample_batch</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">pipeline</span><span class="p">):</span>
+    <span class="n">train_step</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">sample_batch</span><span class="o">.</span><span class="n">to_training</span><span class="p">(</span><span class="n">return_labels</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span>
+    <span class="k">if</span> <span class="n">step</span> <span class="o">%</span> <span class="mi">1000</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="c1"># One object, written together: a pipeline state that describes a</span>
+        <span class="c1"># different step than the model's will silently skip or repeat data.</span>
+        <span class="n">save</span><span class="p">(</span>
+            <span class="p">{</span>
+                <span class="s2">"model"</span><span class="p">:</span> <span class="n">model</span><span class="o">.</span><span class="n">state_dict</span><span class="p">(),</span>
+                <span class="s2">"optimizer"</span><span class="p">:</span> <span class="n">optimizer</span><span class="o">.</span><span class="n">state_dict</span><span class="p">(),</span>
+                <span class="s2">"data"</span><span class="p">:</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">(),</span>
+            <span class="p">}</span>
+        <span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<p>If you use a checkpoint manager like PyTorch DCP, you can ask Zephon to return a
+single blob of bytes. DCP can otherwise miss the saved information about work
+that was still in flight, since a fresh pipeline hasn’t started that work yet:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">state</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"zephon"</span><span class="p">:</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">(</span><span class="n">as_bytes</span><span class="o">=</span><span class="kc">True</span><span class="p">)}</span>
+<span class="c1"># Save and load state with the rest of your training checkpoint.</span>
+<span class="n">pipeline</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">state</span><span class="p">[</span><span class="s2">"zephon"</span><span class="p">])</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">restore()</span></code> accepts the blob directly, so you don’t need to serialize the state
+yourself.</p>
+<p>If the training loop accumulates gradients across several microbatches, save the
+checkpoint after a complete optimizer step, once all batches returned by the Pipeline have
+been incorporated into that step. The pipeline, model, and optimizer states must describe
+the same point in training; otherwise, resuming can skip data or train on it twice.</p>
+<p>You do not need to consider Zephon’s internal prefetch buffers for checkpointing. Zephon
+tracks which records it has delivered to the training loop, separately from the records it
+has prepared ahead of time. However, it cannot tell whether your training code has actually
+used a batch it returned. If your code reads ahead from the Pipeline, make sure those
+batches have been incorporated into the completed step before checkpointing.</p>
+<p id="aligning-optimizer-steps-with-lanes"><strong>Aligning optimizer steps with lanes.</strong> To preserve the same global training batches when
+resuming on a different topology (<em>elastic determinism</em>), there is one more requirement:
+every optimizer step must consume the same number of records from every lane. Recall from
+<a class="reference internal" href="distributed_training.html"><span class="std std-doc">Distributed training</span></a> that each data-parallel group takes turns
+reading batches from the lanes it owns. An optimizer step therefore needs to include a
+whole number of these rounds.</p>
+<p>For a run with <code class="docutils literal notranslate"><span class="pre">canonical_replicas=L</span></code> lanes and <code class="docutils literal notranslate"><span class="pre">dp_degree=G</span></code> data-parallel groups, this
+means:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">L</span></code> must be divisible by <code class="docutils literal notranslate"><span class="pre">G</span></code>, so every group owns exactly <code class="docutils literal notranslate"><span class="pre">L</span> <span class="pre">/</span> <span class="pre">G</span></code> lanes.</p></li>
+<li><p>The number of training microbatches consumed by each group per optimizer step must be a
+multiple of <code class="docutils literal notranslate"><span class="pre">L</span> <span class="pre">/</span> <span class="pre">G</span></code>, so every owned lane gets equally many turns.</p></li>
+</ul>
+<p>You can change the training microbatch size between runs, but the new configuration must
+still satisfy these rules. Equivalently, if the global batch contains <code class="docutils literal notranslate"><span class="pre">N</span></code> records, each
+lane contributes <code class="docutils literal notranslate"><span class="pre">N</span> <span class="pre">/</span> <span class="pre">L</span></code> records per step, and the microbatch size must divide that
+contribution evenly.</p>
+<p>You can check these conditions statically. For example, if you check out our
+<a class="reference internal" href="../training_integrations.html"><span class="std std-doc">TorchTitan integration</span></a>, you can see how it checks the
+divisibility conditions during training initialization and rejects configurations that
+violate them before training begins.</p>
+<p id="restoring-a-training-run"><strong>Restoring a training run.</strong> To resume a training run, use the same <code class="docutils literal notranslate"><span class="pre">Dataset</span></code>,
+<code class="docutils literal notranslate"><span class="pre">WorkSource</span></code>, and <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> definitions that were used for the original training run,
+load the saved training state that was generated by the <code class="docutils literal notranslate"><span class="pre">Pipeline.checkpoint()</span></code> method,
+and then call <code class="docutils literal notranslate"><span class="pre">Pipeline.restore()</span></code> before you begin iterating the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> object:</p>
+<div class="literal-block-wrapper docutils container" id="id2">
+<div class="code-block-caption"><span class="caption-text">examples/guide/pipelines/restore_pipeline.py</span><a class="headerlink" href="#id2" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Resume a run from a saved checkpoint."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+
+<span class="c1"># The same datasets, work source and operators as the original run, down to</span>
+<span class="c1"># the tokenizer and every transform parameter.</span>
+<span class="n">pipeline</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">Pipeline</span><span class="p">(</span><span class="n">work_source</span><span class="p">)</span>
+    <span class="o">.</span><span class="n">tokenize</span><span class="p">(</span><span class="n">tokenizer_id</span><span class="o">=</span><span class="s2">"gpt2"</span><span class="p">,</span> <span class="n">field</span><span class="o">=</span><span class="s2">"text"</span><span class="p">)</span>
+    <span class="o">.</span><span class="n">pack_flat</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">4097</span><span class="p">,</span> <span class="n">algorithm</span><span class="o">=</span><span class="s2">"wrap"</span><span class="p">,</span> <span class="n">pad_token_id</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+    <span class="o">.</span><span class="n">batch</span><span class="p">(</span><span class="n">microbatch_size</span><span class="o">=</span><span class="mi">32</span><span class="p">)</span>
+<span class="p">)</span>
+
+<span class="n">pipeline</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">checkpoint</span><span class="p">[</span><span class="s2">"data"</span><span class="p">])</span>  <span class="c1"># before the first iteration, not after</span>
+
+<span class="k">for</span> <span class="n">sample_batch</span> <span class="ow">in</span> <span class="n">pipeline</span><span class="p">:</span>
+    <span class="n">train_step</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">sample_batch</span><span class="o">.</span><span class="n">to_training</span><span class="p">(</span><span class="n">return_labels</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span>
+</pre></div>
+</div>
+</div>
+<p>It is critical that you keep the underlying data and operators identical for the resumed
+training run, including settings like the choice of tokenizer or the parameters for any
+transformations, shuffles, mixtures, or packing operations. Custom transformation
+functions defined via a <code class="docutils literal notranslate"><span class="pre">map_transform</span></code> operator must also be deterministic; it’s
+obviously not possible to guarantee that a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> can exactly reproduce a
+non-deterministic decision that is made during pipeline execution.</p>
+<p>The state dictionary returned by <code class="docutils literal notranslate"><span class="pre">Pipeline.checkpoint</span></code> records which work chunks the run
+had finished and which were still in progress, rather than the internal state of each
+operator. When you call <code class="docutils literal notranslate"><span class="pre">Pipeline.restore</span></code> with the state information, Zephon rebuilds the
+state of the pipeline, including any operators that buffer or re-order records, by
+re-processing a limited number of recent work chunks instead of the entire training
+curriculum. For pipelines made up entirely of order-preserving operators, that means only
+the chunks that were in flight when the checkpoint was taken. For pipelines that re-order
+or regroup records, like those that need to shuffle or pack, it means the chunks that were
+processed since the most recent flush, so the <code class="docutils literal notranslate"><span class="pre">flush_every_k_chunks</span></code> setting also limits
+how much work a restore operation has to redo. The
+<a class="reference internal" href="how_pipelines_run.html"><span class="std std-doc">How pipelines run</span></a> page describes this mechanism and the tradeoffs
+involved with it in more detail, and
+<a class="reference internal" href="../internals/checkpoint_replay.html"><span class="std std-doc">Checkpoint replay and bounded recovery</span></a> covers what a
+checkpoint actually contains and how a restore rebuilds operator state from it.</p>
+<p id="checkpointing-in-distributed-training-jobs"><strong>Checkpointing in distributed training jobs.</strong> In distributed training, each rank sees
+only a portion of the overall job’s data loading progress, so Zephon combines the progress
+of every participating <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> into a single checkpoint. For this to work, each
+<code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> needs a coordination identity along with a shared <code class="docutils literal notranslate"><span class="pre">aggregate_dir</span></code> (or an
+<code class="docutils literal notranslate"><span class="pre">aggregate_store</span></code>, such as torchrun’s TCPStore) and a <code class="docutils literal notranslate"><span class="pre">run_id</span></code>, as described in
+<a class="reference internal" href="distributed_training.html"><span class="std std-doc">Distributed training</span></a>. The aggregation directory or store is
+only used while a checkpoint is being assembled, and you don’t need to keep it around in
+order to resume a run from the checkpoint later.</p>
+<p>Every <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> that is counted in the <code class="docutils literal notranslate"><span class="pre">world_size</span></code> must call <code class="docutils literal notranslate"><span class="pre">checkpoint()</span></code> at the same
+training step, even though only one of them (the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> that has <code class="docutils literal notranslate"><span class="pre">global_rank=0</span></code>) will
+save the result. If a single rank calls the <code class="docutils literal notranslate"><span class="pre">checkpoint()</span></code> method by itself, it will wait
+for the others until the aggregation timeout expires, and then fail.
+<a class="reference internal" href="../training_integrations.html"><span class="std std-doc">Training integrations</span></a> shows how to set things up correctly
+for the TorchTitan and Megatron-LM distributed training frameworks.</p>
+<p id="elastic-resumption"><strong>Elastic resumption.</strong> Suppose that a training run starts on eight data-parallel ranks,
+but after preemption, only four of the ranks are available. If the run was planned for
+elasticity (see the discussion on this in <a class="reference internal" href="distributed_training.html#planning-for-elasticity"><span class="std std-ref">planning for elasticity</span></a>), you can resume it on the
+remaining four ranks without losing your place in the curriculum. Build the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>
+with the new topology (i.e., the new <code class="docutils literal notranslate"><span class="pre">dp_degree</span></code>, <code class="docutils literal notranslate"><span class="pre">dp_group_id</span></code>, <code class="docutils literal notranslate"><span class="pre">world_size</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">global_rank</span></code> values) but with the same <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code> value that the original run
+used, and then restore the checkpoint as usual:</p>
+<div class="literal-block-wrapper docutils container" id="id3">
+<div class="code-block-caption"><span class="caption-text">examples/guide/pipelines/elastic_resume.py</span><a class="headerlink" href="#id3" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Resume on four data-parallel groups a run that started on eight."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.device_mesh</span><span class="w"> </span><span class="kn">import</span> <span class="n">init_device_mesh</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+
+<span class="n">mesh</span> <span class="o">=</span> <span class="n">init_device_mesh</span><span class="p">(</span><span class="s2">"cuda"</span><span class="p">,</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span> <span class="n">mesh_dim_names</span><span class="o">=</span><span class="p">(</span><span class="s2">"dp"</span><span class="p">,</span> <span class="s2">"tp"</span><span class="p">))</span>
+<span class="n">dp_mesh</span> <span class="o">=</span> <span class="n">mesh</span><span class="p">[</span><span class="s2">"dp"</span><span class="p">]</span>
+
+<span class="c1"># The topology is new; canonical_replicas is not. Zephon refuses a checkpoint</span>
+<span class="c1"># whose lane count changed, and hands each of the four groups two lanes.</span>
+<span class="n">pipeline</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">Pipeline</span><span class="p">(</span><span class="n">work_source</span><span class="p">)</span>
+    <span class="o">.</span><span class="n">batch</span><span class="p">(</span><span class="n">microbatch_size</span><span class="o">=</span><span class="mi">32</span><span class="p">)</span>
+    <span class="o">.</span><span class="n">options</span><span class="p">(</span>
+        <span class="n">canonical_replicas</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span>
+        <span class="n">dp_degree</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">size</span><span class="p">(),</span>
+        <span class="n">dp_group_id</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">get_local_rank</span><span class="p">(),</span>
+        <span class="n">world_size</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">size</span><span class="p">(),</span>
+        <span class="n">global_rank</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">get_local_rank</span><span class="p">(),</span>
+        <span class="n">aggregate_dir</span><span class="o">=</span><span class="s2">"s3://my-bucket/runs/aggregate"</span><span class="p">,</span>
+        <span class="n">run_id</span><span class="o">=</span><span class="s2">"pretrain-7b-2026-03-14"</span><span class="p">,</span>
+    <span class="p">)</span>
+<span class="p">)</span>
+
+<span class="n">pipeline</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">checkpoint</span><span class="p">[</span><span class="s2">"data"</span><span class="p">])</span>
+</pre></div>
+</div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">Pipeline.restore()</span></code> reassigns the lanes of logical data to the new ranks. With
+<code class="docutils literal notranslate"><span class="pre">canonical_replicas=8</span></code>, each of the four ranks now processes two lanes apiece. No samples
+are skipped or processed twice, and if the run follows the batches-per-step rule described
+in <a class="reference internal" href="distributed_training.html#planning-for-elasticity"><span class="std std-ref">planning for elasticity</span></a>, each global
+training step contains exactly the same samples it would have on the original eight ranks.
+Zephon refuses to restore a checkpoint if the <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code> value has changed.</p>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="user_defined_operators.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">User-defined operators</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="distributed_training.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Distributed training</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Checkpointing and resuming pipelines</a><ul>
+<li><a class="reference internal" href="#checkpointing-a-pipeline">Checkpointing a pipeline</a></li>
+<li><a class="reference internal" href="#aligning-optimizer-steps-with-lanes">Aligning optimizer steps with lanes</a></li>
+<li><a class="reference internal" href="#restoring-a-training-run">Restoring a training run</a></li>
+<li><a class="reference internal" href="#checkpointing-in-distributed-training-jobs">Checkpointing in distributed training jobs</a></li>
+<li><a class="reference internal" href="#elastic-resumption">Elastic resumption</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

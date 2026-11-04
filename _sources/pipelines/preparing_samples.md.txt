@@ -62,6 +62,23 @@ training it to predict the user's messages:
 :caption: examples/guide/pipelines/tokenize_chat.py
 ```
 
+By default, `tokenize_chat` uses the tokenizer's own chat template. Use
+`chat_template` to select a named template or supply Jinja text or a template file.
+For named templates, Zephon selects `tool_use` when available and the document's
+`tools` field is not `None`; otherwise it uses `default`. Select any other name with
+`chat_template="name"`. If neither automatic choice applies, set `chat_template` explicitly.
+
+The `special_tokens` option controls additional BOS/EOS tokens for both text and chat.
+Use `bos`, `eos`, or `bos_eos` to bracket the complete document or conversation, or
+`none` to use the tokens supplied by the input or template. For chat without a template,
+`apply_chat_template=False, special_tokens="tokenizer_default"` uses the tokenizer's
+own special-token processing on the concatenated message contents.
+
+For recipes that train on the complete conversation, `loss_scope="all_tokens"`
+includes user messages and template markers in the loss mask, with the first token
+always excluded. The [API reference](../api/pipeline.rst) describes the other loss
+scopes, special-token modes and tokenizer overrides.
+
 With `loss_scope="after_last_user"`, generation-tagged templates are verified
 automatically. Tool-call arguments can be objects, other JSON values, or raw text.
 Non-object arguments use additional verification renders, cached by exact value.

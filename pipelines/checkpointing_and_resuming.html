@@ -86,7 +86,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="v0.2.0" data-page="pipelines/checkpointing_and_resuming.html"></script>
+</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="v0.2.1" data-page="pipelines/checkpointing_and_resuming.html"></script>
 </head>
   <body>
     
@@ -386,6 +386,16 @@ into the model:</p>
 </pre></div>
 </div>
 </div>
+<p>If you use a checkpoint manager like PyTorch DCP, you can ask Zephon to return a
+single blob of bytes. DCP can otherwise miss the saved information about work
+that was still in flight, since a fresh pipeline hasn’t started that work yet:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">state</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"zephon"</span><span class="p">:</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">(</span><span class="n">as_bytes</span><span class="o">=</span><span class="kc">True</span><span class="p">)}</span>
+<span class="c1"># Save and load state with the rest of your training checkpoint.</span>
+<span class="n">pipeline</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">state</span><span class="p">[</span><span class="s2">"zephon"</span><span class="p">])</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">restore()</span></code> accepts the blob directly, so you don’t need to serialize the state
+yourself.</p>
 <p>If the training loop accumulates gradients across several microbatches, save the
 checkpoint after a complete optimizer step, once all batches returned by the Pipeline have
 been incorporated into that step. The pipeline, model, and optimizer states must describe

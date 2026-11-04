@@ -85,7 +85,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="v0.2.0" data-page="_modules/zephon/types.html"></script>
+</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="v0.2.1" data-page="_modules/zephon/types.html"></script>
 </head>
   <body>
     
@@ -348,6 +348,7 @@
     <span class="n">Iterable</span><span class="p">,</span>
     <span class="n">Literal</span><span class="p">,</span>
     <span class="n">Mapping</span><span class="p">,</span>
+    <span class="n">Protocol</span><span class="p">,</span>
     <span class="n">Sequence</span><span class="p">,</span>
     <span class="n">TypeAlias</span><span class="p">,</span>
     <span class="n">cast</span><span class="p">,</span>
@@ -375,13 +376,22 @@
     <span class="n">mask_padding_labels</span> <span class="k">as</span> <span class="n">_mask_padding_labels</span><span class="p">,</span>
 <span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">mask_segment_start_labels</span> <span class="k">as</span> <span class="n">_mask_segment_start_labels</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">mask_unsupervised_labels</span> <span class="k">as</span> <span class="n">_mask_unsupervised_labels</span><span class="p">,</span>
 <span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">padding_lengths_to_mask</span> <span class="k">as</span> <span class="n">_padding_lengths_to_mask</span><span class="p">,</span>
 <span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">positions_from_segment_lengths</span> <span class="k">as</span> <span class="n">_positions_from_segment_lengths</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">positions_to_cu_seqlens</span> <span class="k">as</span> <span class="n">_positions_to_cu_seqlens</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">positions_to_document_ids</span> <span class="k">as</span> <span class="n">_positions_to_document_ids</span><span class="p">,</span>
 <span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">resolve_dtype</span> <span class="k">as</span> <span class="n">_resolve_dtype</span><span class="p">,</span>
@@ -408,6 +418,27 @@
     <span class="n">SamplePayloadArray</span> <span class="o">=</span> <span class="n">Any</span>  <span class="c1"># type: ignore[assignment]</span>
     <span class="n">_NumpyNumber</span> <span class="o">=</span> <span class="n">Any</span>  <span class="c1"># type: ignore[assignment]</span>
     <span class="n">_NumpyTemporal</span> <span class="o">=</span> <span class="n">Any</span>  <span class="c1"># type: ignore[assignment]</span>
+
+
+<div class="viewcode-block" id="FieldCollator">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.FieldCollator">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">FieldCollator</span><span class="p">(</span><span class="n">Protocol</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Assemble a named field that ordinary token stacking cannot handle.</span>
+
+<span class="sd">    For example, image tensors need concatenation along their media axis, while</span>
+<span class="sd">    model-specific multi-axis positions need their own padding and axis order.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">values</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="o">/</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">length</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">shifted</span><span class="p">:</span> <span class="nb">bool</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Collate a field's values from the documents in one batch.</span>
+
+<span class="sd">        ``length`` is the token length before next-token shifting. ``shifted``</span>
+<span class="sd">        indicates whether token inputs/labels were shifted, so the callback can</span>
+<span class="sd">        align its own fields. Its output is not cast, sliced or flattened again.</span>
+<span class="sd">        """</span>
+        <span class="o">...</span></div>
+
+
 
 <span class="n">DatasetId</span> <span class="o">=</span> <span class="nb">int</span>
 <span class="n">ShardId</span> <span class="o">=</span> <span class="nb">int</span>
@@ -787,15 +818,14 @@
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_extract_from_dicts</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
-        <span class="n">items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">SampleRecord</span><span class="p">],</span>
+        <span class="n">values</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
         <span class="n">tokens_field</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
         <span class="n">extra_fields</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]],</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]:</span>
 <span class="w">        </span><span class="sd">"""Extract tokens, texts, extra fields, and loss masks from dict payloads."""</span>
         <span class="n">payloads</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">SamplePayloadDict</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
         <span class="n">texts</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
-        <span class="k">for</span> <span class="n">record</span> <span class="ow">in</span> <span class="n">items</span><span class="p">:</span>
-            <span class="n">payload</span> <span class="o">=</span> <span class="n">record</span><span class="o">.</span><span class="n">payload</span>
+        <span class="k">for</span> <span class="n">payload</span> <span class="ow">in</span> <span class="n">values</span><span class="p">:</span>
             <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
                 <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Expected dict payload, got: </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
             <span class="n">payloads</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
@@ -905,12 +935,24 @@
         <span class="n">return_num_valid_tokens</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">return_loss_mask</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">return_cu_seqlens</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">return_document_ids</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">return_padding_mask</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">eos_mask_loss</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">eos_token_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">position_mode</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">"preserve"</span><span class="p">,</span> <span class="s2">"sequence"</span><span class="p">]</span> <span class="o">=</span> <span class="s2">"preserve"</span><span class="p">,</span>
+        <span class="n">pad_to_length</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">pad_token_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">mask_segment_starts</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">field_collators</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">FieldCollator</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
 <span class="w">        </span><span class="sd">"""Convert batch to training-ready format with optional LM label generation.</span>
+
+<span class="sd">        Supports individual token sequences, ``pack_flat`` output, and</span>
+<span class="sd">        ``pack_sequences`` output merged by a ``pack_payloads`` callback. That</span>
+<span class="sd">        callback must return a dictionary containing one concatenated token</span>
+<span class="sd">        sequence per pack. To request document-boundary outputs or boundary loss</span>
+<span class="sd">        masking, also supply scalar ``positions`` starting at zero in each</span>
+<span class="sd">        subdocument.</span>
 
 <span class="sd">        A ``"loss_mask"`` payload field (a per-token supervised-vs-not mask,</span>
 <span class="sd">        e.g. from chat-template tokenization) is recognized automatically, like</span>
@@ -935,7 +977,9 @@
 <span class="sd">                (drop the last token), so they stay aligned with it.</span>
 <span class="sd">            dtype: Tensor dtype for stacking. Use "auto" to detect (prefers</span>
 <span class="sd">                torch.long if available, else np.int64, else returns lists).</span>
-<span class="sd">                Use None to explicitly return lists instead of tensors.</span>
+<span class="sd">                Use None to explicitly return lists instead of tensors. This</span>
+<span class="sd">                preserves scalar types in input sequences and padding tails;</span>
+<span class="sd">                NumPy scalars are not recursively converted to Python scalars.</span>
 <span class="sd">                A requested loss mask always uses float32 (Python floats for</span>
 <span class="sd">                lists), independently of this dtype. Requested cumulative</span>
 <span class="sd">                sequence lengths and per-row maxima use int32 (Python ints for</span>
@@ -946,6 +990,53 @@
 <span class="sd">                ``"positions"`` field (emitted by ``pack_flat``) is surfaced</span>
 <span class="sd">                automatically and need not be listed here. Extra fields cannot</span>
 <span class="sd">                overwrite generated output fields, such as input_ids or labels.</span>
+<span class="sd">            pad_to_length: Optional fixed token length before next-token shifting.</span>
+<span class="sd">                Right-pad shorter documents to this length; reject longer ones.</span>
+<span class="sd">                This supports unequal-length documents that were not already</span>
+<span class="sd">                padded by pack_flat. With return_labels=True, input_ids and</span>
+<span class="sd">                labels each have pad_to_length - 1 tokens.</span>
+<span class="sd">                Tokens use pad_token_id, ordinary token-aligned extra fields and</span>
+<span class="sd">                supervision use zero, and positions start a separate padding</span>
+<span class="sd">                segment. Padding and loss masks account for both existing padding</span>
+<span class="sd">                and padding added here. With None, add no padding:</span>
+<span class="sd">                tensor/array output requires stackable lengths, while dtype=None</span>
+<span class="sd">                returns lists that may have different lengths.</span>
+<span class="sd">                Already padded pack_flat output is supported: an equal target</span>
+<span class="sd">                adds nothing, a larger target extends its padding, and a smaller</span>
+<span class="sd">                target raises even if it would only remove existing padding.</span>
+<span class="sd">            pad_token_id: Nonnegative padding token ID required with pad_to_length.</span>
+<span class="sd">                May equal EOS: padding is identified by length, never token ID.</span>
+<span class="sd">            mask_segment_starts: Exclude the prediction from the last token of</span>
+<span class="sd">                one packed subdocument to the first token of the next. For</span>
+<span class="sd">                tokens [a1, a2, b1, b2] with positions [0, 1, 0, 1], generated</span>
+<span class="sd">                labels [a2, b1, b2] become [a2, ignore_index, b2]. This is useful</span>
+<span class="sd">                when unrelated documents should not contribute boundary targets.</span>
+<span class="sd">                Defaults to False, leaving those predictions supervised unless</span>
+<span class="sd">                another mask excludes them. Requires return_labels=True and</span>
+<span class="sd">                scalar payload positions that start at zero in each subdocument.</span>
+<span class="sd">                The first token in each packed input has no preceding target.</span>
+<span class="sd">                Existing supervision/padding masks still apply. This option does</span>
+<span class="sd">                not change attention or model positions.</span>
+<span class="sd">                Unlike eos_mask_loss, it also works without EOS and does not mask</span>
+<span class="sd">                predictions after BOS when BOS and EOS share an ID. When both</span>
+<span class="sd">                options are enabled, their loss exclusions are combined.</span>
+<span class="sd">            field_collators: Optional field-name to callable mapping. Each callable</span>
+<span class="sd">                receives ordered values and keyword-only length and shifted, once</span>
+<span class="sd">                per batch. Values are the original unpadded field values;</span>
+<span class="sd">                length is the token length before next-token shifting: either</span>
+<span class="sd">                pad_to_length or the common token length when padding is omitted.</span>
+<span class="sd">                shifted is return_labels. Without pad_to_length, all documents</span>
+<span class="sd">                must have equal token lengths when using callbacks.</span>
+<span class="sd">                Its result is emitted under that field's</span>
+<span class="sd">                name without dtype conversion, token slicing or flattening.</span>
+<span class="sd">                rename_fields/exclude_fields still apply. Fields are included</span>
+<span class="sd">                automatically and must exist in every payload. Callbacks own</span>
+<span class="sd">                media concatenation or model-position padding/slicing/stacking;</span>
+<span class="sd">                they must be deterministic, stateless and must not mutate inputs.</span>
+<span class="sd">                Generated/reserved fields cannot be overridden. Empty batches</span>
+<span class="sd">                call each callback with empty values and length=pad_to_length or</span>
+<span class="sd">                zero. Callbacks must return their empty result or raise a clear</span>
+<span class="sd">                ValueError when they do not support empty batches.</span>
 <span class="sd">            ignore_index: Loss-ignore sentinel (default ``-100``). With</span>
 <span class="sd">                ``return_labels``, each record's trailing pad labels</span>
 <span class="sd">                (``meta.padding_length``) are set to this value.</span>
@@ -970,7 +1061,8 @@
 <span class="sd">                and exclude_fields like other sequence fields.</span>
 <span class="sd">            return_padding_mask: Include a boolean input-aligned "padding_mask",</span>
 <span class="sd">                True only for trailing padding described by each record's</span>
-<span class="sd">                ``meta.padding_length`` (missing metadata means no padding).</span>
+<span class="sd">                ``meta.padding_length`` plus padding added by pad_to_length</span>
+<span class="sd">                (missing metadata means no pre-existing padding).</span>
 <span class="sd">                Uses bool tensors/arrays or Python bools for lists. With labels,</span>
 <span class="sd">                drops the last token like input_ids; then follows flatten,</span>
 <span class="sd">                rename_fields, and exclude_fields. Independent of loss_mask:</span>
@@ -992,6 +1084,19 @@
 <span class="sd">                this metadata does not itself enable attention masking or</span>
 <span class="sd">                change labels. Always uses the payload positions, independently</span>
 <span class="sd">                of position_mode. Works with or without return_labels.</span>
+<span class="sd">            return_document_ids: Include "document_ids", an input-aligned</span>
+<span class="sd">                per-token subdocument membership map of shape [batch, sequence].</span>
+<span class="sd">                For positions [0, 1, 2, 0, 1], this emits IDs [1, 1, 1, 2, 2].</span>
+<span class="sd">                Positive IDs start at one in each packed document; zero marks</span>
+<span class="sd">                padding from metadata or pad_to_length, never inferred from token</span>
+<span class="sd">                IDs or supervision. Requires scalar payload "positions" that</span>
+<span class="sd">                reset to zero at subdocument starts. position_mode does not</span>
+<span class="sd">                affect document IDs. With flatten,</span>
+<span class="sd">                returns [tokens] with positive IDs unique across the batch.</span>
+<span class="sd">                Uses int64 for torch/numpy and Python ints for lists. Empty</span>
+<span class="sd">                batches return []. Follows shifting, renaming and exclusion.</span>
+<span class="sd">                Unlike "ids", which contains record identities, there is one</span>
+<span class="sd">                entry per token.</span>
 <span class="sd">            eos_mask_loss: If True, set labels to ignore_index wherever the</span>
 <span class="sd">                corresponding input token equals eos_token_id. Requires</span>
 <span class="sd">                return_labels=True and a known EOS ID (see eos_token_id). For packed</span>
@@ -1063,6 +1168,8 @@
 <span class="sd">              maximum segment lengths (only if return_cu_seqlens=True)</span>
 <span class="sd">            - "padding_mask": Boolean input padding mask (only if</span>
 <span class="sd">              return_padding_mask=True)</span>
+<span class="sd">            - "document_ids": Input-aligned subdocument membership (only if</span>
+<span class="sd">              return_document_ids=True), zero at padding</span>
 
 <span class="sd">        Raises:</span>
 <span class="sd">            TypeError: If payloads are neither dicts nor arrays, or exclude_fields</span>
@@ -1119,6 +1226,10 @@
                 <span class="s2">"extra_fields cannot include 'cu_seqlens' or 'max_seqlen' "</span>
                 <span class="o">+</span> <span class="s2">"with return_cu_seqlens=True"</span>
             <span class="p">)</span>
+        <span class="k">if</span> <span class="n">return_document_ids</span> <span class="ow">and</span> <span class="s2">"document_ids"</span> <span class="ow">in</span> <span class="n">extra_fields</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">"extra_fields cannot include 'document_ids' with return_document_ids=True"</span>
+            <span class="p">)</span>
         <span class="k">if</span> <span class="n">return_num_valid_tokens</span><span class="p">:</span>
             <span class="k">if</span> <span class="ow">not</span> <span class="n">return_labels</span><span class="p">:</span>
                 <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"return_num_valid_tokens requires return_labels=True"</span><span class="p">)</span>
@@ -1135,14 +1246,88 @@
                 <span class="o">+</span> <span class="s2">"return_labels=False for the raw mask."</span>
             <span class="p">)</span>
         <span class="n">items</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">records</span><span class="p">)</span>
+        <span class="n">payloads</span> <span class="o">=</span> <span class="p">[</span><span class="n">record</span><span class="o">.</span><span class="n">payload</span> <span class="k">for</span> <span class="n">record</span> <span class="ow">in</span> <span class="n">items</span><span class="p">]</span>
+        <span class="k">for</span> <span class="n">index</span><span class="p">,</span> <span class="n">payload</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">payloads</span><span class="p">):</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">and</span> <span class="s2">"packed_samples"</span> <span class="ow">in</span> <span class="n">payload</span><span class="p">:</span>
+                <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="s2">"Ambiguous pack_sequences envelope: 'packed_samples' must "</span>
+                        <span class="o">+</span> <span class="s2">"be the only outer field; put merged token/media fields inside it"</span>
+                    <span class="p">)</span>
+                <span class="n">merged</span> <span class="o">=</span> <span class="n">payload</span><span class="p">[</span><span class="s2">"packed_samples"</span><span class="p">]</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">merged</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="s2">"to_training requires a merged token mapping inside "</span>
+                        <span class="o">+</span> <span class="s2">"'packed_samples'; provide pack_sequences(pack_payloads=...) "</span>
+                        <span class="o">+</span> <span class="s2">"to concatenate subdocuments and retain scalar boundary positions. "</span>
+                        <span class="o">+</span> <span class="s2">"pad_to_length and flatten do not merge subdocuments"</span>
+                    <span class="p">)</span>
+                <span class="n">payloads</span><span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">=</span> <span class="n">merged</span>
+        <span class="n">resolved_tokens_field</span> <span class="o">=</span> <span class="n">tokens_field</span>
+        <span class="k">if</span> <span class="n">payloads</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">payloads</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">and</span> <span class="n">tokens_field</span> <span class="o">==</span> <span class="s2">"auto"</span><span class="p">:</span>
+            <span class="n">resolved_tokens_field</span> <span class="o">=</span> <span class="n">_detect_length_field</span><span class="p">(</span><span class="n">payloads</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="ow">or</span> <span class="s2">"auto"</span>
+        <span class="n">collators</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">field_collators</span> <span class="ow">or</span> <span class="p">{})</span>
+        <span class="n">overlap</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">collators</span><span class="p">)</span><span class="o">.</span><span class="n">intersection</span><span class="p">(</span><span class="n">extra_fields</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">overlap</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"field_collators and extra_fields overlap: </span><span class="si">{</span><span class="nb">sorted</span><span class="p">(</span><span class="n">overlap</span><span class="p">)</span><span class="si">!r}</span><span class="s2">"</span>
+            <span class="p">)</span>
+        <span class="n">reserved_fields</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">"ids"</span><span class="p">,</span>
+            <span class="s2">"texts"</span><span class="p">,</span>
+            <span class="s2">"input_ids"</span><span class="p">,</span>
+            <span class="s2">"labels"</span><span class="p">,</span>
+            <span class="s2">"positions"</span><span class="p">,</span>
+            <span class="s2">"loss_mask"</span><span class="p">,</span>
+            <span class="s2">"padding_mask"</span><span class="p">,</span>
+            <span class="s2">"cu_seqlens"</span><span class="p">,</span>
+            <span class="s2">"max_seqlen"</span><span class="p">,</span>
+            <span class="s2">"num_valid_tokens"</span><span class="p">,</span>
+            <span class="s2">"document_ids"</span><span class="p">,</span>
+        <span class="p">}</span>
+        <span class="n">reserved_fields</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">resolved_tokens_field</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">collator</span> <span class="ow">in</span> <span class="n">collators</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">name</span> <span class="ow">or</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">reserved_fields</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">"field_collators cannot override reserved field </span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2">"</span>
+                <span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">callable</span><span class="p">(</span><span class="n">collator</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"field_collators[</span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2">] must be callable"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">if</span> <span class="p">(</span>
+                <span class="nb">isinstance</span><span class="p">(</span><span class="n">pad_to_length</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span>
+                <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">pad_to_length</span><span class="p">,</span> <span class="n">Integral</span><span class="p">)</span>
+                <span class="ow">or</span> <span class="n">pad_to_length</span> <span class="o">&lt;</span> <span class="mi">0</span>
+            <span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"pad_to_length must be a nonnegative integer or None"</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">pad_token_id</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"pad_to_length requires pad_token_id"</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="n">pad_token_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"pad_token_id requires pad_to_length"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">pad_token_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="p">(</span>
+            <span class="nb">isinstance</span><span class="p">(</span><span class="n">pad_token_id</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span>
+            <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">pad_token_id</span><span class="p">,</span> <span class="n">Integral</span><span class="p">)</span>
+            <span class="ow">or</span> <span class="n">pad_token_id</span> <span class="o">&lt;</span> <span class="mi">0</span>
+        <span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"pad_token_id must be a nonnegative integer or None"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">mask_segment_starts</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">return_labels</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"mask_segment_starts requires return_labels=True"</span><span class="p">)</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="n">items</span><span class="p">:</span>
             <span class="n">empty</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"ids"</span><span class="p">:</span> <span class="p">[],</span> <span class="s2">"texts"</span><span class="p">:</span> <span class="p">[]}</span>
+            <span class="n">empty</span><span class="o">.</span><span class="n">update</span><span class="p">(</span>
+                <span class="p">{</span>
+                    <span class="n">name</span><span class="p">:</span> <span class="n">collator</span><span class="p">((),</span> <span class="n">length</span><span class="o">=</span><span class="n">pad_to_length</span> <span class="ow">or</span> <span class="mi">0</span><span class="p">,</span> <span class="n">shifted</span><span class="o">=</span><span class="n">return_labels</span><span class="p">)</span>
+                    <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">collator</span> <span class="ow">in</span> <span class="n">collators</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
+                <span class="p">}</span>
+            <span class="p">)</span>
             <span class="k">if</span> <span class="n">return_num_valid_tokens</span><span class="p">:</span>
                 <span class="n">empty</span><span class="p">[</span><span class="s2">"num_valid_tokens"</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
             <span class="k">if</span> <span class="n">return_loss_mask</span><span class="p">:</span>
                 <span class="n">empty</span><span class="p">[</span><span class="s2">"loss_mask"</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
             <span class="k">if</span> <span class="n">return_padding_mask</span><span class="p">:</span>
                 <span class="n">empty</span><span class="p">[</span><span class="s2">"padding_mask"</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">if</span> <span class="n">return_document_ids</span><span class="p">:</span>
+                <span class="n">empty</span><span class="p">[</span><span class="s2">"document_ids"</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
             <span class="k">if</span> <span class="n">position_mode</span> <span class="o">==</span> <span class="s2">"sequence"</span><span class="p">:</span>
                 <span class="n">empty</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
             <span class="k">if</span> <span class="n">return_cu_seqlens</span><span class="p">:</span>
@@ -1153,19 +1338,19 @@
             <span class="p">)</span>
 
         <span class="c1"># Extract based on payload type</span>
-        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">items</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">payload</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">payloads</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="nb">dict</span><span class="p">):</span>
             <span class="n">token_lists</span><span class="p">,</span> <span class="n">texts</span><span class="p">,</span> <span class="n">extra_data</span><span class="p">,</span> <span class="n">loss_mask_lists</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_extract_from_dicts</span><span class="p">(</span>
-                <span class="n">items</span><span class="p">,</span> <span class="n">tokens_field</span><span class="p">,</span> <span class="n">extra_fields</span>
+                <span class="n">payloads</span><span class="p">,</span> <span class="n">resolved_tokens_field</span><span class="p">,</span> <span class="p">(</span><span class="o">*</span><span class="n">extra_fields</span><span class="p">,</span> <span class="o">*</span><span class="n">collators</span><span class="p">)</span>
             <span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="n">token_lists</span><span class="p">,</span> <span class="n">texts</span><span class="p">,</span> <span class="n">extra_data</span><span class="p">,</span> <span class="n">loss_mask_lists</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_extract_from_arrays</span><span class="p">(</span>
                 <span class="n">items</span>
             <span class="p">)</span>
 
-        <span class="k">if</span> <span class="n">return_cu_seqlens</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">return_cu_seqlens</span> <span class="ow">or</span> <span class="n">return_document_ids</span> <span class="ow">or</span> <span class="n">mask_segment_starts</span><span class="p">:</span>
             <span class="k">if</span> <span class="s2">"positions"</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">extra_data</span><span class="p">:</span>
                 <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
-                    <span class="s2">"return_cu_seqlens requires a 'positions' field in every payload; "</span>
+                    <span class="s2">"return_cu_seqlens/return_document_ids/mask_segment_starts requires a 'positions' field in every payload; "</span>
                     <span class="o">+</span> <span class="s2">"use pack_flat(emit_positions=True)"</span>
                 <span class="p">)</span>
             <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="p">(</span><span class="n">tokens_row</span><span class="p">,</span> <span class="n">positions_row</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span>
@@ -1180,6 +1365,36 @@
                         <span class="sa">f</span><span class="s2">"'positions' must match the token sequence length at index </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">"</span>
                     <span class="p">)</span>
 
+        <span class="k">if</span> <span class="n">collators</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">items</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">payload</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">"field_collators require mapping payloads with named fields"</span>
+            <span class="p">)</span>
+        <span class="n">custom_values</span> <span class="o">=</span> <span class="p">{</span><span class="n">name</span><span class="p">:</span> <span class="n">extra_data</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">name</span><span class="p">)</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">collators</span><span class="p">}</span>
+        <span class="n">pad_lengths</span> <span class="o">=</span> <span class="p">[</span><span class="n">r</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">padding_length</span> <span class="ow">or</span> <span class="mi">0</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">items</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">lengths</span> <span class="o">=</span> <span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="n">values</span><span class="p">)</span> <span class="k">for</span> <span class="n">values</span> <span class="ow">in</span> <span class="n">token_lists</span><span class="p">]</span>
+            <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="ow">not</span> <span class="mi">0</span> <span class="o">&lt;=</span> <span class="n">pad</span> <span class="o">&lt;=</span> <span class="n">length</span> <span class="k">for</span> <span class="n">pad</span><span class="p">,</span> <span class="n">length</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">pad_lengths</span><span class="p">,</span> <span class="n">lengths</span><span class="p">)):</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="s2">"padding_length must lie within its token document's length"</span>
+                <span class="p">)</span>
+            <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">values</span> <span class="ow">in</span> <span class="n">extra_data</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="o">!=</span> <span class="n">length</span> <span class="k">for</span> <span class="n">value</span><span class="p">,</span> <span class="n">length</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">values</span><span class="p">,</span> <span class="n">lengths</span><span class="p">)):</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">"'</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">' must match tokens when padding; use field_collators for non-token fields"</span>
+                    <span class="p">)</span>
+            <span class="n">pad_lengths</span> <span class="o">=</span> <span class="p">[</span>
+                <span class="n">pad</span> <span class="o">+</span> <span class="n">pad_to_length</span> <span class="o">-</span> <span class="n">length</span>
+                <span class="k">for</span> <span class="n">pad</span><span class="p">,</span> <span class="n">length</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">pad_lengths</span><span class="p">,</span> <span class="n">lengths</span><span class="p">)</span>
+            <span class="p">]</span>
+        <span class="n">collator_length</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="k">if</span> <span class="n">collators</span><span class="p">:</span>
+            <span class="n">lengths</span> <span class="o">=</span> <span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="n">values</span><span class="p">)</span> <span class="k">for</span> <span class="n">values</span> <span class="ow">in</span> <span class="n">token_lists</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">lengths</span><span class="p">))</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="s2">"field_collators require equal token lengths; set pad_to_length for unequal documents"</span>
+                <span class="p">)</span>
+            <span class="n">collator_length</span> <span class="o">=</span> <span class="n">pad_to_length</span> <span class="k">if</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">lengths</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
         <span class="c1"># Resolve dtype</span>
         <span class="n">resolved_dtype</span><span class="p">,</span> <span class="n">framework</span> <span class="o">=</span> <span class="n">_resolve_dtype</span><span class="p">(</span><span class="n">dtype</span><span class="p">)</span>
 
@@ -1190,20 +1405,24 @@
         <span class="p">}</span>
 
         <span class="c1"># Stack tokens</span>
-        <span class="n">tokens</span> <span class="o">=</span> <span class="n">_stack_sequences</span><span class="p">(</span><span class="n">token_lists</span><span class="p">,</span> <span class="n">resolved_dtype</span><span class="p">,</span> <span class="n">framework</span><span class="p">)</span>
-
-        <span class="n">pad_lengths</span> <span class="o">=</span> <span class="p">(</span>
-            <span class="p">[</span><span class="n">r</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">padding_length</span> <span class="ow">or</span> <span class="mi">0</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">items</span><span class="p">]</span>
-            <span class="k">if</span> <span class="n">return_labels</span> <span class="ow">or</span> <span class="n">return_padding_mask</span>
-            <span class="k">else</span> <span class="p">[]</span>
+        <span class="n">tokens</span> <span class="o">=</span> <span class="n">_stack_sequences</span><span class="p">(</span>
+            <span class="n">token_lists</span><span class="p">,</span>
+            <span class="n">resolved_dtype</span><span class="p">,</span>
+            <span class="n">framework</span><span class="p">,</span>
+            <span class="n">length</span><span class="o">=</span><span class="n">pad_to_length</span><span class="p">,</span>
+            <span class="n">pad_value</span><span class="o">=</span><span class="n">pad_token_id</span> <span class="ow">or</span> <span class="mi">0</span><span class="p">,</span>
         <span class="p">)</span>
-        <span class="k">if</span> <span class="n">return_padding_mask</span><span class="p">:</span>
-            <span class="n">result</span><span class="p">[</span><span class="s2">"padding_mask"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_padding_lengths_to_mask</span><span class="p">(</span>
+
+        <span class="n">padding_mask</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="n">return_padding_mask</span> <span class="ow">or</span> <span class="n">return_document_ids</span><span class="p">:</span>
+            <span class="n">padding_mask</span> <span class="o">=</span> <span class="n">_padding_lengths_to_mask</span><span class="p">(</span>
                 <span class="n">tokens</span><span class="p">,</span>
                 <span class="n">pad_lengths</span><span class="p">,</span>
                 <span class="n">framework</span><span class="p">,</span>
                 <span class="n">shifted</span><span class="o">=</span><span class="n">return_labels</span><span class="p">,</span>
             <span class="p">)</span>
+            <span class="k">if</span> <span class="n">return_padding_mask</span><span class="p">:</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"padding_mask"</span><span class="p">]</span> <span class="o">=</span> <span class="n">padding_mask</span>
 
         <span class="k">if</span> <span class="n">return_labels</span><span class="p">:</span>
             <span class="c1"># Shift for next-token prediction: input = tokens[:-1], labels = tokens[1:]</span>
@@ -1214,7 +1433,12 @@
             <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="n">pad_lengths</span><span class="p">):</span>
                 <span class="c1"># An all-padding row loses one padding label in the shift too.</span>
                 <span class="n">label_pad_lengths</span> <span class="o">=</span> <span class="p">[</span>
-                    <span class="n">n</span> <span class="o">-</span> <span class="nb">int</span><span class="p">(</span><span class="n">n</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="ow">and</span> <span class="n">n</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">row</span><span class="p">))</span>
+                    <span class="n">n</span>
+                    <span class="o">-</span> <span class="nb">int</span><span class="p">(</span>
+                        <span class="n">n</span> <span class="o">&gt;</span> <span class="mi">0</span>
+                        <span class="ow">and</span> <span class="n">n</span>
+                        <span class="o">==</span> <span class="p">(</span><span class="n">pad_to_length</span> <span class="k">if</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">len</span><span class="p">(</span><span class="n">row</span><span class="p">))</span>
+                    <span class="p">)</span>
                     <span class="k">for</span> <span class="n">n</span><span class="p">,</span> <span class="n">row</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">pad_lengths</span><span class="p">,</span> <span class="n">token_lists</span><span class="p">)</span>
                 <span class="p">]</span>
                 <span class="n">labels</span> <span class="o">=</span> <span class="n">_mask_padding_labels</span><span class="p">(</span>
@@ -1224,6 +1448,7 @@
         <span class="k">else</span><span class="p">:</span>
             <span class="n">result</span><span class="p">[</span><span class="s2">"input_ids"</span><span class="p">]</span> <span class="o">=</span> <span class="n">tokens</span>
 
+        <span class="n">boundary_positions</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="c1"># Handle extra fields</span>
         <span class="k">for</span> <span class="n">field_name</span><span class="p">,</span> <span class="n">field_lists</span> <span class="ow">in</span> <span class="n">extra_data</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
             <span class="c1"># Final renaming cannot detect an input/label overwrite that already</span>
@@ -1236,11 +1461,27 @@
                 <span class="n">field_name</span> <span class="o">==</span> <span class="s2">"positions"</span>
                 <span class="ow">and</span> <span class="n">position_mode</span> <span class="o">==</span> <span class="s2">"sequence"</span>
                 <span class="ow">and</span> <span class="ow">not</span> <span class="n">return_cu_seqlens</span>
+                <span class="ow">and</span> <span class="ow">not</span> <span class="n">return_document_ids</span>
+                <span class="ow">and</span> <span class="ow">not</span> <span class="n">mask_segment_starts</span>
             <span class="p">):</span>
-                <span class="c1"># Sequence mode replaces these; only attention boundaries</span>
-                <span class="c1"># require materializing the packer's original positions.</span>
+                <span class="c1"># Sequence mode replaces emitted positions. Keep the original</span>
+                <span class="c1"># resets only when boundaries or boundary-label masking need them.</span>
                 <span class="k">continue</span>
-            <span class="n">field_tensor</span> <span class="o">=</span> <span class="n">_stack_sequences</span><span class="p">(</span><span class="n">field_lists</span><span class="p">,</span> <span class="n">resolved_dtype</span><span class="p">,</span> <span class="n">framework</span><span class="p">)</span>
+            <span class="n">tails</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="k">if</span> <span class="n">field_name</span> <span class="o">==</span> <span class="s2">"positions"</span> <span class="ow">and</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">tails</span> <span class="o">=</span> <span class="p">[</span>
+                    <span class="n">_positions_from_segment_lengths</span><span class="p">((</span><span class="n">pad_to_length</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">value</span><span class="p">),))</span>
+                    <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">field_lists</span>
+                <span class="p">]</span>
+            <span class="n">field_tensor</span> <span class="o">=</span> <span class="n">_stack_sequences</span><span class="p">(</span>
+                <span class="n">field_lists</span><span class="p">,</span>
+                <span class="n">resolved_dtype</span><span class="p">,</span>
+                <span class="n">framework</span><span class="p">,</span>
+                <span class="n">length</span><span class="o">=</span><span class="n">pad_to_length</span><span class="p">,</span>
+                <span class="n">tails</span><span class="o">=</span><span class="n">tails</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="k">if</span> <span class="n">field_name</span> <span class="o">==</span> <span class="s2">"positions"</span><span class="p">:</span>
+                <span class="n">boundary_positions</span> <span class="o">=</span> <span class="n">field_tensor</span>
 
             <span class="k">if</span> <span class="n">return_labels</span><span class="p">:</span>
                 <span class="c1"># Shift extra fields to match input_ids shape</span>
@@ -1251,7 +1492,9 @@
                 <span class="n">result</span><span class="p">[</span><span class="n">field_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">field_tensor</span>
 
         <span class="k">if</span> <span class="n">loss_mask_lists</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="n">masks</span> <span class="o">=</span> <span class="n">_stack_sequences</span><span class="p">(</span><span class="n">loss_mask_lists</span><span class="p">,</span> <span class="n">resolved_dtype</span><span class="p">,</span> <span class="n">framework</span><span class="p">)</span>
+            <span class="n">masks</span> <span class="o">=</span> <span class="n">_stack_sequences</span><span class="p">(</span>
+                <span class="n">loss_mask_lists</span><span class="p">,</span> <span class="n">resolved_dtype</span><span class="p">,</span> <span class="n">framework</span><span class="p">,</span> <span class="n">length</span><span class="o">=</span><span class="n">pad_to_length</span>
+            <span class="p">)</span>
             <span class="k">if</span> <span class="n">return_labels</span><span class="p">:</span>
                 <span class="c1"># The label at position i supervises token i+1, so the mask</span>
                 <span class="c1"># shifts like labels (drop the first entry), not like inputs.</span>
@@ -1264,6 +1507,12 @@
             <span class="k">elif</span> <span class="s2">"loss_mask"</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">result</span><span class="p">:</span>
                 <span class="c1"># extra_fields may have already emitted it explicitly.</span>
                 <span class="n">result</span><span class="p">[</span><span class="s2">"loss_mask"</span><span class="p">]</span> <span class="o">=</span> <span class="n">masks</span>
+
+        <span class="k">if</span> <span class="n">mask_segment_starts</span><span class="p">:</span>
+            <span class="k">assert</span> <span class="n">boundary_positions</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_mask_segment_start_labels</span><span class="p">(</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">],</span> <span class="n">boundary_positions</span><span class="p">,</span> <span class="n">ignore_index</span><span class="p">,</span> <span class="n">framework</span>
+            <span class="p">)</span>
 
         <span class="k">if</span> <span class="n">eos_mask_loss</span><span class="p">:</span>
             <span class="k">assert</span> <span class="n">eos_token_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>  <span class="c1"># Validated before extracting payloads.</span>
@@ -1298,7 +1547,12 @@
             <span class="p">)</span>
             <span class="n">sequence_metadata</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"cu_seqlens"</span><span class="p">:</span> <span class="n">cu_seqlens</span><span class="p">,</span> <span class="s2">"max_seqlen"</span><span class="p">:</span> <span class="n">max_seqlen</span><span class="p">}</span>
 
-        <span class="c1"># Derive attention boundaries before replacing the model's positions.</span>
+        <span class="k">if</span> <span class="n">return_document_ids</span><span class="p">:</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"document_ids"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_positions_to_document_ids</span><span class="p">(</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">],</span> <span class="n">padding_mask</span><span class="p">,</span> <span class="n">framework</span><span class="p">,</span> <span class="n">flatten</span><span class="o">=</span><span class="n">flatten</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Derive structural boundaries before replacing the model's positions.</span>
         <span class="k">if</span> <span class="n">position_mode</span> <span class="o">==</span> <span class="s2">"sequence"</span><span class="p">:</span>
             <span class="n">result</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_sequence_positions</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">"input_ids"</span><span class="p">],</span> <span class="n">framework</span><span class="p">)</span>
 
@@ -1311,6 +1565,12 @@
         <span class="k">if</span> <span class="n">num_valid_tokens</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">result</span><span class="p">[</span><span class="s2">"num_valid_tokens"</span><span class="p">]</span> <span class="o">=</span> <span class="n">num_valid_tokens</span>
         <span class="n">result</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">sequence_metadata</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">collator</span> <span class="ow">in</span> <span class="n">collators</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">result</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">collator</span><span class="p">(</span>
+                <span class="nb">tuple</span><span class="p">(</span><span class="n">custom_values</span><span class="p">[</span><span class="n">name</span><span class="p">]),</span>
+                <span class="n">length</span><span class="o">=</span><span class="n">collator_length</span><span class="p">,</span>
+                <span class="n">shifted</span><span class="o">=</span><span class="n">return_labels</span><span class="p">,</span>
+            <span class="p">)</span>
 
         <span class="k">return</span> <span class="n">_rename_and_exclude_fields</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">rename_fields</span><span class="p">,</span> <span class="n">exclude_fields</span><span class="p">)</span></div>
 </div>
@@ -1347,6 +1607,7 @@
     <span class="s2">"ComponentId"</span><span class="p">,</span>
     <span class="s2">"ContributorRef"</span><span class="p">,</span>
     <span class="s2">"DatasetId"</span><span class="p">,</span>
+    <span class="s2">"FieldCollator"</span><span class="p">,</span>
     <span class="s2">"LaneId"</span><span class="p">,</span>
     <span class="s2">"LineageIndex"</span><span class="p">,</span>
     <span class="s2">"LineagePath"</span><span class="p">,</span>

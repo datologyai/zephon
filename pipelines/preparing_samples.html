@@ -86,7 +86,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="v0.2.0" data-page="pipelines/preparing_samples.html"></script>
+</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="v0.2.1" data-page="pipelines/preparing_samples.html"></script>
 </head>
   <body>
     
@@ -442,6 +442,20 @@ training it to predict the user’s messages:</p>
 </pre></div>
 </div>
 </div>
+<p>By default, <code class="docutils literal notranslate"><span class="pre">tokenize_chat</span></code> uses the tokenizer’s own chat template. Use
+<code class="docutils literal notranslate"><span class="pre">chat_template</span></code> to select a named template or supply Jinja text or a template file.
+For named templates, Zephon selects <code class="docutils literal notranslate"><span class="pre">tool_use</span></code> when available and the document’s
+<code class="docutils literal notranslate"><span class="pre">tools</span></code> field is not <code class="docutils literal notranslate"><span class="pre">None</span></code>; otherwise it uses <code class="docutils literal notranslate"><span class="pre">default</span></code>. Select any other name with
+<code class="docutils literal notranslate"><span class="pre">chat_template=&quot;name&quot;</span></code>. If neither automatic choice applies, set <code class="docutils literal notranslate"><span class="pre">chat_template</span></code> explicitly.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">special_tokens</span></code> option controls additional BOS/EOS tokens for both text and chat.
+Use <code class="docutils literal notranslate"><span class="pre">bos</span></code>, <code class="docutils literal notranslate"><span class="pre">eos</span></code>, or <code class="docutils literal notranslate"><span class="pre">bos_eos</span></code> to bracket the complete document or conversation, or
+<code class="docutils literal notranslate"><span class="pre">none</span></code> to use the tokens supplied by the input or template. For chat without a template,
+<code class="docutils literal notranslate"><span class="pre">apply_chat_template=False,</span> <span class="pre">special_tokens=&quot;tokenizer_default&quot;</span></code> uses the tokenizer’s
+own special-token processing on the concatenated message contents.</p>
+<p>For recipes that train on the complete conversation, <code class="docutils literal notranslate"><span class="pre">loss_scope=&quot;all_tokens&quot;</span></code>
+includes user messages and template markers in the loss mask, with the first token
+always excluded. The <a class="reference internal" href="../api/pipeline.html"><span class="std std-doc">API reference</span></a> describes the other loss
+scopes, special-token modes and tokenizer overrides.</p>
 <p>With <code class="docutils literal notranslate"><span class="pre">loss_scope=&quot;after_last_user&quot;</span></code>, generation-tagged templates are verified
 automatically. Tool-call arguments can be objects, other JSON values, or raw text.
 Non-object arguments use additional verification renders, cached by exact value.

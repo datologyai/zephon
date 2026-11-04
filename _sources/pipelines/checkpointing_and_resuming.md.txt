@@ -26,6 +26,19 @@ into the model:
 :caption: examples/guide/pipelines/checkpoint_pipeline.py
 ```
 
+If you use a checkpoint manager like PyTorch DCP, you can ask Zephon to return a
+single blob of bytes. DCP can otherwise miss the saved information about work
+that was still in flight, since a fresh pipeline hasn't started that work yet:
+
+```python
+state = {"zephon": pipeline.checkpoint(as_bytes=True)}
+# Save and load state with the rest of your training checkpoint.
+pipeline.restore(state["zephon"])
+```
+
+`restore()` accepts the blob directly, so you don't need to serialize the state
+yourself.
+
 If the training loop accumulates gradients across several microbatches, save the
 checkpoint after a complete optimizer step, once all batches returned by the Pipeline have
 been incorporated into that step. The pipeline, model, and optimizer states must describe
