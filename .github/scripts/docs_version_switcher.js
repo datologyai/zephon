@@ -38,6 +38,11 @@
     }
   }
 
+  const CHEVRON =
+    "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' " +
+    "fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E" +
+    "%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")";
+
   function addStyles() {
     const style = document.createElement("style");
     style.textContent = `
@@ -45,11 +50,18 @@
       .zephon-versions label { display: block; font-size: var(--font-size--small, 0.875rem);
         color: var(--color-foreground-secondary); margin-bottom: 0.25rem; }
       /* Match Furo's sidebar search box rather than the darker content area. */
-      .zephon-versions select { width: 100%; padding: 0.3rem 0.4rem; border-radius: 0.25rem;
-        font: inherit; font-size: var(--font-size--small, 0.875rem);
+      .zephon-versions select { width: 100%; padding: 0.3rem 2rem 0.3rem 0.5rem; border-radius: 0.25rem;
+        font: inherit; font-size: var(--font-size--small, 0.875rem); cursor: pointer;
+        appearance: none; -webkit-appearance: none;
         color: var(--color-sidebar-search-foreground, var(--color-foreground-primary));
         background: var(--color-sidebar-search-background, var(--color-sidebar-background));
         border: 1px solid var(--color-sidebar-search-border, var(--color-background-border)); }
+      /* The native arrow hugs the border; draw our own, inset from it. */
+      .zephon-versions-control { position: relative; display: block; }
+      .zephon-versions-control::after { content: ""; position: absolute; top: 50%; right: 0.65rem;
+        width: 0.7rem; height: 0.7rem; transform: translateY(-50%); pointer-events: none;
+        background-color: var(--color-foreground-secondary);
+        -webkit-mask: ${CHEVRON} center / contain no-repeat; mask: ${CHEVRON} center / contain no-repeat; }
       /* Furo themes with CSS variables only, so tell the browser when the
        * native dropdown list should be dark too. */
       body[data-theme="dark"] .zephon-versions select { color-scheme: dark; }
@@ -82,7 +94,10 @@
       select.append(option);
     }
     select.addEventListener("change", () => go(select.value, index.latest));
-    wrapper.append(label, select);
+    const control = document.createElement("span");
+    control.className = "zephon-versions-control";
+    control.append(select);
+    wrapper.append(label, control);
     brand.after(wrapper);
   }
 
