@@ -57,16 +57,16 @@ class StatsdEmitter:
 
     def _flush_locked(self) -> None:
         # Caller must hold self._lock (a non-reentrant Lock).
-        while self._buffer:
-            payload = "\n".join(self._buffer).encode("utf-8")
-            self._buffer.clear()
-            try:
-                self._sock.sendto(payload, self._addr)
-            except OSError:
-                if not self._errored:
-                    logger.warning("StatsD emission failed; disabling further sending.")
-                    self._errored = True
-                break
+        if not self._buffer:
+            return
+        payload = "\n".join(self._buffer).encode("utf-8")
+        self._buffer.clear()
+        try:
+            self._sock.sendto(payload, self._addr)
+        except OSError:
+            if not self._errored:
+                logger.warning("StatsD emission failed; disabling further sending.")
+                self._errored = True
 
     def _format_tags(self, tags: Mapping[str, str] | None) -> str:
         all_tags = dict(self.config.default_tags)
