@@ -89,3 +89,53 @@ def test_installed_wheel_imports_and_runs(wheel: Path, tmp_path: Path) -> None:
         env={**os.environ, "PYTHONPATH": ""},
     )
     assert "SMOKE OK" in proc.stdout
+
+
+# A separately installed distribution that adds a ``zephon`` subcommand through
+# the ``zephon.cli`` entry-point group, as a third-party plugin would.
+_PLUGIN_PYPROJECT = """
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zephon-hello"
+version = "0.0.1"
+
+[project.entry-points."zephon.cli"]
+hello = "zephon_hello:register"
+"""
+
+_PLUGIN_MODULE = """
+def register(parser):
+    parser.description = "Say hello."
+    parser.add_argument("who")
+    parser.set_defaults(func=lambda args: print(f"hello {args.who}"))
+"""
+
+
+def test_installed_cli_runs_index_and_plugins(wheel: Path, tmp_path: Path) -> None:
+    venv = tmp_path / "venv"
+    _run([UV, "venv", "--python", sys.executable, str(venv)])
+    bindir = venv / ("Scripts" if os.name == "nt" else "bin")
+    _run([UV, "pip", "install", "--python", str(bindir / "python"), str(wheel)])
+    zephon = str(bindir / "zephon")
+    env = {**os.environ, "PYTHONPATH": ""}
+
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "a.jsonl").write_text('{"i": 0}\n', encoding="utf-8")
+    _run([zephon, "index", "jsonl", str(data), "-q"], cwd=str(tmp_path), env=env)
+    assert (data / "index.json").exists()
+
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "pyproject.toml").write_text(_PLUGIN_PYPROJECT, encoding="utf-8")
+    (plugin / "zephon_hello.py").write_text(_PLUGIN_MODULE, encoding="utf-8")
+    _run([UV, "pip", "install", "--python", str(bindir / "python"), str(plugin)])
+
+    proc = _run([zephon, "--help"], cwd=str(tmp_path), env=env)
+    assert "Say hello." in proc.stdout
+    proc = _run([zephon, "hello", "world"], cwd=str(tmp_path), env=env)
+    assert proc.stdout == "hello world\n"
+    assert proc.stderr == ""

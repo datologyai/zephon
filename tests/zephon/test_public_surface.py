@@ -17,6 +17,7 @@ import zephon
 # Recursive public module set; underscore-prefixed modules are excluded.
 EXPECTED_PUBLIC_MODULES = {
     "zephon.build_index",
+    "zephon.cli",
     "zephon.debug",
     "zephon.debug.inspector",
     "zephon.debug.semaphore_registry",
@@ -154,6 +155,10 @@ EXPECTED_ALL = {
     ],
     "zephon.build_index": [
         "build_index",
+    ],
+    "zephon.cli": [
+        "ENTRY_POINT_GROUP",
+        "main",
     ],
     "zephon.validation": [
         "Issue",

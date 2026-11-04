@@ -22,9 +22,9 @@ INDEX_FILENAMES: list[str] = ["index.json", "_index.json"]
 
 # Command that materializes an index.json for each indexable format.
 _INDEX_BUILD_COMMANDS: dict[str, str] = {
-    "jsonl": "python -m zephon.build_index jsonl {path}",
-    "parquet": "python -m zephon.build_index parquet {path}",
-    "vortex": "python -m zephon.build_index vortex {path}",
+    "jsonl": "zephon index jsonl {path}",
+    "parquet": "zephon index parquet {path}",
+    "vortex": "zephon index vortex {path}",
 }
 
 # Paths already warned about, so we shout once per dataset rather than per scan.
