@@ -331,7 +331,6 @@ if _DEBUG_ENABLED:
     install_debug_hooks()
 
 __all__ = [
-    "RegistrationInfo",
     "dump_semaphore_leak_report",
     "install_debug_hooks",
 ]

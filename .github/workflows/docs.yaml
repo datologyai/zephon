@@ -99,6 +99,9 @@ jobs:
     - name: Build documentation
       run: |
         uv run sphinx-build -b html -W --keep-going docs/source docs/build/html
+    - name: Check every public name is documented
+      run: |
+        uv run python .github/scripts/check_docs_coverage.py docs/build/html
     - name: Upload build
       if: steps.target.outputs.version != ''
       uses: actions/upload-artifact@v4
