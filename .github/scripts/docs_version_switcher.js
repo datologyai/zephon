@@ -44,12 +44,21 @@
       .zephon-versions { margin: 0 var(--sidebar-item-spacing-horizontal, 1rem) 0.75rem; }
       .zephon-versions label { display: block; font-size: var(--font-size--small, 0.875rem);
         color: var(--color-foreground-secondary); margin-bottom: 0.25rem; }
+      /* Match Furo's sidebar search box rather than the darker content area. */
       .zephon-versions select { width: 100%; padding: 0.3rem 0.4rem; border-radius: 0.25rem;
         font: inherit; font-size: var(--font-size--small, 0.875rem);
-        color: var(--color-foreground-primary); background: var(--color-background-primary);
-        border: 1px solid var(--color-background-border); }
-      /* flow-root: sit beside Furo's floated page icons, not under them. */
-      .zephon-version-banner { display: flow-root; margin: 0 0 1.5rem; padding: 0.6rem 0.9rem; border-radius: 0.25rem;
+        color: var(--color-sidebar-search-foreground, var(--color-foreground-primary));
+        background: var(--color-sidebar-search-background, var(--color-sidebar-background));
+        border: 1px solid var(--color-sidebar-search-border, var(--color-background-border)); }
+      /* Furo themes with CSS variables only, so tell the browser when the
+       * native dropdown list should be dark too. */
+      body[data-theme="dark"] .zephon-versions select { color-scheme: dark; }
+      @media (prefers-color-scheme: dark) {
+        body:not([data-theme="light"]) .zephon-versions select { color-scheme: dark; }
+      }
+      /* Above Furo's floated page icons, at full width, with the same top
+       * spacing the icons have. */
+      .zephon-version-banner { margin: 1.5rem 0 0; padding: 0.6rem 0.9rem; border-radius: 0.25rem;
         font-size: var(--font-size--small, 0.875rem);
         background: var(--color-admonition-title-background--note, var(--color-background-secondary));
         border-left: 0.25rem solid var(--color-brand-primary); }
@@ -79,8 +88,11 @@
 
   function addBanner(index) {
     if (current === index.latest) return;
-    const article = document.querySelector("article[role=main]") || document.querySelector(".content");
-    if (!article) return;
+    const container =
+      document.querySelector(".article-container") ||
+      document.querySelector("article[role=main]") ||
+      document.querySelector(".content");
+    if (!container) return;
     let kind = "an older release";
     if (current === "main") kind = "the unreleased development version";
     else if (index.versions.indexOf(current) < index.versions.indexOf(index.latest)) kind = "a pre-release";
@@ -95,7 +107,7 @@
       go(index.latest, index.latest);
     });
     banner.append(`You're reading the docs for ${current}, ${kind}. See `, link, ".");
-    article.prepend(banner);
+    container.prepend(banner);
   }
 
   fetch(new URL("versions.json", siteRoot))
