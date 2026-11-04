@@ -70,14 +70,15 @@ class ObstoreBackend(OpenViaDownloadMixin, ABC):
             raise
 
     def _download_with_store(self, store: Any, key: str, src: str, dst: str) -> None:
-        """Download using a specific store, with error handling."""
+        """Stream an object to disk without buffering the entire download."""
         import obstore as obs
 
         try:
-            data = obs.get(store, key).bytes()
+            response = obs.get(store, key)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             with open(dst, "wb") as f:
-                f.write(data)
+                for chunk in response.stream():
+                    f.write(chunk)
         except Exception as e:
             err = str(e)
             if "403" in err or "AccessDenied" in err:

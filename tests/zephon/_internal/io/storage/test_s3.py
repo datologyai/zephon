@@ -1,7 +1,9 @@
 """Tests for S3Backend using obstore."""
 
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -42,6 +44,37 @@ def test_s3_download_missing_raises(
 
     with pytest.raises(FileNotFoundError):
         backend.download("s3://bucket/missing.bin", str(tmp_path / "out.bin"))
+
+
+def test_s3_download_retries_unsigned_after_stream_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon._internal.io.storage.s3 import S3Backend
+
+    state["objects"][("bucket", "file.bin")] = b"payload"
+    obstore_mod = sys.modules["obstore"]
+    original_get = obstore_mod.get
+    requests: list[bool] = []
+
+    class FailingResult:
+        def stream(self) -> Iterator[bytes]:
+            yield b"partial signed download"
+            raise RuntimeError("400 signed request rejected")
+
+    def get(store: Any, key: str) -> Any:
+        unsigned = store._config.get("skip_signature", False)
+        requests.append(unsigned)
+        return original_get(store, key) if unsigned else FailingResult()
+
+    monkeypatch.setattr(obstore_mod, "get", get)
+    destination = tmp_path / "out.bin"
+
+    S3Backend().download("s3://bucket/file.bin", str(destination))
+
+    assert requests == [False, True]
+    assert destination.read_bytes() == b"payload"
 
 
 def test_s3_exists_and_listdir(monkeypatch: pytest.MonkeyPatch) -> None:

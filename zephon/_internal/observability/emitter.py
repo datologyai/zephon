@@ -53,18 +53,20 @@ class StatsdEmitter:
 
     def flush(self) -> None:
         with self._lock:
-            while self._buffer:
-                payload = "\n".join(self._buffer).encode("utf-8")
-                self._buffer.clear()
-                try:
-                    self._sock.sendto(payload, self._addr)
-                except OSError:
-                    if not self._errored:
-                        logger.warning(
-                            "StatsD emission failed; disabling further sending."
-                        )
-                        self._errored = True
-                    break
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        # Caller must hold self._lock (a non-reentrant Lock).
+        if not self._buffer:
+            return
+        payload = "\n".join(self._buffer).encode("utf-8")
+        self._buffer.clear()
+        try:
+            self._sock.sendto(payload, self._addr)
+        except OSError:
+            if not self._errored:
+                logger.warning("StatsD emission failed; disabling further sending.")
+                self._errored = True
 
     def _format_tags(self, tags: Mapping[str, str] | None) -> str:
         all_tags = dict(self.config.default_tags)
@@ -88,7 +90,7 @@ class StatsdEmitter:
         with self._lock:
             self._buffer.append(message)
             if len(self._buffer) >= self.config.max_batch_size:
-                self.flush()
+                self._flush_locked()
 
     def gauge(
         self, metric: str, value: float, tags: Mapping[str, str] | None = None
