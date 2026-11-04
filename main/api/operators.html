@@ -1,0 +1,1314 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Records and batches" href="records.html"><link rel="prev" title="Pipeline" href="pipeline.html">
+        <link rel="prefetch" href="../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+        <title>Operators - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="main" data-page="api/operators.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../pipelines/index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../internals/index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pipeline.html">Pipeline</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/api/operators.rst.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="operators">
+<h1>Operators<a class="headerlink" href="#operators" title="Link to this heading">¶</a></h1>
+<p>The authoring contract for operators you write yourself, and the grouping and
+lineage helpers they use. The guide covers these in
+<a class="reference internal" href="../pipelines/user_defined_operators.html"><span class="doc">User-defined operators</span></a>.</p>
+<p id="module-zephon.ops">Operator authoring kit: the contracts you subclass or pass to <code class="docutils literal notranslate"><span class="pre">add_op()</span></code>.</p>
+<p>Built-in operators are configured via the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> builder methods
+(<code class="docutils literal notranslate"><span class="pre">.shuffle()</span></code>, <code class="docutils literal notranslate"><span class="pre">.batch()</span></code>, <code class="docutils literal notranslate"><span class="pre">.tokenize()</span></code>, …).</p>
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.ops.Accumulator">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">Accumulator</span></span><a class="reference internal" href="../_modules/zephon/ops/accumulators/base.html#Accumulator"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.Accumulator" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/library/abc.html#abc.ABC" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">ABC</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Generic" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Generic</span></code></a>[<code class="xref py py-obj docutils literal notranslate"><span class="pre">T</span></code>]</p>
+<p>Base class for accumulators that run on the pump thread.</p>
+<p>Accumulators consume inputs in deterministic order, maintain any
+cross-invocation state (buffers/bins), and emit ready invocation batches.</p>
+<p>Contract for deterministic parallelism:
+- Operator-owned cross-invocation state must live in the accumulator
+- Worker <cite>process_many</cite> must be deterministic given its input batch
+- Accumulators are invoked only on the pump thread (no concurrent calls)</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.Accumulator.push_many">
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">push_many</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">elems</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/base.html#Accumulator.push_many"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.Accumulator.push_many" title="Link to this definition">¶</a></dt>
+<dd><p>Consume elements in stream order and return 0..N ready invocation batches.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>elems</strong> (<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Sequence" title="(in Python v3.15)"><em>Sequence</em></a><em>[</em><em>T</em><em>]</em>) – Input elements to accumulate.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of ready batches to dispatch to workers. May be empty if
+more elements are needed before a batch is ready.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<em>T</em>], <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.Accumulator.flush">
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">flush</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">reset</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lane_id</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/base.html#Accumulator.flush"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.Accumulator.flush" title="Link to this definition">¶</a></dt>
+<dd><p>Emit any remaining ready batches.</p>
+<p>Called both at upstream close (default, <code class="docutils literal notranslate"><span class="pre">reset=False</span></code>) and
+mid-stream by flush sentinels (<code class="docutils literal notranslate"><span class="pre">reset=True</span></code>).  Mid-stream flushes
+must fully reset internal state so the accumulator is indistinguishable
+from a freshly constructed instance.</p>
+<p>Flush sentinels are injected <strong>per lane</strong>, so a mid-stream flush is
+scoped to <code class="docutils literal notranslate"><span class="pre">lane_id</span></code>: only that lane’s state is emitted and reset,
+leaving other lanes’ epochs untouched.  Flushing every lane at one
+lane’s epoch boundary corrupts the others and breaks deterministic
+replay across checkpoint/restore.  <code class="docutils literal notranslate"><span class="pre">lane_id=None</span></code> flushes all lanes
+(used at upstream close, when every lane is done).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>reset</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – True when triggered by a flush sentinel mid-stream
+(the accumulator must reset to fresh state), False when
+called at upstream close.</p></li>
+<li><p><strong>lane_id</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a><em> | </em><em>None</em>) – When set, flush only this lane.  When None, flush all
+lanes.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of remaining batches. These are typically partial batches
+that were waiting for more elements.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<em>T</em>], <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.ops.Accumulator.reads_payload">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">reads_payload</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><a class="headerlink" href="#zephon.ops.Accumulator.reads_payload" title="Link to this definition">¶</a></dt>
+<dd><p>Whether <code class="docutils literal notranslate"><span class="pre">push_many()</span></code> may access element payloads.</p>
+<p>When True, the runner resolves lazy SHM payloads before calling
+<code class="docutils literal notranslate"><span class="pre">push_many()</span></code>.  Default False — most accumulators only read
+metadata (e.g. <code class="docutils literal notranslate"><span class="pre">lane_id</span></code>).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.Accumulator.has_pending_data">
+<span class="sig-name descname"><span class="pre">has_pending_data</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">lane_id</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/base.html#Accumulator.has_pending_data"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.Accumulator.has_pending_data" title="Link to this definition">¶</a></dt>
+<dd><p>Return True if buffered data would be emitted on flush().</p>
+<p>Default implementation returns False. Subclasses with internal buffers
+should override this to return True when they have pending data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>lane_id</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a><em> | </em><em>None</em>) – When set, report only this lane’s pending state.  When
+None, report whether any lane has pending data.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.Accumulator.on_source_exhausted">
+<span class="sig-name descname"><span class="pre">on_source_exhausted</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">lane_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">component_id</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/base.html#Accumulator.on_source_exhausted"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.Accumulator.on_source_exhausted" title="Link to this definition">¶</a></dt>
+<dd><p>Handle an end-of-data (EOD) sentinel for a component in this lane.</p>
+<p>The component’s source has permanently run out, but buffered records may
+still arrive, even through order-preserving operators. The default leaves
+buffers untouched.</p>
+<p>Called at most once per component per lane stream; some lanes close
+without an EOD sentinel. Reactions must be lane-scoped and deterministic
+for a given input order. Restore reconstructs runner state from replayed
+sentinels.</p>
+<p>Obtain the accumulator-only callback with <code class="docutils literal notranslate"><span class="pre">ctx.get(&quot;get_source_exhaustion&quot;)</span></code>.
+It may be <code class="docutils literal notranslate"><span class="pre">None</span></code> during validation, which uses an empty context; use
+<code class="docutils literal notranslate"><span class="pre">SourceExhaustion()</span></code> (no observed exhaustion) in that case. Otherwise,
+calling it with <code class="docutils literal notranslate"><span class="pre">lane_id</span></code> returns a <code class="xref py py-class docutils literal notranslate"><span class="pre">SourceExhaustion</span></code> snapshot
+of what this operator has seen: <code class="docutils literal notranslate"><span class="pre">exhausted</span></code> contains every component whose EOD
+sentinel reached it, and <code class="docutils literal notranslate"><span class="pre">continuing</span></code> is the subset the source permits
+continuing without, per <code class="docutils literal notranslate"><span class="pre">WorkSource.continues_after_exhaustion()</span></code>.
+At runtime, the runner updates it before this hook and retains it across
+epoch resets. It is a cheap local call, available during any accumulator
+call, including after <code class="docutils literal notranslate"><span class="pre">flush(reset=True)</span></code>. EOD sentinels are emitted
+regardless of continuation policy. See <a class="reference internal" href="../pipelines/user_defined_operators.html"><span class="doc">User-defined operators</span></a>.</p>
+<p>Return ready batches as in <a class="reference internal" href="#zephon.ops.Accumulator.push_many" title="zephon.ops.Accumulator.push_many"><code class="xref py py-meth docutils literal notranslate"><span class="pre">push_many()</span></code></a>. If dropping records, emit
+their tombstones with <a class="reference internal" href="#zephon.ops.tombstones_for_record" title="zephon.ops.tombstones_for_record"><code class="xref py py-func docutils literal notranslate"><span class="pre">tombstones_for_record()</span></code></a> in separate
+batches from data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<em>T</em>], <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.Accumulator.try_epoch_reset">
+<span class="sig-name descname"><span class="pre">try_epoch_reset</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">boundary_chunk_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lane_id</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/base.html#Accumulator.try_epoch_reset"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.Accumulator.try_epoch_reset" title="Link to this definition">¶</a></dt>
+<dd><p>Attempt a delayed epoch reset for stalled flush sentinels.</p>
+<p>Called when a flush sentinel was stalled (held behind buffered data)
+and the runner wants to check whether the accumulator can now be reset.</p>
+<p>Returns True if and only if future outputs are equivalent to a fresh
+accumulator on the retained suffix — i.e., the accumulator’s behavior
+going forward is indistinguishable from one that was freshly constructed
+and fed only the records still in the buffer.  When returning True, the
+method must also perform any necessary state reset (e.g., clearing SWRR
+emission history).</p>
+<p>The default implementation is conservative: it returns True only when
+there is no pending data at all.  Accumulators that buffer
+<code class="docutils literal notranslate"><span class="pre">SampleRecord</span></code> elements can override this to check <code class="docutils literal notranslate"><span class="pre">chunk_id</span></code>
+directly and return True as soon as no pre-boundary records remain,
+even if post-boundary records are still buffered.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>boundary_chunk_id</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>) – The <code class="docutils literal notranslate"><span class="pre">_boundary_cid</span></code> from the stalled flush
+sentinel.  Records with <code class="docutils literal notranslate"><span class="pre">chunk_id</span> <span class="pre">&lt;</span> <span class="pre">boundary_chunk_id</span></code> are
+pre-boundary (old epoch).</p></li>
+<li><p><strong>lane_id</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a><em> | </em><em>None</em>) – The stalled sentinel’s lane.  When set, only this lane’s
+buffered records gate the reset; other lanes are independent.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>True if the reset was performed and the sentinel can be released.
+False if pre-boundary records still exist in the buffer.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.ops.BaseOp">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">BaseOp</span></span><a class="reference internal" href="../_modules/zephon/ops/base.html#BaseOp"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.BaseOp" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/library/abc.html#abc.ABC" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">ABC</span></code></a></p>
+<p>Base class for operators — both built-in and user-authored.</p>
+<p>Attach a subclass to a pipeline via the instance form of
+<a class="reference internal" href="pipeline.html#zephon.Pipeline.add_op" title="zephon.Pipeline.add_op"><code class="xref py py-meth docutils literal notranslate"><span class="pre">zephon.Pipeline.add_op()</span></code></a>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">pipeline</span><span class="o">.</span><span class="n">add_op</span><span class="p">(</span><span class="n">MyOp</span><span class="p">(</span><span class="o">...</span><span class="p">))</span>
+</pre></div>
+</div>
+<p>Built-in operators subclass <cite>BaseOp</cite> and are attached internally;
+the same class hierarchy is what user code subclasses for ops that
+need full lifecycle control (<code class="docutils literal notranslate"><span class="pre">__init__</span></code> / <code class="docutils literal notranslate"><span class="pre">setup</span></code> / <code class="docutils literal notranslate"><span class="pre">traits</span></code> /
+<code class="docutils literal notranslate"><span class="pre">accumulator</span></code> / <code class="docutils literal notranslate"><span class="pre">process_many</span></code>).  The kwargs form of <code class="docutils literal notranslate"><span class="pre">add_op</span></code>
+is the lighter alternative for stateless transforms — it wraps user
+callables in an internal <cite>BaseOp</cite> subclass, so the same contract
+documented here applies either way.</p>
+<p><strong>Operators are stateless.</strong>  Instance attributes set in <code class="docutils literal notranslate"><span class="pre">__init__</span></code>
+are read-only configuration or shared resources (a codec table, a
+threshold, a tokenizer name).  <code class="docutils literal notranslate"><span class="pre">process_many</span></code> must not depend on or
+mutate state carried across calls — any cross-invocation or per-lane
+state (buffers, counters, open bins) lives in the operator’s
+accumulator, not on the op instance.  This is the invariant that
+lets the runtime fan <code class="docutils literal notranslate"><span class="pre">process_many</span></code> out across parallel workers
+deterministically.</p>
+<p>Fan-out operators must preserve <code class="docutils literal notranslate"><span class="pre">SampleMeta.sample_id</span></code> and derive child
+lineage with helpers from <code class="xref py py-mod docutils literal notranslate"><span class="pre">zephon.ops.children</span></code>. This preserves
+deterministic ordering and replay.</p>
+<p>Worker retries do not roll back in-place changes to shared inputs.</p>
+<section id="lifecycle-init-vs-setup">
+<h2>Lifecycle: <code class="docutils literal notranslate"><span class="pre">__init__</span></code> vs <code class="docutils literal notranslate"><span class="pre">setup</span></code><a class="headerlink" href="#lifecycle-init-vs-setup" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">__init__</span></code> runs <strong>once on the user’s main process</strong>: store config
+and lightweight references, and leave runtime fields defaulted to
+<code class="docutils literal notranslate"><span class="pre">None</span></code>. The op instance is then deep-copied per parallel worker;
+on the process and Ray runners it is also cloudpickled across the
+process boundary, so anything assigned in <code class="docutils literal notranslate"><span class="pre">__init__</span></code> must survive
+cloudpickle on those runners.</p>
+<p><code class="docutils literal notranslate"><span class="pre">setup</span></code> runs <strong>once per worker after the deep copy</strong> (and, on
+cross-process runners, after the cloudpickle round trip). It is the
+only place to read services from <a class="reference internal" href="#zephon.ops.OpContext" title="zephon.ops.OpContext"><code class="xref py py-class docutils literal notranslate"><span class="pre">OpContext</span></code></a>, construct heavy
+or non-picklable resources (tokenizers, model handles, open file
+descriptors), and reset per-worker state. Resources built in
+<code class="docutils literal notranslate"><span class="pre">setup</span></code> never need to survive pickling.</p>
+<p>The convention in this repo is to construct tokenizers (and similar
+heavy resources) in <code class="docutils literal notranslate"><span class="pre">setup</span></code>, not <code class="docutils literal notranslate"><span class="pre">__init__</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="k">class</span><span class="w"> </span><span class="nc">MyOp</span><span class="p">(</span><span class="n">BaseOp</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tokenizer_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_tokenizer_name</span> <span class="o">=</span> <span class="n">tokenizer_name</span>  <span class="c1"># picklable config</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_tokenizer</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># built per-worker in setup()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">traits</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">OpTraits</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">OpTraits</span><span class="p">(</span>
+            <span class="n">preserves_cursor_order</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">calibration_replayable</span><span class="o">=</span><span class="kc">True</span>
+        <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">ctx</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">setup</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_tokenizer</span> <span class="o">=</span> <span class="n">load_tokenizer</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_tokenizer_name</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">process_many</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">elems</span><span class="p">):</span>
+        <span class="c1"># Records in, records out: rebuild payload, preserve meta.</span>
+        <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="n">elems</span><span class="p">:</span>
+            <span class="n">e</span><span class="o">.</span><span class="n">payload</span> <span class="o">=</span> <span class="p">{</span><span class="o">**</span><span class="n">e</span><span class="o">.</span><span class="n">payload</span><span class="p">,</span> <span class="s2">"ids"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tokenizer</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">e</span><span class="o">.</span><span class="n">payload</span><span class="p">[</span><span class="s2">"text"</span><span class="p">])}</span>
+        <span class="k">return</span> <span class="n">elems</span>
+
+<span class="n">pipeline</span><span class="o">.</span><span class="n">add_op</span><span class="p">(</span><span class="n">MyOp</span><span class="p">(</span><span class="s2">"gpt2"</span><span class="p">))</span>
+</pre></div>
+</div>
+<p>Defaults supplied:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">setup</span></code> records <code class="docutils literal notranslate"><span class="pre">ctx.stage_info</span></code> as <code class="docutils literal notranslate"><span class="pre">self.stage_info</span></code>. Overrides
+should call <code class="docutils literal notranslate"><span class="pre">super().setup(ctx)</span></code> before initializing worker resources.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">teardown</span></code> releases worker resources after processing stops. The default
+does nothing; resource-owning operators should override it.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">accumulator</span></code> — returns <cite>PassthroughAccumulator</cite> so each upstream
+micro-batch is forwarded as one ready batch. Override to enable
+size-based per-lane batching via <cite>CountingAccumulator</cite> or any custom
+<cite>Accumulator</cite>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">process_one</span></code> — wraps the element in a single-item list and routes
+it through <code class="docutils literal notranslate"><span class="pre">process_many</span></code>. Override only when the single-element
+fast path differs (rare).</p></li>
+</ul>
+<p>Abstract — every subclass must implement:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">process_many</span></code> — the workhorse transform.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">traits</span></code> — must return an <cite>OpTraits</cite> with <code class="docutils literal notranslate"><span class="pre">preserves_cursor_order</span></code>
+declared; the subclass must declare <code class="docutils literal notranslate"><span class="pre">True</span></code> (1:1 maps, payload
+transforms, non-reordering filters) or <code class="docutils literal notranslate"><span class="pre">False</span></code> (reorders, shuffles,
+packs).</p></li>
+</ul>
+<p>Instantiating a subclass that doesn’t override both <code class="docutils literal notranslate"><span class="pre">process_many</span></code>
+and <code class="docutils literal notranslate"><span class="pre">traits</span></code> raises <code class="docutils literal notranslate"><span class="pre">TypeError</span></code> at construction time.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.BaseOp.plan_identity">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">plan_identity</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#BaseOp.plan_identity"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.BaseOp.plan_identity" title="Link to this definition">¶</a></dt>
+<dd><p>Return the stable operator identity used in plan fingerprints.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.BaseOp.setup">
+<span class="sig-name descname"><span class="pre">setup</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ctx</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#BaseOp.setup"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.BaseOp.setup" title="Link to this definition">¶</a></dt>
+<dd><p>Record plan metadata before worker processing begins.</p>
+<p>The runner calls this once per worker after copying or deserializing the
+operator. Overrides should call <code class="docutils literal notranslate"><span class="pre">super().setup(ctx)</span></code>.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.BaseOp.teardown">
+<span class="sig-name descname"><span class="pre">teardown</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#BaseOp.teardown"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.BaseOp.teardown" title="Link to this definition">¶</a></dt>
+<dd><p>Release resources created by <code class="docutils literal notranslate"><span class="pre">setup</span></code> after processing stops.</p>
+<p>Runners call this when closing and if setup fails. Hard shutdown
+may defer local cleanup until an active call returns; forced worker
+termination may bypass it. Overrides must tolerate partial setup and
+repeated calls.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.BaseOp.traits">
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">traits</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#BaseOp.traits"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.BaseOp.traits" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#zephon.ops.OpTraits" title="zephon.ops.traits.OpTraits"><em>OpTraits</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.BaseOp.accumulator">
+<span class="sig-name descname"><span class="pre">accumulator</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">deterministic</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ctx</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#BaseOp.accumulator"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.BaseOp.accumulator" title="Link to this definition">¶</a></dt>
+<dd><p>Create the accumulator that defines worker batch boundaries.</p>
+<p>The accumulator runs serially and owns state shared across
+<code class="docutils literal notranslate"><span class="pre">process_many</span></code> calls.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>deterministic</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – Whether to disable behavior such as timed flushing.</p></li>
+<li><p><strong>ctx</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)"><em>dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><em>Any</em></a><em>]</em>) – Runtime services available to the accumulator.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A new accumulator.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#zephon.ops.Accumulator" title="zephon.ops.accumulators.base.Accumulator"><em>Accumulator</em></a>[<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><em>Any</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.BaseOp.process_one">
+<span class="sig-name descname"><span class="pre">process_one</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">elem</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#BaseOp.process_one"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.BaseOp.process_one" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><em>Any</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.BaseOp.process_many">
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">process_many</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">elems</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#BaseOp.process_many"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.BaseOp.process_many" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><em>Any</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.BaseOp.validation_samples">
+<span class="sig-name descname"><span class="pre">validation_samples</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#BaseOp.validation_samples"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.BaseOp.validation_samples" title="Link to this definition">¶</a></dt>
+<dd><p>Optional records for the validation harness.</p>
+<p>Override to opt this op into the validator’s runtime check
+suite.  Returning a small batch (~12 records across a couple of
+lanes) lets the harness run determinism, cross-call-state,
+self-mutation, state-diff, sample-identity, and calibration-replay
+probes against <code class="docutils literal notranslate"><span class="pre">process_many</span></code>.</p>
+<p>Why instance-form ops are gated this way: the validator never
+invokes <code class="docutils literal notranslate"><span class="pre">setup</span></code>, so probing a <cite>BaseOp</cite> subclass whose
+<code class="docutils literal notranslate"><span class="pre">process_many</span></code> depends on setup-built resources (the typical
+pattern — tokenizers, model handles, etc.) would raise
+spuriously.  Returning <code class="docutils literal notranslate"><span class="pre">None</span></code> (the default) tells the
+validator to skip the runtime checks for this op and surface a
+single <code class="docutils literal notranslate"><span class="pre">OP_INSTANCE_RUNTIME_CHECKS_SKIPPED</span></code> warning instead
+of crashing the pipeline under <code class="docutils literal notranslate"><span class="pre">auto_validation=&quot;strict&quot;</span></code>.
+Static-AST checks (self-writes, non-deterministic stdlib calls)
+run unconditionally either way.</p>
+<p>Returning an empty list, a list of the wrong type, or raising
+surfaces an <code class="docutils literal notranslate"><span class="pre">OP_VALIDATION_SAMPLES_FACTORY_FAILED</span></code> warning
+and falls back to the skip path — the validator never dies on
+a buggy factory.</p>
+<p>Tip: include at least two distinct <code class="docutils literal notranslate"><span class="pre">lane_id</span></code> values so the
+cross-call-state probe (which derives an A-vs-B sample-id
+variant from your records) and the lane-purity accumulator
+checks remain meaningful.  Records must work <em>without</em>
+<code class="docutils literal notranslate"><span class="pre">setup</span></code> having run — pre-tokenize / pre-encode your payload
+rather than relying on the resources the real <code class="docutils literal notranslate"><span class="pre">setup</span></code> would
+build.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference internal" href="records.html#zephon.types.SampleRecord" title="zephon.types.SampleRecord"><em>SampleRecord</em></a>] | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.ops.CountingAccumulator">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">CountingAccumulator</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">max_batch</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_latency_ms</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">drop_last</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/counting.html#CountingAccumulator"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.CountingAccumulator" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#zephon.ops.Accumulator" title="zephon.ops.accumulators.base.Accumulator"><code class="xref py py-class docutils literal notranslate"><span class="pre">Accumulator</span></code></a>[<code class="xref py py-obj docutils literal notranslate"><span class="pre">T</span></code>]</p>
+<p>Accumulator that batches elements by count, optionally with time-based flushing.</p>
+<p>Elements are routed to per-lane buffers keyed by <code class="xref py py-func docutils literal notranslate"><span class="pre">lane_of()</span></code>, so each
+emitted batch is lane-pure.  <code class="docutils literal notranslate"><span class="pre">lane_of</span></code> extracts the lane from whichever
+element type the accumulator carries (a <code class="docutils literal notranslate"><span class="pre">SampleRecord</span></code>, or a raw
+<code class="docutils literal notranslate"><span class="pre">EngineSample</span></code> tuple at the fetch stage), so the buffer key is always the
+lane id — which is what lets a per-lane flush sentinel reset one lane alone.</p>
+<p>When <code class="docutils literal notranslate"><span class="pre">max_latency_ms</span></code> is None, this is a pure count-based accumulator
+suitable for deterministic execution.  When set, batches are also flushed
+after the timeout expires (per lane).</p>
+<p>When <code class="docutils literal notranslate"><span class="pre">drop_last</span></code> is True, <code class="docutils literal notranslate"><span class="pre">flush()</span></code> discards partial batches instead
+of emitting them.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.CountingAccumulator.has_pending_data">
+<span class="sig-name descname"><span class="pre">has_pending_data</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">lane_id</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/counting.html#CountingAccumulator.has_pending_data"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.CountingAccumulator.has_pending_data" title="Link to this definition">¶</a></dt>
+<dd><p>Return True if buffered elements remain (in <code class="docutils literal notranslate"><span class="pre">lane_id</span></code> if given).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.CountingAccumulator.push_many">
+<span class="sig-name descname"><span class="pre">push_many</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">elems</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/counting.html#CountingAccumulator.push_many"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.CountingAccumulator.push_many" title="Link to this definition">¶</a></dt>
+<dd><p>Accumulate elements and emit based on count or time thresholds.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<em>T</em>], <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.CountingAccumulator.flush">
+<span class="sig-name descname"><span class="pre">flush</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">reset</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lane_id</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/counting.html#CountingAccumulator.flush"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.CountingAccumulator.flush" title="Link to this definition">¶</a></dt>
+<dd><p>Emit any remaining buffered elements (or discard if drop_last).</p>
+<p>Buffers are keyed by lane, so <code class="docutils literal notranslate"><span class="pre">lane_id</span></code> is the buffer key for a
+per-lane flush.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<em>T</em>], <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.ops.DomainGroups">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">DomainGroups</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">groups</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/grouping.html#DomainGroups"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.DomainGroups" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>Groups of mixing-domain (component) names that may share a packed sample.</p>
+<p>Members are mixture-component names (the source’s <code class="docutils literal notranslate"><span class="pre">component_ids</span></code>) — dataset
+names in <code class="docutils literal notranslate"><span class="pre">StaticMixtureWorkSource</span></code>, but not necessarily so (a hierarchical
+source could map several datasets to one component). Validated at construction
+into an owned map, so mutating the caller’s input afterward can’t change it.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>groups</strong> (<em>Mapping</em><em>[</em><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a><em>, </em><em>Sequence</em><em>[</em><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a><em>]</em><em>]</em>) – Maps a group name to the component names it contains. A component
+may appear in at most one group. Components absent from every group
+form their own singleton group.</p>
+</dd>
+</dl>
+<div class="admonition-example admonition">
+<p class="admonition-title">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">groups</span> <span class="o">=</span> <span class="n">DomainGroups</span><span class="p">({</span><span class="s2">"code"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"python"</span><span class="p">,</span> <span class="s2">"java"</span><span class="p">],</span> <span class="s2">"web"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"c4"</span><span class="p">]})</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">groups</span><span class="o">.</span><span class="n">to_member_map</span><span class="p">()</span>
+<span class="go">{'python': 'code', 'java': 'code', 'c4': 'web'}</span>
+</pre></div>
+</div>
+</div>
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.DomainGroups.to_member_map">
+<span class="sig-name descname"><span class="pre">to_member_map</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/grouping.html#DomainGroups.to_member_map"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.DomainGroups.to_member_map" title="Link to this definition">¶</a></dt>
+<dd><p>Flat <code class="docutils literal notranslate"><span class="pre">{component:</span> <span class="pre">group}</span></code> map (grouped only) — the projection packing consumes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)"><em>dict</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a>, <a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.DomainGroups.validate_against">
+<span class="sig-name descname"><span class="pre">validate_against</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">known_components</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/grouping.html#DomainGroups.validate_against"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.DomainGroups.validate_against" title="Link to this definition">¶</a></dt>
+<dd><p>Raise if any grouped component is absent from <code class="docutils literal notranslate"><span class="pre">known_components</span></code>.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.ops.OpContext">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">OpContext</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">services</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage_info</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#OpContext"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.OpContext" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>Container exposing runner-provided services to operator instances.</p>
+<p>Plan metadata lives on the context so setup overrides keep a stable
+signature.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.OpContext.get">
+<span class="sig-name descname"><span class="pre">get</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">key</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">default</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#OpContext.get"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.OpContext.get" title="Link to this definition">¶</a></dt>
+<dd><p>Fetch a service by name, returning <code class="docutils literal notranslate"><span class="pre">default</span></code> when unavailable.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><em>Any</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.ops.OpTraits">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">OpTraits</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">indexable</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">preserves_cursor_order</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_replayable</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parallelism</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">batch_shape_sensitive</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">requires_serial_state</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/traits.html#OpTraits"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.OpTraits" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>Static capabilities an operator advertises to the planner.</p>
+<p><code class="docutils literal notranslate"><span class="pre">indexable</span></code> — whether the operator preserves indexability through the
+plan.</p>
+<p><code class="docutils literal notranslate"><span class="pre">preserves_cursor_order</span></code> — whether the operator preserves per-lane
+cursor order (no reordering across chunk/offset/lineage). Required —
+every operator author must make an explicit <code class="docutils literal notranslate"><span class="pre">True</span></code> (1:1 maps, payload
+transforms, non-reordering filters) or <code class="docutils literal notranslate"><span class="pre">False</span></code> (reorders, shuffles,
+packs) call.</p>
+<p><code class="docutils literal notranslate"><span class="pre">calibration_replayable</span></code> — set True if processing each fetched record
+independently produces the same output payloads and record counts as normal
+execution, including which records are dropped. Otherwise leave False
+(default). Output order may differ. The op must also run without accumulators
+or runner services. Sample IDs are real; lane/chunk positions, component counts,
+and stage metadata are placeholders and must not affect payloads or drops.
+Text cleanup, content-based filters, and per-record splits qualify; packing
+and padding to the longest item in a batch do not. Buffers that only delay or
+reorder records are safe.</p>
+<p><code class="docutils literal notranslate"><span class="pre">parallelism</span></code> — suggested parallelism for the operator when not
+overridden.</p>
+<p><code class="docutils literal notranslate"><span class="pre">batch_shape_sensitive</span></code> — if True, the operator’s outputs can depend
+on how inputs are grouped into micro-batches (e.g., per-batch RNG or
+statistics). In deterministic mode, stages that contain at least one
+such operator will have time-based flush disabled to preserve strong
+determinism. When False, ordering determinism suffices and latency
+flush may be kept for performance.</p>
+<p><code class="docutils literal notranslate"><span class="pre">requires_serial_state</span></code> — if True, the operator maintains
+cross-invocation state (e.g., buffers) that must be confined to a single
+operator instance for determinism. In deterministic mode, operators with
+this trait will automatically run with parallelism=1. This prevents
+nondeterministic behavior when multiple worker instances would each
+maintain separate buffers.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.OpTraits.indexable">
+<span class="sig-name descname"><span class="pre">indexable</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#zephon.ops.OpTraits.indexable" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.OpTraits.preserves_cursor_order">
+<span class="sig-name descname"><span class="pre">preserves_cursor_order</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><a class="headerlink" href="#zephon.ops.OpTraits.preserves_cursor_order" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.OpTraits.calibration_replayable">
+<span class="sig-name descname"><span class="pre">calibration_replayable</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#zephon.ops.OpTraits.calibration_replayable" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.OpTraits.parallelism">
+<span class="sig-name descname"><span class="pre">parallelism</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></span><a class="headerlink" href="#zephon.ops.OpTraits.parallelism" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.OpTraits.batch_shape_sensitive">
+<span class="sig-name descname"><span class="pre">batch_shape_sensitive</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#zephon.ops.OpTraits.batch_shape_sensitive" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.OpTraits.requires_serial_state">
+<span class="sig-name descname"><span class="pre">requires_serial_state</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#zephon.ops.OpTraits.requires_serial_state" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.ops.PassthroughAccumulator">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">PassthroughAccumulator</span></span><a class="reference internal" href="../_modules/zephon/ops/accumulators/passthrough.html#PassthroughAccumulator"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.PassthroughAccumulator" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#zephon.ops.Accumulator" title="zephon.ops.accumulators.base.Accumulator"><code class="xref py py-class docutils literal notranslate"><span class="pre">Accumulator</span></code></a>[<code class="xref py py-obj docutils literal notranslate"><span class="pre">T</span></code>]</p>
+<p>Accumulator that emits exactly the incoming microbatch as one invocation batch.</p>
+<p>This is the default accumulator for stateless operators. It preserves the
+upstream batching without any additional buffering.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.PassthroughAccumulator.push_many">
+<span class="sig-name descname"><span class="pre">push_many</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">elems</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/passthrough.html#PassthroughAccumulator.push_many"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.PassthroughAccumulator.push_many" title="Link to this definition">¶</a></dt>
+<dd><p>Pass through the input microbatch as-is.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<em>T</em>], <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.ops.PassthroughAccumulator.flush">
+<span class="sig-name descname"><span class="pre">flush</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">reset</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lane_id</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/passthrough.html#PassthroughAccumulator.flush"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.PassthroughAccumulator.flush" title="Link to this definition">¶</a></dt>
+<dd><p>No buffered state to flush.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<em>T</em>], <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.ops.StageInfo">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">StageInfo</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage_index</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">-1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">''</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_index</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">-1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">collect_stats</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">copies_mapped_arrays</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/base.html#StageInfo"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.StageInfo" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>Stage metadata passed through <code class="xref py py-attr docutils literal notranslate"><span class="pre">OpContext.stage_info</span></code>.</p>
+<p>Default values indicate that setup has not run. <code class="docutils literal notranslate"><span class="pre">stage_index</span></code> and
+<code class="docutils literal notranslate"><span class="pre">stage_name</span></code> identify the stage, <code class="docutils literal notranslate"><span class="pre">op_index</span></code> identifies the operator
+within it, and <code class="docutils literal notranslate"><span class="pre">collect_stats</span></code> enables per-operator metrics.</p>
+<p><code class="docutils literal notranslate"><span class="pre">copies_mapped_arrays</span></code> indicates that the runner copies file-mapped NumPy
+arrays into independent storage when sending outputs. Operators can then
+skip copying those arrays themselves.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.StageInfo.stage_index">
+<span class="sig-name descname"><span class="pre">stage_index</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">-1</span></span><a class="headerlink" href="#zephon.ops.StageInfo.stage_index" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.StageInfo.stage_name">
+<span class="sig-name descname"><span class="pre">stage_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">''</span></span><a class="headerlink" href="#zephon.ops.StageInfo.stage_name" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.StageInfo.op_index">
+<span class="sig-name descname"><span class="pre">op_index</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">-1</span></span><a class="headerlink" href="#zephon.ops.StageInfo.op_index" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.StageInfo.collect_stats">
+<span class="sig-name descname"><span class="pre">collect_stats</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#zephon.ops.StageInfo.collect_stats" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.StageInfo.copies_mapped_arrays">
+<span class="sig-name descname"><span class="pre">copies_mapped_arrays</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#zephon.ops.StageInfo.copies_mapped_arrays" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="zephon.ops.pack_meta">
+<span class="sig-name descname"><span class="pre">pack_meta</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">primary_cursor</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">contributors</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">lane_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">component_sample_counts</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">component_token_counts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tags</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/children.html#pack_meta"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.pack_meta" title="Link to this definition">¶</a></dt>
+<dd><p>Build metadata for a packed record that merges multiple contributors.</p>
+<p><code class="docutils literal notranslate"><span class="pre">primary_cursor</span></code> is the replay identity for the packed record and must be
+unique per lane. <code class="docutils literal notranslate"><span class="pre">contributors</span></code> lists all contributors included in the pack;
+any contributor that completes a base offset must set <code class="docutils literal notranslate"><span class="pre">is_last_child=True</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">component_sample_counts</span></code> aggregates how many original samples from each
+component are included in this pack. For example, if packing 3 samples from
+component 0 and 2 from component 1, this would be <code class="docutils literal notranslate"><span class="pre">{0:</span> <span class="pre">3,</span> <span class="pre">1:</span> <span class="pre">2}</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">component_token_counts</span></code> optionally provides token counts per component,
+computed when packing happens after tokenization. If packing before tokenize,
+pass None and ensure_mixture will fall back to distributing by sample counts.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="records.html#zephon.types.SampleMeta" title="zephon.types.SampleMeta"><em>SampleMeta</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="zephon.ops.spawn_child">
+<span class="sig-name descname"><span class="pre">spawn_child</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">parent</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">child_idx</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_last_child</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tags</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/children.html#spawn_child"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.spawn_child" title="Link to this definition">¶</a></dt>
+<dd><p>Create metadata for a child derived from <code class="docutils literal notranslate"><span class="pre">parent</span></code>.</p>
+<ul class="simple">
+<li><p>Assigns deterministic child lineage for identity/replay.</p></li>
+<li><dl class="simple">
+<dt>Contributors:</dt><dd><ul>
+<li><p>If the parent has no contributors (single-base record), emit one
+contributor tied to the child cursor and honor <code class="docutils literal notranslate"><span class="pre">is_last_child</span></code>.</p></li>
+<li><p>If the parent already has contributors (e.g., a child or packed input),
+preserve their cursors. Only the final child inherits their closing
+flags; every earlier child gets non-closing refs.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">is_last_child</span></code> identifies the final child of this immediate parent.
+An inherited closing flag is responsibility to complete a base offset,
+not evidence that it has already been delivered and closed.</p></li>
+<li><p>Raises if you try to spawn a closing child from a tombstone.</p></li>
+</ul>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="records.html#zephon.types.SampleMeta" title="zephon.types.SampleMeta"><em>SampleMeta</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="zephon.ops.tombstone_meta">
+<span class="sig-name descname"><span class="pre">tombstone_meta</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ref</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lane_id</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/children.html#tombstone_meta"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.tombstone_meta" title="Link to this definition">¶</a></dt>
+<dd><p>Emit a tombstone that marks a base offset complete without payload.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="records.html#zephon.types.SampleMeta" title="zephon.types.SampleMeta"><em>SampleMeta</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="zephon.ops.tombstones_for_record">
+<span class="sig-name descname"><span class="pre">tombstones_for_record</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">record</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/children.html#tombstones_for_record"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.tombstones_for_record" title="Link to this definition">¶</a></dt>
+<dd><p>Emit tombstone records for every closing contributor in <em>record</em>.</p>
+<p>Each record tracks which chunk offsets it contributes to via
+<code class="docutils literal notranslate"><span class="pre">contribution_refs()</span></code>.  Only refs with <code class="docutils literal notranslate"><span class="pre">is_last_child=True</span></code> need a
+tombstone — intermediate children (from split/spawn) don’t close the
+base offset, so the engine doesn’t need a signal for them.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><em>list</em></a>[<a class="reference internal" href="records.html#zephon.types.SampleRecord" title="zephon.types.SampleRecord"><em>SampleRecord</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<section id="argument-types">
+<h2>Argument types<a class="headerlink" href="#argument-types" title="Link to this heading">¶</a></h2>
+<p>The string literals that operator-configuration arguments accept.</p>
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.ops.PackingAlgorithm">
+<span class="sig-name descname"><span class="pre">PackingAlgorithm</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'first_fit'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'best_fit'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'wrap'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'best_fit_wrap'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.PackingAlgorithm" title="Link to this definition">¶</a></dt>
+<dd><p>Which algorithm a packing operator fills its sequences with.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.ops.SpecialTokensMode">
+<span class="sig-name descname"><span class="pre">SpecialTokensMode</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'bos_eos'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'bos'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'eos'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'none'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'tokenizer_default'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.SpecialTokensMode" title="Link to this definition">¶</a></dt>
+<dd><p>Which special tokens <code class="docutils literal notranslate"><span class="pre">tokenize</span></code> adds around each sequence.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.ops.ChatSpecialTokensMode">
+<span class="sig-name descname"><span class="pre">ChatSpecialTokensMode</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="pre">SpecialTokensMode</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'assistant_eos'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.ChatSpecialTokensMode" title="Link to this definition">¶</a></dt>
+<dd><p>Which special tokens <code class="docutils literal notranslate"><span class="pre">tokenize_chat</span></code> adds. <code class="docutils literal notranslate"><span class="pre">assistant_eos</span></code> appends EOS after
+each assistant message when no chat template is applied.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.ops.MissingFieldMode">
+<span class="sig-name descname"><span class="pre">MissingFieldMode</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'error'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'empty'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.MissingFieldMode" title="Link to this definition">¶</a></dt>
+<dd><p>What <code class="docutils literal notranslate"><span class="pre">tokenize</span></code> does when a record lacks the field it was given.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.ops.SpanSource">
+<span class="sig-name descname"><span class="pre">SpanSource</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'auto'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'generation_tags'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'prefix_diff'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.SpanSource" title="Link to this definition">¶</a></dt>
+<dd><p>How <code class="docutils literal notranslate"><span class="pre">tokenize_chat</span></code> works out which tokens belong to the assistant.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.ops.LossScope">
+<span class="sig-name descname"><span class="pre">LossScope</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'all_assistant'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'last_span'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'after_last_user'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'all_tokens'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.LossScope" title="Link to this definition">¶</a></dt>
+<dd><p>Which tokens <code class="docutils literal notranslate"><span class="pre">tokenize_chat</span></code> supervises. Assistant scopes select spans;
+<code class="docutils literal notranslate"><span class="pre">all_tokens</span></code> selects the complete conversation except its first token.
+Masking the first token prevents packing from turning a conversation boundary
+into a supervised next-token prediction.
+<code class="docutils literal notranslate"><span class="pre">after_last_user</span></code> automatically verifies generation ownership before output.</p>
+<p>With generation tags, samples whose selected source content disappears during
+rendering are dropped and logged at ERROR, counting zero delivered tokens
+during calibration. Setup failures, wrong ownership and incorrect supervision
+always raise.</p>
+</dd></dl>
+
+</section>
+<section id="accumulator-types">
+<h2>Accumulator types<a class="headerlink" href="#accumulator-types" title="Link to this heading">¶</a></h2>
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.ops.ReadyBatch">
+<span class="sig-name descname"><span class="pre">ReadyBatch</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><span class="pre">list</span></a><span class="p"><span class="pre">[</span></span><span class="pre">T</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.ops.ReadyBatch" title="Link to this definition">¶</a></dt>
+<dd><p>What an accumulator emits for one worker invocation: the grouped elements,
+and the nanoseconds they waited, which is carried for metrics.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.ops.accumulators.SourceExhaustion">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SourceExhaustion</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">exhausted</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">frozenset({})</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">continuing</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">frozenset({})</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">final_component</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/ops/accumulators/base.html#SourceExhaustion"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.ops.accumulators.SourceExhaustion" title="Link to this definition">¶</a></dt>
+<dd><p>Immutable source facts observed by one operator in one lane.</p>
+<p><code class="docutils literal notranslate"><span class="pre">exhausted</span></code> contains all components whose end-of-data (EOD) sentinel reached
+the operator. <code class="docutils literal notranslate"><span class="pre">continuing</span></code> is the subset listed by
+<a class="reference internal" href="worksources.html#zephon.work.WorkSource.continues_after_exhaustion" title="zephon.work.WorkSource.continues_after_exhaustion"><code class="xref py py-meth docutils literal notranslate"><span class="pre">continues_after_exhaustion()</span></code></a>, whose policy
+permits continuing without them. The runner updates this snapshot before
+calling <code class="xref py py-meth docutils literal notranslate"><span class="pre">Accumulator.on_source_exhausted()</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">final_component</span></code> identifies the EOD that completed exhaustion of all
+components declared by <a class="reference internal" href="worksources.html#zephon.work.WorkSource.component_ids" title="zephon.work.WorkSource.component_ids"><code class="xref py py-meth docutils literal notranslate"><span class="pre">component_ids()</span></code></a> on this
+lane. It stays <code class="docutils literal notranslate"><span class="pre">None</span></code> if any declared component is never announced exhausted,
+even one that emits no records. It does not mean buffered records have drained.
+A lane may finish without observing a final EOD, so do not wait for it to flush.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.accumulators.SourceExhaustion.exhausted">
+<span class="sig-name descname"><span class="pre">exhausted</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#frozenset" title="(in Python v3.15)"><span class="pre">frozenset</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">frozenset({})</span></span><a class="headerlink" href="#zephon.ops.accumulators.SourceExhaustion.exhausted" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.accumulators.SourceExhaustion.continuing">
+<span class="sig-name descname"><span class="pre">continuing</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#frozenset" title="(in Python v3.15)"><span class="pre">frozenset</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">frozenset({})</span></span><a class="headerlink" href="#zephon.ops.accumulators.SourceExhaustion.continuing" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.ops.accumulators.SourceExhaustion.final_component">
+<span class="sig-name descname"><span class="pre">final_component</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/constants.html#None" title="(in Python v3.15)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#zephon.ops.accumulators.SourceExhaustion.final_component" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="records.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Records and batches</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="pipeline.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Pipeline</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Operators</a><ul>
+<li><a class="reference internal" href="#zephon.ops.Accumulator"><code class="docutils literal notranslate"><span class="pre">Accumulator</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.ops.Accumulator.push_many"><code class="docutils literal notranslate"><span class="pre">push_many()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.Accumulator.flush"><code class="docutils literal notranslate"><span class="pre">flush()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.Accumulator.reads_payload"><code class="docutils literal notranslate"><span class="pre">reads_payload</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.Accumulator.has_pending_data"><code class="docutils literal notranslate"><span class="pre">has_pending_data()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.Accumulator.on_source_exhausted"><code class="docutils literal notranslate"><span class="pre">on_source_exhausted()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.Accumulator.try_epoch_reset"><code class="docutils literal notranslate"><span class="pre">try_epoch_reset()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.ops.BaseOp"><code class="docutils literal notranslate"><span class="pre">BaseOp</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.ops.BaseOp.plan_identity"><code class="docutils literal notranslate"><span class="pre">plan_identity()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.BaseOp.setup"><code class="docutils literal notranslate"><span class="pre">setup()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.BaseOp.teardown"><code class="docutils literal notranslate"><span class="pre">teardown()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.BaseOp.traits"><code class="docutils literal notranslate"><span class="pre">traits()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.BaseOp.accumulator"><code class="docutils literal notranslate"><span class="pre">accumulator()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.BaseOp.process_one"><code class="docutils literal notranslate"><span class="pre">process_one()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.BaseOp.process_many"><code class="docutils literal notranslate"><span class="pre">process_many()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.BaseOp.validation_samples"><code class="docutils literal notranslate"><span class="pre">validation_samples()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.ops.CountingAccumulator"><code class="docutils literal notranslate"><span class="pre">CountingAccumulator</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.ops.CountingAccumulator.has_pending_data"><code class="docutils literal notranslate"><span class="pre">has_pending_data()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.CountingAccumulator.push_many"><code class="docutils literal notranslate"><span class="pre">push_many()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.CountingAccumulator.flush"><code class="docutils literal notranslate"><span class="pre">flush()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.ops.DomainGroups"><code class="docutils literal notranslate"><span class="pre">DomainGroups</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.ops.DomainGroups.to_member_map"><code class="docutils literal notranslate"><span class="pre">to_member_map()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.DomainGroups.validate_against"><code class="docutils literal notranslate"><span class="pre">validate_against()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.ops.OpContext"><code class="docutils literal notranslate"><span class="pre">OpContext</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.ops.OpContext.get"><code class="docutils literal notranslate"><span class="pre">get()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.ops.OpTraits"><code class="docutils literal notranslate"><span class="pre">OpTraits</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.ops.OpTraits.indexable"><code class="docutils literal notranslate"><span class="pre">indexable</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.OpTraits.preserves_cursor_order"><code class="docutils literal notranslate"><span class="pre">preserves_cursor_order</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.OpTraits.calibration_replayable"><code class="docutils literal notranslate"><span class="pre">calibration_replayable</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.OpTraits.parallelism"><code class="docutils literal notranslate"><span class="pre">parallelism</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.OpTraits.batch_shape_sensitive"><code class="docutils literal notranslate"><span class="pre">batch_shape_sensitive</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.OpTraits.requires_serial_state"><code class="docutils literal notranslate"><span class="pre">requires_serial_state</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.ops.PassthroughAccumulator"><code class="docutils literal notranslate"><span class="pre">PassthroughAccumulator</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.ops.PassthroughAccumulator.push_many"><code class="docutils literal notranslate"><span class="pre">push_many()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.PassthroughAccumulator.flush"><code class="docutils literal notranslate"><span class="pre">flush()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.ops.StageInfo"><code class="docutils literal notranslate"><span class="pre">StageInfo</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.ops.StageInfo.stage_index"><code class="docutils literal notranslate"><span class="pre">stage_index</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.StageInfo.stage_name"><code class="docutils literal notranslate"><span class="pre">stage_name</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.StageInfo.op_index"><code class="docutils literal notranslate"><span class="pre">op_index</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.StageInfo.collect_stats"><code class="docutils literal notranslate"><span class="pre">collect_stats</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.StageInfo.copies_mapped_arrays"><code class="docutils literal notranslate"><span class="pre">copies_mapped_arrays</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.ops.pack_meta"><code class="docutils literal notranslate"><span class="pre">pack_meta()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.spawn_child"><code class="docutils literal notranslate"><span class="pre">spawn_child()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.tombstone_meta"><code class="docutils literal notranslate"><span class="pre">tombstone_meta()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.tombstones_for_record"><code class="docutils literal notranslate"><span class="pre">tombstones_for_record()</span></code></a></li>
+<li><a class="reference internal" href="#argument-types">Argument types</a><ul>
+<li><a class="reference internal" href="#zephon.ops.PackingAlgorithm"><code class="docutils literal notranslate"><span class="pre">PackingAlgorithm</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.SpecialTokensMode"><code class="docutils literal notranslate"><span class="pre">SpecialTokensMode</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.ChatSpecialTokensMode"><code class="docutils literal notranslate"><span class="pre">ChatSpecialTokensMode</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.MissingFieldMode"><code class="docutils literal notranslate"><span class="pre">MissingFieldMode</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.SpanSource"><code class="docutils literal notranslate"><span class="pre">SpanSource</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.LossScope"><code class="docutils literal notranslate"><span class="pre">LossScope</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#accumulator-types">Accumulator types</a><ul>
+<li><a class="reference internal" href="#zephon.ops.ReadyBatch"><code class="docutils literal notranslate"><span class="pre">ReadyBatch</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.accumulators.SourceExhaustion"><code class="docutils literal notranslate"><span class="pre">SourceExhaustion</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.ops.accumulators.SourceExhaustion.exhausted"><code class="docutils literal notranslate"><span class="pre">exhausted</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.accumulators.SourceExhaustion.continuing"><code class="docutils literal notranslate"><span class="pre">continuing</span></code></a></li>
+<li><a class="reference internal" href="#zephon.ops.accumulators.SourceExhaustion.final_component"><code class="docutils literal notranslate"><span class="pre">final_component</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

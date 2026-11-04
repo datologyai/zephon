@@ -1,0 +1,728 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Checkpoint replay and bounded recovery" href="checkpoint_replay.html"><link rel="prev" title="Operators and runners" href="operators_and_runners.html">
+        <link rel="prefetch" href="../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+        <title>Records and sample lifecycles - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="main" data-page="internals/records_and_sample_lifecycles.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../pipelines/index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../api/datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/operators.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/internals/records_and_sample_lifecycles.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="records-and-sample-lifecycles">
+<h1>Records and sample lifecycles<a class="headerlink" href="#records-and-sample-lifecycles" title="Link to this heading">¶</a></h1>
+<p>A sample starts as three integers and ends as a row in a tensor. On the way it may be
+split into four sequences, three of which get packed with fragments of other documents
+while a filter throws the fourth away. This page is about how Zephon keeps track of all
+that, because the bookkeeping is what makes checkpointing possible at all.</p>
+<p id="from-a-pointer-to-data"><strong>From a pointer to data.</strong> A <code class="docutils literal notranslate"><span class="pre">WorkSource</span></code> does not hand out samples, it hands out
+pointers, each a <code class="docutils literal notranslate"><span class="pre">(dataset_id,</span> <span class="pre">shard_id,</span> <span class="pre">sample_idx)</span></code> triple grouped into work chunks. The
+built-in <code class="docutils literal notranslate"><span class="pre">fetch</span></code> operator is the boundary: everything before it works on pointers, and
+everything after it works on a <code class="docutils literal notranslate"><span class="pre">SampleRecord</span></code>, which pairs a <strong>payload</strong> (usually a dict
+of fields) with the tracking metadata in <code class="docutils literal notranslate"><span class="pre">SampleMeta</span></code>. The rest of this page is about what
+happens after that transition.</p>
+<p id="the-identity-of-a-record"><strong>The identity of a record.</strong> Every record carries a <code class="docutils literal notranslate"><span class="pre">SampleCursor</span></code>, which is the thing
+that makes it addressable. It has four components, and it sorts on them in a different
+order than it stores them:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>SampleCursor sort key = (chunk_id, chunk_offset, lineage, sample_id)
+                           │           │            │         │
+                           │           │            │         └─ (dataset, shard, local id)
+                           │           │            └─ path taken through fan-out
+                           │           └─ position within the chunk
+                           └─ which chunk the sample came from
+</pre></div>
+</div>
+<p>The constructor takes <code class="docutils literal notranslate"><span class="pre">(chunk_id,</span> <span class="pre">chunk_offset,</span> <span class="pre">sample_id,</span> <span class="pre">lineage)</span></code>. The sort key swaps
+the last two so that children of the same offset sort next to each other rather than being
+scattered by sample ID. If you are reading <code class="docutils literal notranslate"><span class="pre">zephon/types.py</span></code> and the two orders look like
+a mistake, that is why.</p>
+<p>You can think of the cursor as a passport: it records where the record was born
+(<code class="docutils literal notranslate"><span class="pre">chunk_id</span></code>, <code class="docutils literal notranslate"><span class="pre">chunk_offset</span></code>, <code class="docutils literal notranslate"><span class="pre">sample_id</span></code>) and what happened to it on the way (<code class="docutils literal notranslate"><span class="pre">lineage</span></code>).
+It is deterministic, so the same <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> definition and the same inputs always produce
+the same cursor for the same record, and we lean on that in two places. On restore, the
+replay filter uses cursor <strong>equality</strong> to find the boundary between the records your
+training loop has already consumed and the ones it has not. During a run, Zephon uses the
+<code class="docutils literal notranslate"><span class="pre">(chunk_id,</span> <span class="pre">chunk_offset)</span></code> prefix, which we call the <strong>base offset</strong>, to decide when a
+chunk has been fully consumed and its memory can be released.</p>
+<p>Operators can have different relationships between input and output:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Cardinality</p></th>
+<th class="head"><p>What happens</p></th>
+<th class="head"><p>Examples</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>1 → 1</p></td>
+<td><p>One record in, one out, identity unchanged</p></td>
+<td><p>Tokenizing without splitting, image decode</p></td>
+</tr>
+<tr class="row-odd"><td><p>1 → 0 or 1</p></td>
+<td><p>A record is kept or dropped</p></td>
+<td><p>Dedup, length gating, <code class="docutils literal notranslate"><span class="pre">map_transform</span></code> returning <code class="docutils literal notranslate"><span class="pre">None</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>1 → N</p></td>
+<td><p>One record becomes several</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">tokenize(split_long_samples=True)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>N → 1</p></td>
+<td><p>Several records become one</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pack_sequences</span></code>, <code class="docutils literal notranslate"><span class="pre">pack_flat</span></code>, <code class="docutils literal notranslate"><span class="pre">batch</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p id="fan-out-one-sample-many-records"><strong>Fan-out: one sample, many records.</strong> Each output needs its own identity, and gets it
+through <strong>lineage</strong>: a tuple of integer indices appended to the parent’s cursor. A
+tokenizer splitting a long document into three sequences produces this:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Input (chunk 7, offset 2):
+  cursor = (cid=7, off=2, lineage=(), sample_id=(ds0, sh5, 42))
+
+                    tokenize(split_long_samples=True)
+                    ┌──────────┼──────────┐
+                    v          v          v
+
+  child 0:  (7, 2, (0,), (ds0, sh5, 42))
+  child 1:  (7, 2, (1,), (ds0, sh5, 42))
+  child 2:  (7, 2, (2,), (ds0, sh5, 42))
+</pre></div>
+</div>
+<p>All three children share the base offset <code class="docutils literal notranslate"><span class="pre">(7,</span> <span class="pre">2)</span></code>, because they still belong to the same
+original sample, but the lineage paths make each cursor unique. Lineage nests: if a later
+operator splits child 1 again, the grandchildren are <code class="docutils literal notranslate"><span class="pre">(1,</span> <span class="pre">0)</span></code> and <code class="docutils literal notranslate"><span class="pre">(1,</span> <span class="pre">1)</span></code>. The tree is
+always deterministic because child indices follow emission order, which is why operators
+that split must emit in a stable order.</p>
+<p>The invariant that matters for fan-out is this one:</p>
+<blockquote>
+<div><p>For each base offset in a lane, <strong>exactly one</strong> record (or tombstone) must eventually
+signal that it is the last one.</p>
+</div></blockquote>
+<p>That signal is the <code class="docutils literal notranslate"><span class="pre">is_last_child</span></code> flag on a <code class="docutils literal notranslate"><span class="pre">ContributorRef</span></code>, which tells Zephon that
+nothing further will arrive for that base offset and the corresponding slot in the chunk
+can be marked closed. <code class="docutils literal notranslate"><span class="pre">spawn_child</span></code> does this bookkeeping for you. When you split a record
+that already carries contributors, only its final child inherits the parent’s closing
+flag, and every earlier child gets a non-closing copy, so splitting a split record cannot
+close the source early. The <strong>Splitting records</strong> section of <a class="reference internal" href="../pipelines/user_defined_operators.html"><span class="std std-doc">User-Defined
+Operators</span></a> walks through an example.</p>
+<p id="fan-in-many-records-one-output"><strong>Fan-in: many records, one output.</strong> Two built-in operations go the other way.</p>
+<p>Packing (<code class="docutils literal notranslate"><span class="pre">pack_sequences</span></code> and <code class="docutils literal notranslate"><span class="pre">pack_flat</span></code>) combines fragments from different base offsets
+into one record. The packed record gets a fresh <strong>primary cursor</strong>, which is its own
+replay identity and has to be unique within the lane, and it carries a list of
+<code class="docutils literal notranslate"><span class="pre">ContributorRef</span></code> entries remembering every base offset that went into it. One packed
+record can therefore close several base offsets at once, including offsets from different
+chunks, and Zephon processes each contributor independently:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>child (7, 2, (0,))  ─┐
+                      ├─ pack ──&gt;  packed record
+child (7, 3, (0,))  ─┘             cursor = (7, 2, (0, 0), ...)
+                                   contributors:
+                                     (7, 2, (0,))  is_last_child=True
+                                     (7, 3, (0,))  is_last_child=True
+</pre></div>
+</div>
+<p>Packing also tracks <strong>component heritage</strong>: how many samples, and optionally how many
+tokens, each mixture component contributed to the packed record, in
+<code class="docutils literal notranslate"><span class="pre">component_sample_counts</span></code> and <code class="docutils literal notranslate"><span class="pre">component_token_counts</span></code>. This is what lets <code class="docutils literal notranslate"><span class="pre">ensure_mixture</span></code>
+still measure and correct mixture ratios after packing has mixed several components into a
+single record. The token counts are <code class="docutils literal notranslate"><span class="pre">None</span></code> when packing runs before tokenization, in which
+case <code class="docutils literal notranslate"><span class="pre">ensure_mixture</span></code> falls back to distributing the record’s total tokens in proportion
+to the sample counts.</p>
+<p>Batching (<code class="docutils literal notranslate"><span class="pre">batch</span></code>) is the gentler fan-in. It collects records into a <code class="docutils literal notranslate"><span class="pre">SampleBatch</span></code> without
+merging payloads or minting new cursors. Each record inside the batch keeps its own cursor
+and metadata. The batch is a grouping for the training loop, not a new identity.</p>
+<p id="contributors-and-tombstones"><strong>Contributors and tombstones.</strong> Contributors are the accounting system that answers one
+question: <em>has the pipeline finished with base offset <code class="docutils literal notranslate"><span class="pre">(chunk_id,</span> <span class="pre">chunk_offset)</span></code>?</em></p>
+<p>Every record carries contributor information, either explicitly, set by the fan-out or
+packing helpers, or implicitly, since a record that sets nothing is treated as having a
+single contributor pointing at its own cursor with <code class="docutils literal notranslate"><span class="pre">is_last_child=True</span></code>. If you write a
+1:1 operator that neither splits nor drops anything, the defaults are already correct and
+you never have to think about this. Contributors become your problem in exactly three
+situations: a fan-out operator creating several children from one base offset, a packing
+operator merging contributors from several offsets, and a filter dropping the last record
+standing for an offset.</p>
+<p>That third case is where <strong>tombstones</strong> come in. Say you write a deduplication filter and
+it drops a document. If that record was the last one for its base offset, no closing
+contributor will ever reach Zephon, so the offset never closes, the chunk never evicts,
+and memory grows without bound for the rest of the run. A tombstone is a record with no
+payload whose entire purpose is to carry the closing <code class="docutils literal notranslate"><span class="pre">ContributorRef</span></code> that the dropped
+record owed:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Base offset (10, 5) → filter decides to drop it
+
+Without a tombstone:              With a tombstone:
+  (10, 5) never closes              filter emits a tombstone for (10, 5)
+  chunk 10 pinned forever           engine marks (10, 5) closed
+  ✗ unbounded memory                chunk 10 evicts once its other offsets close
+</pre></div>
+</div>
+<p>Tombstones are tagged in the metadata, and the runners treat them as control items: a
+tombstone emitted upstream of your operator bypasses its accumulator and <code class="docutils literal notranslate"><span class="pre">process_many</span></code>
+entirely and travels on to delivery, so your operator never sees one. At delivery a
+tombstone only marks its offset complete. It does not advance the replay cursor, and it
+does not trigger eviction on its own, and your model never sees it.</p>
+<p>The only tombstones you need to think about are
+the ones your own operator creates. The rule is to <strong>always emit them when you drop
+records</strong>, regardless of what else the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> contains. Zephon decides at compile
+time whether a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> uses the monotone or the epoch-based eviction path, based on
+operator traits. Your operator has no way of knowing which one it will end up on.
+Tombstones are harmless on the monotone path and mandatory on the epoch-based one, so
+emitting them unconditionally is the only choice that is correct in both cases.</p>
+<p id="chunks-are-the-unit-of-state"><strong>Chunks are the unit of state.</strong> <a class="reference internal" href="../pipelines/how_pipelines_run.html"><span class="std std-doc">How pipelines run</span></a>
+explains that Zephon tracks progress by chunk and that a chunk is complete once every
+record derived from it has been delivered. The bookkeeping above is how it knows:
+contributors and tombstones close offsets, and a chunk whose offsets are all closed leaves
+the per-lane set of <strong>inflight chunks</strong>.</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>WorkSource           Engine                       Operators            Training loop
+    │                   │                             │                      │
+    │  work chunk       │                             │                      │
+    │ ─────────────────&gt;│  assign chunk_id            │                      │
+    │                   │  add to inflight set        │                      │
+    │                   │  yield sample pointers      │                      │
+    │                   │ ───────────────────────────&gt;│                      │
+    │                   │                             │  fetch, transform,   │
+    │                   │                             │  split, pack, filter │
+    │                   │   notify(contributors)      │                      │
+    │                   │ &lt;───────────────────────────│                      │
+    │                   │  update offset bitmaps      │                      │
+    │                   │  evict completed epochs     │                      │
+    │                   │                             │  records / batches   │
+    │                   │                             │ ────────────────────&gt;│
+    │                   │                             │ (tombstones stripped)│
+</pre></div>
+</div>
+<p><a class="reference internal" href="checkpoint_replay.html"><span class="std std-doc">Checkpoint replay and bounded recovery</span></a> covers how Zephon decides
+that a chunk is safe to drop, which turns out to be considerably more subtle than “all its
+offsets are closed” once packing and shuffling are in the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>.</p>
+<p id="writing-operators-that-respect-all-this"><strong>Writing operators that respect all this.</strong> <a class="reference internal" href="../pipelines/user_defined_operators.html"><span class="std std-doc">User-Defined
+Operators</span></a> covers the ways to add your own code to
+a pipeline. What follows covers what that code owes the bookkeeping above. Four builders
+in <code class="docutils literal notranslate"><span class="pre">zephon.ops.children</span></code> do the fiddly parts.</p>
+<p><code class="docutils literal notranslate"><span class="pre">spawn_child(parent,</span> <span class="pre">child_idx,</span> <span class="pre">*,</span> <span class="pre">is_last_child=False,</span> <span class="pre">tags=None)</span></code> builds the metadata
+for a child derived from a parent, and is what you want for any true fan-out. It extends
+the lineage with <code class="docutils literal notranslate"><span class="pre">child_idx</span></code>, creates a contributor with the right flag, propagates
+inherited contributors if the parent was itself a packed record, and preserves component
+tracking:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">zephon.ops.children</span><span class="w"> </span><span class="kn">import</span> <span class="n">spawn_child</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.types</span><span class="w"> </span><span class="kn">import</span> <span class="n">SampleRecord</span>
+
+<span class="c1"># Inside process_many(): `out` is the list it returns.</span>
+<span class="n">out</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">sequence</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">sequences</span><span class="p">):</span>
+    <span class="n">meta</span> <span class="o">=</span> <span class="n">spawn_child</span><span class="p">(</span>
+        <span class="n">parent</span><span class="o">.</span><span class="n">meta</span><span class="p">,</span>
+        <span class="n">child_idx</span><span class="o">=</span><span class="n">i</span><span class="p">,</span>
+        <span class="n">is_last_child</span><span class="o">=</span><span class="p">(</span><span class="n">i</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">sequences</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">),</span>
+    <span class="p">)</span>
+    <span class="n">out</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">SampleRecord</span><span class="p">(</span><span class="n">meta</span><span class="o">=</span><span class="n">meta</span><span class="p">,</span> <span class="n">payload</span><span class="o">=</span><span class="n">sequence</span><span class="p">))</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">pack_meta(primary_cursor,</span> <span class="pre">contributors,</span> <span class="pre">*,</span> <span class="pre">lane_id,</span> <span class="pre">component_sample_counts,</span> <span class="pre">...)</span></code> builds
+the metadata for a packed record. The <code class="docutils literal notranslate"><span class="pre">primary_cursor</span></code> is that record’s replay identity
+and has to be unique within the lane. <code class="docutils literal notranslate"><span class="pre">first_input.meta.cursor.child(0)</span></code> is only unique
+when each input leads at most one packed record. If one input can lead several, as when
+the built-in packer wraps a long sequence across bins, derive the index from the input
+instead: the built-in packer uses <code class="docutils literal notranslate"><span class="pre">cursor.child(first.start)</span></code>, the offset at which that
+input’s fragment begins. The <code class="docutils literal notranslate"><span class="pre">contributors</span></code> argument gathers every input’s
+<code class="docutils literal notranslate"><span class="pre">contribution_refs()</span></code> so that Zephon learns which base offsets the packed record closes.</p>
+<p><code class="docutils literal notranslate"><span class="pre">tombstone_meta(ref,</span> <span class="pre">lane_id)</span></code> builds a single tombstone from a closing contributor, and
+<code class="docutils literal notranslate"><span class="pre">tombstones_for_record(record)</span></code> wraps the loop you would otherwise write by hand,
+returning one tombstone per closing contributor and an empty list when none are owed:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">zephon.ops.children</span><span class="w"> </span><span class="kn">import</span> <span class="n">tombstones_for_record</span>
+
+<span class="c1"># Inside process_many(), as above.</span>
+<span class="n">out</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">tombstones_for_record</span><span class="p">(</span><span class="n">dropped_record</span><span class="p">))</span>
+</pre></div>
+</div>
+<p id="who-owes-tombstones"><strong>Who owes tombstones.</strong> It depends on how you added your code, and the difference catches
+people out:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>How you added it</p></th>
+<th class="head"><p>Tombstones</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">map_transform(fn,</span> <span class="pre">drop_none=True)</span></code></p></td>
+<td><p><strong>Automatic.</strong> Returning <code class="docutils literal notranslate"><span class="pre">None</span></code> drops the record and the framework emits what it owed.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">stateful_transform(...)</span></code></p></td>
+<td><p><strong>Manual.</strong> Emit them yourself for every dropped closing contributor.</p></td>
+</tr>
+<tr class="row-even"><td><p>A custom <code class="docutils literal notranslate"><span class="pre">BaseOp</span></code></p></td>
+<td><p><strong>Manual.</strong> Same.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>If that sounds like a trap, the way out is to keep filtering in a preceding
+<code class="docutils literal notranslate"><span class="pre">map_transform</span></code> with <code class="docutils literal notranslate"><span class="pre">drop_none=True</span></code> and let your stateful operator do nothing but buffer
+and reorder.</p>
+<p id="operator-traits"><strong>Operator traits.</strong> <code class="docutils literal notranslate"><span class="pre">OpTraits</span></code> declares capabilities for planning, execution, and
+token calibration:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Trait</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Meaning</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">preserves_cursor_order</span></code></p></td>
+<td><p>Required, no default</p></td>
+<td><p>Records leave in the same chunk/offset order they arrived. <code class="docutils literal notranslate"><span class="pre">False</span></code> for anything that shuffles, packs, or buffers across chunks.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">calibration_replayable</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">False</span></code></p></td>
+<td><p>Whether token calibration may replay the operator before tokenization. See <a class="reference internal" href="../api/operators.html#zephon.ops.OpTraits" title="zephon.ops.OpTraits"><code class="xref py py-class docutils literal notranslate"><span class="pre">OpTraits</span></code></a>.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">requires_serial_state</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">False</span></code></p></td>
+<td><p>The operator keeps state across invocations. In deterministic mode the runner raises unless its parallelism is 1.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">batch_shape_sensitive</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">False</span></code></p></td>
+<td><p>Output depends on how inputs were grouped into micro-batches. Intended to disable time-based flushing in deterministic mode, but currently has no effect (<a class="reference external" href="https://github.com/datologyai/zephon/issues/49">#49</a>).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">indexable</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">True</span></code></p></td>
+<td><p>The operator preserves indexability through the plan.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">parallelism</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+<td><p>Suggested worker count, used when the plan does not override it.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>We gave <code class="docutils literal notranslate"><span class="pre">preserves_cursor_order</span></code> no default on purpose, so that you have to make the call
+consciously, because getting it wrong is the most expensive mistake available here. An
+operator that reorders records while claiming to preserve cursor order puts the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>
+on the monotone eviction path, which will happily evict chunks that replay still needs.
+Claiming <code class="docutils literal notranslate"><span class="pre">False</span></code> when you did not have to is merely a little slower.</p>
+<p id="the-pitfalls-in-order-of-how-much-they-hurt"><strong>The pitfalls, in order of how much they hurt.</strong> The worst is closing a base offset too
+early, meaning a record with <code class="docutils literal notranslate"><span class="pre">is_last_child=True</span></code> that reaches Zephon before its siblings
+have been delivered, which lets the chunk evict while replay still needs it. Closing an
+offset twice is harmless, because the bitmap ignores repeats; it is the timing that
+matters. <code class="docutils literal notranslate"><span class="pre">spawn_child</span></code> hands the closing flag only to the final child, but a hand-rolled
+operator can still get this wrong. A non-deterministic <code class="docutils literal notranslate"><span class="pre">primary_cursor</span></code> on a packed record
+means replay cannot find its target on resume. Forgetting to emit a tombstone for a
+closing record your operator drops stalls eviction silently. And claiming the wrong
+<code class="docutils literal notranslate"><span class="pre">preserves_cursor_order</span></code>, as above, loses data outright.</p>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="checkpoint_replay.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Checkpoint replay and bounded recovery</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="operators_and_runners.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Operators and runners</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Records and sample lifecycles</a><ul>
+<li><a class="reference internal" href="#from-a-pointer-to-data">From a pointer to data</a></li>
+<li><a class="reference internal" href="#the-identity-of-a-record">The identity of a record</a></li>
+<li><a class="reference internal" href="#fan-out-one-sample-many-records">Fan-out: one sample, many records</a></li>
+<li><a class="reference internal" href="#fan-in-many-records-one-output">Fan-in: many records, one output</a></li>
+<li><a class="reference internal" href="#contributors-and-tombstones">Contributors and tombstones</a></li>
+<li><a class="reference internal" href="#chunks-are-the-unit-of-state">Chunks are the unit of state</a></li>
+<li><a class="reference internal" href="#writing-operators-that-respect-all-this">Writing operators that respect all this</a></li>
+<li><a class="reference internal" href="#who-owes-tombstones">Who owes tombstones</a></li>
+<li><a class="reference internal" href="#operator-traits">Operator traits</a></li>
+<li><a class="reference internal" href="#the-pitfalls-in-order-of-how-much-they-hurt">The pitfalls, in order of how much they hurt</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

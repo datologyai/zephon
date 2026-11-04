@@ -1,0 +1,1669 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../genindex.html"><link rel="search" title="Search" href="../../search.html">
+        <link rel="prefetch" href="../../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+        <title>zephon.types - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="main" data-page="_modules/zephon/types.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../pipelines/index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../pipelines/how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../pipelines/preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../pipelines/shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../pipelines/packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../pipelines/building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../pipelines/inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../pipelines/distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../pipelines/checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../pipelines/user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../internals/index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../internals/worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../internals/elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../internals/operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../internals/records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../internals/checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../api/datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/operators.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for zephon.types</h1><div class="highlight"><pre>
+<span></span><span class="c1"># Copyright 2025 DatologyAI</span>
+<span class="c1"># SPDX-License-Identifier: Apache-2.0</span>
+
+<span class="sd">"""Canonical data model shared across the core data-loading pipeline."""</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections</span><span class="w"> </span><span class="kn">import</span> <span class="n">Counter</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Sized</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span><span class="p">,</span> <span class="n">replace</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">numbers</span><span class="w"> </span><span class="kn">import</span> <span class="n">Integral</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">TYPE_CHECKING</span><span class="p">,</span>
+    <span class="n">Any</span><span class="p">,</span>
+    <span class="n">Iterable</span><span class="p">,</span>
+    <span class="n">Literal</span><span class="p">,</span>
+    <span class="n">Mapping</span><span class="p">,</span>
+    <span class="n">Protocol</span><span class="p">,</span>
+    <span class="n">Sequence</span><span class="p">,</span>
+    <span class="n">TypeAlias</span><span class="p">,</span>
+    <span class="n">cast</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.length_extraction</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">TOKEN_FIELD_CANDIDATES</span> <span class="k">as</span> <span class="n">_TOKEN_FIELD_CANDIDATES</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.length_extraction</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">detect_length_field</span> <span class="k">as</span> <span class="n">_detect_length_field</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">count_valid_tokens</span> <span class="k">as</span> <span class="n">_count_valid_tokens</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">flatten_sequences</span> <span class="k">as</span> <span class="n">_flatten_sequences</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">labels_to_loss_mask</span> <span class="k">as</span> <span class="n">_labels_to_loss_mask</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">mask_eos_labels</span> <span class="k">as</span> <span class="n">_mask_eos_labels</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">mask_padding_labels</span> <span class="k">as</span> <span class="n">_mask_padding_labels</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">mask_segment_start_labels</span> <span class="k">as</span> <span class="n">_mask_segment_start_labels</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">mask_unsupervised_labels</span> <span class="k">as</span> <span class="n">_mask_unsupervised_labels</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">padding_lengths_to_mask</span> <span class="k">as</span> <span class="n">_padding_lengths_to_mask</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">positions_from_segment_lengths</span> <span class="k">as</span> <span class="n">_positions_from_segment_lengths</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">positions_to_cu_seqlens</span> <span class="k">as</span> <span class="n">_positions_to_cu_seqlens</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">positions_to_document_ids</span> <span class="k">as</span> <span class="n">_positions_to_document_ids</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">resolve_dtype</span> <span class="k">as</span> <span class="n">_resolve_dtype</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">sequence_positions</span> <span class="k">as</span> <span class="n">_sequence_positions</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">slice_last_dim</span> <span class="k">as</span> <span class="n">_slice_last_dim</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.tensor_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">stack_sequences</span> <span class="k">as</span> <span class="n">_stack_sequences</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="k">if</span> <span class="n">TYPE_CHECKING</span><span class="p">:</span>  <span class="c1"># Precise typing when numpy/torch available to the type checker.</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">numpy.typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">NDArray</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">torch</span><span class="w"> </span><span class="kn">import</span> <span class="n">Tensor</span>
+
+    <span class="n">_NumpyNumber</span><span class="p">:</span> <span class="n">TypeAlias</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">number</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span>
+    <span class="n">_NumpyTemporal</span><span class="p">:</span> <span class="n">TypeAlias</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">datetime64</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">timedelta64</span>
+    <span class="n">SamplePayloadArray</span><span class="p">:</span> <span class="n">TypeAlias</span> <span class="o">=</span> <span class="n">NDArray</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="n">Tensor</span>
+<span class="k">else</span><span class="p">:</span>  <span class="c1"># Runtime fallback keeps optional dependencies optional.</span>
+    <span class="n">SamplePayloadArray</span> <span class="o">=</span> <span class="n">Any</span>  <span class="c1"># type: ignore[assignment]</span>
+    <span class="n">_NumpyNumber</span> <span class="o">=</span> <span class="n">Any</span>  <span class="c1"># type: ignore[assignment]</span>
+    <span class="n">_NumpyTemporal</span> <span class="o">=</span> <span class="n">Any</span>  <span class="c1"># type: ignore[assignment]</span>
+
+
+<div class="viewcode-block" id="FieldCollator">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.FieldCollator">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">FieldCollator</span><span class="p">(</span><span class="n">Protocol</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Assemble a named field that ordinary token stacking cannot handle.</span>
+
+<span class="sd">    For example, image tensors need concatenation along their media axis, while</span>
+<span class="sd">    model-specific multi-axis positions need their own padding and axis order.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">values</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="o">/</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">length</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">shifted</span><span class="p">:</span> <span class="nb">bool</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Collate a field's values from the documents in one batch.</span>
+
+<span class="sd">        ``length`` is the token length before next-token shifting. ``shifted``</span>
+<span class="sd">        indicates whether token inputs/labels were shifted, so the callback can</span>
+<span class="sd">        align its own fields. Its output is not cast, sliced or flattened again.</span>
+<span class="sd">        """</span>
+        <span class="o">...</span></div>
+
+
+
+<span class="n">DatasetId</span> <span class="o">=</span> <span class="nb">int</span>
+<span class="n">ShardId</span> <span class="o">=</span> <span class="nb">int</span>
+<span class="n">LocalSampleId</span> <span class="o">=</span> <span class="nb">int</span>
+<span class="n">SampleId</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">DatasetId</span><span class="p">,</span> <span class="n">ShardId</span><span class="p">,</span> <span class="n">LocalSampleId</span><span class="p">]</span>
+<span class="n">LaneId</span> <span class="o">=</span> <span class="nb">int</span>
+<span class="n">ChunkId</span> <span class="o">=</span> <span class="nb">int</span>
+<span class="n">ChunkOffset</span> <span class="o">=</span> <span class="nb">int</span>
+<span class="n">ComponentId</span> <span class="o">=</span> <span class="nb">int</span>
+<span class="n">LineageIndex</span> <span class="o">=</span> <span class="nb">int</span>
+<span class="n">LineagePath</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">LineageIndex</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+<span class="c1"># Cursor order: chunk_id -&gt; chunk_offset -&gt; lineage path -&gt; original sample id.</span>
+<span class="c1"># ``sample_id`` comes last so it only breaks ties when both physical position</span>
+<span class="c1"># and lineage are identical (for example across shards) while remaining useful</span>
+<span class="c1"># for debugging.</span>
+<span class="n">SampleCursorKey</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ChunkId</span><span class="p">,</span> <span class="n">ChunkOffset</span><span class="p">,</span> <span class="n">LineagePath</span><span class="p">,</span> <span class="n">SampleId</span><span class="p">]</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_normalize_lineage</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">|</span> <span class="n">LineagePath</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">LineagePath</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return an immutable lineage path tuple with input validation."""</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">normalized</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">path</span><span class="p">)</span>  <span class="c1"># type: ignore[arg-type]</span>
+    <span class="k">except</span> <span class="ne">TypeError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>  <span class="c1"># noqa: BLE001</span>
+        <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="s2">"lineage paths must be iterable sequences of ints"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">return</span> <span class="n">normalized</span>
+
+
+<div class="viewcode-block" id="SampleCursor">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleCursor">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">SampleCursor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Stable ordering key that survives fan-out across the pipeline."""</span>
+
+    <span class="n">chunk_id</span><span class="p">:</span> <span class="n">ChunkId</span>
+    <span class="n">chunk_offset</span><span class="p">:</span> <span class="n">ChunkOffset</span>
+    <span class="n">sample_id</span><span class="p">:</span> <span class="n">SampleId</span>
+    <span class="n">lineage</span><span class="p">:</span> <span class="n">LineagePath</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">tuple</span><span class="p">)</span>
+
+<div class="viewcode-block" id="SampleCursor.from_key">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleCursor.from_key">[docs]</a>
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_key</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="n">SampleCursorKey</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"SampleCursor"</span><span class="p">:</span>
+        <span class="n">chunk_id</span><span class="p">,</span> <span class="n">chunk_offset</span><span class="p">,</span> <span class="n">lineage</span><span class="p">,</span> <span class="n">sample_id</span> <span class="o">=</span> <span class="n">key</span>
+        <span class="n">sid</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span><span class="n">SampleId</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">sample_id</span><span class="p">))</span>
+        <span class="k">return</span> <span class="n">SampleCursor</span><span class="p">(</span>
+            <span class="nb">int</span><span class="p">(</span><span class="n">chunk_id</span><span class="p">),</span> <span class="nb">int</span><span class="p">(</span><span class="n">chunk_offset</span><span class="p">),</span> <span class="n">sid</span><span class="p">,</span> <span class="n">_normalize_lineage</span><span class="p">(</span><span class="n">lineage</span><span class="p">)</span>
+        <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="SampleCursor.child">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleCursor.child">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">child</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">:</span> <span class="n">LineageIndex</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"SampleCursor"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the cursor for the ``index``-th child of this element."""</span>
+        <span class="k">if</span> <span class="n">index</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"lineage index must be non-negative"</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">SampleCursor</span><span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">chunk_id</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">chunk_offset</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">sample_id</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">lineage</span> <span class="o">+</span> <span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">index</span><span class="p">),),</span>
+        <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="SampleCursor.as_key">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleCursor.as_key">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">as_key</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SampleCursorKey</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the canonical tuple key used in checkpoints and comparisons."""</span>
+        <span class="k">return</span> <span class="p">(</span>
+            <span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">chunk_id</span><span class="p">),</span>
+            <span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">chunk_offset</span><span class="p">),</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">lineage</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">sample_id</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">base_offset</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Return ``(chunk_id, chunk_offset)`` for eviction/base-offset accounting."""</span>
+        <span class="k">return</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">chunk_id</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">chunk_offset</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_cmp_key</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">,</span> <span class="n">LineagePath</span><span class="p">,</span> <span class="n">SampleId</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">chunk_id</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">chunk_offset</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">lineage</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">sample_id</span><span class="p">,</span>
+        <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__lt__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="s2">"SampleCursor"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">other</span><span class="p">,</span> <span class="n">SampleCursor</span><span class="p">):</span>  <span class="c1"># pyright: ignore[reportUnnecessaryIsInstance]</span>
+            <span class="k">return</span> <span class="bp">NotImplemented</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cmp_key</span><span class="p">()</span> <span class="o">&lt;</span> <span class="n">other</span><span class="o">.</span><span class="n">_cmp_key</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__le__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="s2">"SampleCursor"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">other</span><span class="p">,</span> <span class="n">SampleCursor</span><span class="p">):</span>  <span class="c1"># pyright: ignore[reportUnnecessaryIsInstance]</span>
+            <span class="k">return</span> <span class="bp">NotImplemented</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cmp_key</span><span class="p">()</span> <span class="o">&lt;=</span> <span class="n">other</span><span class="o">.</span><span class="n">_cmp_key</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__gt__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="s2">"SampleCursor"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">other</span><span class="p">,</span> <span class="n">SampleCursor</span><span class="p">):</span>  <span class="c1"># pyright: ignore[reportUnnecessaryIsInstance]</span>
+            <span class="k">return</span> <span class="bp">NotImplemented</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cmp_key</span><span class="p">()</span> <span class="o">&gt;</span> <span class="n">other</span><span class="o">.</span><span class="n">_cmp_key</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__ge__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="s2">"SampleCursor"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">other</span><span class="p">,</span> <span class="n">SampleCursor</span><span class="p">):</span>  <span class="c1"># pyright: ignore[reportUnnecessaryIsInstance]</span>
+            <span class="k">return</span> <span class="bp">NotImplemented</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cmp_key</span><span class="p">()</span> <span class="o">&gt;=</span> <span class="n">other</span><span class="o">.</span><span class="n">_cmp_key</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="ContributorRef">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.ContributorRef">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">ContributorRef</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Reference to a contributing child derived from a base sample.</span>
+
+<span class="sd">    ``cursor`` pinpoints the base offset and lineage; ``is_last_child=True``</span>
+<span class="sd">    denotes the sole contributor (or tombstone) that closes that base offset for</span>
+<span class="sd">    eviction purposes.</span>
+<span class="sd">    """</span>
+
+    <span class="n">cursor</span><span class="p">:</span> <span class="n">SampleCursor</span>
+    <span class="n">is_last_child</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span></div>
+
+
+
+<div class="viewcode-block" id="SampleMeta">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleMeta">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">SampleMeta</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Lightweight metadata that uniquely identifies a sample in a shard.</span>
+
+<span class="sd">    ``lineage`` tracks the deterministic position of this record after any fan-out.</span>
+<span class="sd">    Operators that split inputs must call :meth:`child` in the order elements are</span>
+<span class="sd">    emitted so downstream consumers observe an ordering identical to the</span>
+<span class="sd">    single-threaded execution semantics enforced by the runner.</span>
+
+<span class="sd">    Contributor and tombstone flags are stored inside ``tags`` under</span>
+<span class="sd">    ``"_contributors"`` and ``"_tombstone"`` because in simple pipelines</span>
+<span class="sd">    (notify_monotone path) that increases the IPC overhead since the</span>
+<span class="sd">    public schema grows.</span>
+
+<span class="sd">    Component Contribution Tracking</span>
+<span class="sd">    -------------------------------</span>
+<span class="sd">    Samples track which mixture components they contain via two fields:</span>
+
+<span class="sd">    ``component_sample_counts``: Maps component_id -&gt; number of original samples</span>
+<span class="sd">    from that component. For a regular sample this is ``{cid: 1}``. For a packed</span>
+<span class="sd">    sample combining 3 from component 0 and 2 from component 1: ``{0: 3, 1: 2}``.</span>
+
+<span class="sd">    ``component_token_counts``: Maps component_id -&gt; token count from that component.</span>
+<span class="sd">    None until packing occurs after tokenization. When packing tokenized samples,</span>
+<span class="sd">    captures tokens per component, e.g., ``{0: 300, 1: 200}``.</span>
+
+<span class="sd">    This design supports ensure_mixture tracking per-component contributions:</span>
+
+<span class="sd">    - ``weight="samples"``: use ``component_sample_counts`` directly</span>
+<span class="sd">    - ``weight="tokens"``: use ``component_token_counts`` if set, else distribute</span>
+<span class="sd">      total token count proportionally by ``component_sample_counts``</span>
+
+<span class="sd">    The separation allows packing before or after tokenization:</span>
+
+<span class="sd">    - Pack before tokenize: only sample counts known at pack time</span>
+<span class="sd">    - Pack after tokenize: both sample and token counts computed at pack time</span>
+<span class="sd">    """</span>
+
+    <span class="n">sample_id</span><span class="p">:</span> <span class="n">SampleId</span>
+    <span class="n">lane_id</span><span class="p">:</span> <span class="n">LaneId</span>
+    <span class="n">chunk_id</span><span class="p">:</span> <span class="n">ChunkId</span>
+    <span class="n">chunk_offset</span><span class="p">:</span> <span class="n">ChunkOffset</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">component_sample_counts</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="k">lambda</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="mi">1</span><span class="p">})</span>
+    <span class="n">component_token_counts</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">lineage</span><span class="p">:</span> <span class="n">LineagePath</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">tuple</span><span class="p">)</span>
+    <span class="n">tags</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">dict</span><span class="p">)</span>
+
+<div class="viewcode-block" id="SampleMeta.with_lineage">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleMeta.with_lineage">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">with_lineage</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">|</span> <span class="n">LineagePath</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"SampleMeta"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return a new ``SampleMeta`` where the lineage is replaced by ``path``."""</span>
+        <span class="n">normalized</span> <span class="o">=</span> <span class="n">_normalize_lineage</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">normalized</span> <span class="ow">is</span> <span class="bp">self</span><span class="o">.</span><span class="n">lineage</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span>
+        <span class="k">return</span> <span class="n">replace</span><span class="p">(</span>
+            <span class="bp">self</span><span class="p">,</span>
+            <span class="n">lineage</span><span class="o">=</span><span class="n">normalized</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="SampleMeta.child">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleMeta.child">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">child</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">:</span> <span class="n">LineageIndex</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"SampleMeta"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return metadata for the ``index``-th child emitted from this sample."""</span>
+        <span class="k">return</span> <span class="n">replace</span><span class="p">(</span>
+            <span class="bp">self</span><span class="p">,</span>
+            <span class="n">lineage</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">lineage</span> <span class="o">+</span> <span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">index</span><span class="p">),),</span>
+        <span class="p">)</span></div>
+
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">cursor</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SampleCursor</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return a ``SampleCursor`` ordering key for this metadata."""</span>
+        <span class="k">return</span> <span class="n">SampleCursor</span><span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">chunk_id</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">chunk_offset</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">sample_id</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">lineage</span>
+        <span class="p">)</span>
+
+<div class="viewcode-block" id="SampleMeta.as_cursor_key">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleMeta.as_cursor_key">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">as_cursor_key</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SampleCursorKey</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Convenience helper returning the tuple form used for persistence."""</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">cursor</span><span class="o">.</span><span class="n">as_key</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="SampleMeta.contribution_refs">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleMeta.contribution_refs">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">contribution_refs</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ContributorRef</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Return contributor references used for eviction/progress.</span>
+
+<span class="sd">        Operators that don't set ``contributors`` (1:1 outputs) are treated as emitting</span>
+<span class="sd">        a single contributor with ``is_last_child=True`` using their own cursor.</span>
+<span class="sd">        """</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">contributors</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">contributors</span>
+        <span class="k">return</span> <span class="p">(</span><span class="n">ContributorRef</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">cursor</span><span class="p">,</span> <span class="kc">True</span><span class="p">),)</span></div>
+
+
+<div class="viewcode-block" id="SampleMeta.contribution_cursors">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleMeta.contribution_cursors">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">contribution_cursors</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">SampleCursor</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Return the cursors for all contributors."""</span>
+        <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">ref</span><span class="o">.</span><span class="n">cursor</span> <span class="k">for</span> <span class="n">ref</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">contribution_refs</span><span class="p">())</span></div>
+
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">contributors</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ContributorRef</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+        <span class="n">val</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"_contributors"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">val</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">()</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">val</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">val</span>
+        <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">val</span><span class="p">)</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">tombstone</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"_tombstone"</span><span class="p">,</span> <span class="kc">False</span><span class="p">))</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_sentinel</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""True for tombstones, flush sentinels, and end-of-data (EOD) sentinels."""</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"_tombstone"</span><span class="p">)</span>
+            <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"_flush_sentinel"</span><span class="p">)</span>
+            <span class="ow">or</span> <span class="s2">"_source_exhausted"</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">tags</span>
+        <span class="p">)</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_flush_sentinel</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""True if this record is a flush sentinel (triggers accumulator flush)."""</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"_flush_sentinel"</span><span class="p">,</span> <span class="kc">False</span><span class="p">))</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">padding_length</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Trailing pad-token count of a flat ``pack_flat`` record, else ``None``."""</span>
+        <span class="n">packing</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"_packing_metadata"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">packing</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="k">return</span> <span class="n">packing</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"padding_length"</span><span class="p">)</span>
+
+<div class="viewcode-block" id="SampleMeta.with_contributors">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleMeta.with_contributors">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">with_contributors</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="n">ContributorRef</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"SampleMeta"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return a new ``SampleMeta`` with contributors set/cleared in tags."""</span>
+        <span class="n">tags</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tags</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">value</span><span class="p">:</span>
+            <span class="n">tags</span><span class="p">[</span><span class="s2">"_contributors"</span><span class="p">]</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">tags</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">"_contributors"</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">replace</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="n">tags</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="SampleMeta.with_tombstone">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleMeta.with_tombstone">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">with_tombstone</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"SampleMeta"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return a new ``SampleMeta`` with tombstone marker set/cleared in tags."""</span>
+        <span class="n">tags</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tags</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">value</span><span class="p">:</span>
+            <span class="n">tags</span><span class="p">[</span><span class="s2">"_tombstone"</span><span class="p">]</span> <span class="o">=</span> <span class="kc">True</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">tags</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">"_tombstone"</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">replace</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="n">tags</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="SampleRecord">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleRecord">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">SampleRecord</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Sample payload bundled with its metadata for transport through stages."""</span>
+
+    <span class="n">meta</span><span class="p">:</span> <span class="n">SampleMeta</span>
+    <span class="n">payload</span><span class="p">:</span> <span class="s2">"SamplePayload"</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_rename_and_exclude_fields</span><span class="p">(</span>
+    <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+    <span class="n">rename_fields</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">exclude_fields</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">allow_missing_sources</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Rename emitted fields, rejecting collisions before applying exclusions."""</span>
+    <span class="k">if</span> <span class="n">rename_fields</span><span class="p">:</span>
+        <span class="n">missing</span> <span class="o">=</span> <span class="p">[</span><span class="n">key</span> <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">rename_fields</span> <span class="k">if</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">result</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">missing</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">allow_missing_sources</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"rename_fields source keys not in output: </span><span class="si">{</span><span class="n">missing</span><span class="si">}</span><span class="s2">; "</span>
+                <span class="o">+</span> <span class="sa">f</span><span class="s2">"emitted keys: </span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">result</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span>
+            <span class="p">)</span>
+        <span class="c1"># Count final names of emitted fields, so swaps are allowed and missing</span>
+        <span class="c1"># sources cannot introduce collisions in an empty batch.</span>
+        <span class="n">target_counts</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">(</span><span class="n">rename_fields</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span> <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">result</span><span class="p">)</span>
+        <span class="n">collisions</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">key</span> <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">count</span> <span class="ow">in</span> <span class="n">target_counts</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">count</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">collisions</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"rename_fields target keys collide: </span><span class="si">{</span><span class="n">collisions</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="p">{</span><span class="n">rename_fields</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">key</span><span class="p">):</span> <span class="n">value</span> <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+
+    <span class="k">for</span> <span class="n">field_name</span> <span class="ow">in</span> <span class="n">exclude_fields</span><span class="p">:</span>
+        <span class="n">result</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">field_name</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span>
+
+
+<div class="viewcode-block" id="SampleBatch">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleBatch">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">SampleBatch</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""A batch of SampleRecord."""</span>
+
+    <span class="n">records</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">SampleRecord</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+
+    <span class="c1"># Eagerly computed (hot path) — direct slot access, zero cost after init.</span>
+    <span class="n">lane_ids</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">LaneId</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">compare</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="n">chunk_ids</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ChunkId</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">compare</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+
+    <span class="c1"># Lazily computed (cold path) — only built on first access.</span>
+    <span class="n">_ids</span><span class="p">:</span> <span class="s2">"tuple[SampleId, ...] | None"</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span>
+        <span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">compare</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">_lineage_paths</span><span class="p">:</span> <span class="s2">"tuple[LineagePath, ...] | None"</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span>
+        <span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">compare</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">lane_ids</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">lane_id</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">records</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">chunk_ids</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">chunk_id</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">records</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">records</span><span class="p">)</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">ids</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">SampleId</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ids</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_ids</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">sample_id</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">records</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ids</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">lineage_paths</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">LineagePath</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lineage_paths</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_lineage_paths</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">lineage</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">records</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lineage_paths</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_extract_from_dicts</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">values</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+        <span class="n">tokens_field</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="n">extra_fields</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]],</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Extract tokens, texts, extra fields, and loss masks from dict payloads."""</span>
+        <span class="n">payloads</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">SamplePayloadDict</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">texts</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">payload</span> <span class="ow">in</span> <span class="n">values</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Expected dict payload, got: </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+            <span class="n">payloads</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+            <span class="n">texts</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">payload</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"text"</span><span class="p">,</span> <span class="s2">""</span><span class="p">)))</span>
+
+        <span class="c1"># Resolve tokens_field if "auto"</span>
+        <span class="n">resolved_tokens_field</span> <span class="o">=</span> <span class="n">tokens_field</span>
+        <span class="k">if</span> <span class="n">tokens_field</span> <span class="o">==</span> <span class="s2">"auto"</span><span class="p">:</span>
+            <span class="n">resolved_tokens_field</span> <span class="o">=</span> <span class="n">_detect_length_field</span><span class="p">(</span><span class="n">payloads</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+            <span class="k">if</span> <span class="n">resolved_tokens_field</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">"Cannot auto-detect tokens field. Payload keys: "</span>
+                    <span class="o">+</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">payloads</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">keys</span><span class="p">())</span><span class="si">}</span><span class="s2">. Expected one of: "</span>
+                    <span class="o">+</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">_TOKEN_FIELD_CANDIDATES</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span>
+                <span class="p">)</span>
+
+        <span class="c1"># Validate tokens_field exists in all payloads</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">payload</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">payloads</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">resolved_tokens_field</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">payload</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">"Field '</span><span class="si">{</span><span class="n">resolved_tokens_field</span><span class="si">}</span><span class="s2">' not found in payload at index </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">"</span>
+                <span class="p">)</span>
+
+        <span class="c1"># Extract tokens</span>
+        <span class="n">token_lists</span> <span class="o">=</span> <span class="p">[</span><span class="n">payload</span><span class="p">[</span><span class="n">resolved_tokens_field</span><span class="p">]</span> <span class="k">for</span> <span class="n">payload</span> <span class="ow">in</span> <span class="n">payloads</span><span class="p">]</span>
+
+        <span class="c1"># Handle extra fields</span>
+        <span class="n">extra_data</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">field_name</span> <span class="ow">in</span> <span class="n">extra_fields</span><span class="p">:</span>
+            <span class="c1"># Check field exists in all payloads</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">payload</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">payloads</span><span class="p">):</span>
+                <span class="k">if</span> <span class="n">field_name</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">payload</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">"Extra field '</span><span class="si">{</span><span class="n">field_name</span><span class="si">}</span><span class="s2">' not found in payload at index </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">"</span>
+                    <span class="p">)</span>
+            <span class="n">extra_data</span><span class="p">[</span><span class="n">field_name</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">payload</span><span class="p">[</span><span class="n">field_name</span><span class="p">]</span> <span class="k">for</span> <span class="n">payload</span> <span class="ow">in</span> <span class="n">payloads</span><span class="p">]</span>
+
+        <span class="c1"># Auto-surface the packing 'positions' field (document boundaries from</span>
+        <span class="c1"># pack_flat) so callers don't have to thread it through extra_fields.</span>
+        <span class="k">if</span> <span class="s2">"positions"</span> <span class="ow">in</span> <span class="n">payloads</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="ow">and</span> <span class="s2">"positions"</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">extra_data</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">payload</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">payloads</span><span class="p">):</span>
+                <span class="k">if</span> <span class="s2">"positions"</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">payload</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">"'positions' present in some payloads but missing at index </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">"</span>
+                    <span class="p">)</span>
+            <span class="n">extra_data</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">payload</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">]</span> <span class="k">for</span> <span class="n">payload</span> <span class="ow">in</span> <span class="n">payloads</span><span class="p">]</span>
+
+        <span class="n">loss_mask_lists</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="s2">"loss_mask"</span> <span class="ow">in</span> <span class="n">payloads</span><span class="p">[</span><span class="mi">0</span><span class="p">]:</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">payload</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">payloads</span><span class="p">):</span>
+                <span class="k">if</span> <span class="s2">"loss_mask"</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">payload</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">"'loss_mask' present in some payloads but missing at index </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">"</span>
+                    <span class="p">)</span>
+                <span class="n">mask_val</span> <span class="o">=</span> <span class="n">payload</span><span class="p">[</span><span class="s2">"loss_mask"</span><span class="p">]</span>
+                <span class="n">tokens_val</span> <span class="o">=</span> <span class="n">token_lists</span><span class="p">[</span><span class="n">i</span><span class="p">]</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">mask_val</span><span class="p">,</span> <span class="n">Sized</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tokens_val</span><span class="p">,</span> <span class="n">Sized</span><span class="p">):</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">"'loss_mask' and '</span><span class="si">{</span><span class="n">resolved_tokens_field</span><span class="si">}</span><span class="s2">' must be "</span>
+                        <span class="o">+</span> <span class="sa">f</span><span class="s2">"sequences at index </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">"</span>
+                    <span class="p">)</span>
+                <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">mask_val</span><span class="p">)</span> <span class="o">!=</span> <span class="nb">len</span><span class="p">(</span><span class="n">tokens_val</span><span class="p">):</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">"'loss_mask' length </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">mask_val</span><span class="p">)</span><span class="si">}</span><span class="s2"> does not match "</span>
+                        <span class="o">+</span> <span class="sa">f</span><span class="s2">"'</span><span class="si">{</span><span class="n">resolved_tokens_field</span><span class="si">}</span><span class="s2">' length </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">tokens_val</span><span class="p">)</span><span class="si">}</span><span class="s2"> "</span>
+                        <span class="o">+</span> <span class="sa">f</span><span class="s2">"at index </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">"</span>
+                    <span class="p">)</span>
+            <span class="n">loss_mask_lists</span> <span class="o">=</span> <span class="p">[</span><span class="n">payload</span><span class="p">[</span><span class="s2">"loss_mask"</span><span class="p">]</span> <span class="k">for</span> <span class="n">payload</span> <span class="ow">in</span> <span class="n">payloads</span><span class="p">]</span>
+
+        <span class="k">return</span> <span class="n">token_lists</span><span class="p">,</span> <span class="n">texts</span><span class="p">,</span> <span class="n">extra_data</span><span class="p">,</span> <span class="n">loss_mask_lists</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_extract_from_arrays</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">SampleRecord</span><span class="p">],</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]],</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Extract tokens from array payloads (numpy/torch tensors)."""</span>
+        <span class="n">payloads</span> <span class="o">=</span> <span class="p">[</span><span class="n">r</span><span class="o">.</span><span class="n">payload</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">items</span><span class="p">]</span>
+
+        <span class="c1"># Validate all payloads are array-like (have shape attr) not strings/bytes</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">p</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">payloads</span><span class="p">):</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span>
+                    <span class="s2">"SampleBatch.to_training: mixed payload types at index "</span>
+                    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2"> (expected all arrays, got dict)"</span>
+                <span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="s2">"shape"</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span>
+                    <span class="s2">"SampleBatch.to_training expects dict or array-like "</span>
+                    <span class="s2">"(numpy/torch) payloads"</span>
+                <span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">payloads</span><span class="p">,</span> <span class="p">[</span><span class="s2">""</span><span class="p">]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">items</span><span class="p">),</span> <span class="p">{},</span> <span class="kc">None</span>
+
+<div class="viewcode-block" id="SampleBatch.to_training">
+<a class="viewcode-back" href="../../api/records.html#zephon.types.SampleBatch.to_training">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">to_training</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">tokens_field</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"auto"</span><span class="p">,</span>
+        <span class="n">return_labels</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">dtype</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="s2">"auto"</span><span class="p">,</span>
+        <span class="n">extra_fields</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">(),</span>
+        <span class="n">ignore_index</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="o">-</span><span class="mi">100</span><span class="p">,</span>
+        <span class="n">rename_fields</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">flatten</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">exclude_fields</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">(),</span>
+        <span class="n">return_num_valid_tokens</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">return_loss_mask</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">return_cu_seqlens</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">return_document_ids</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">return_padding_mask</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">eos_mask_loss</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">eos_token_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">position_mode</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">"preserve"</span><span class="p">,</span> <span class="s2">"sequence"</span><span class="p">]</span> <span class="o">=</span> <span class="s2">"preserve"</span><span class="p">,</span>
+        <span class="n">pad_to_length</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">pad_token_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">mask_segment_starts</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">field_collators</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">FieldCollator</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Convert batch to training-ready format with optional LM label generation.</span>
+
+<span class="sd">        Supports individual token sequences, ``pack_flat`` output, and</span>
+<span class="sd">        ``pack_sequences`` output merged by a ``pack_payloads`` callback. That</span>
+<span class="sd">        callback must return a dictionary containing one concatenated token</span>
+<span class="sd">        sequence per pack. To request document-boundary outputs or boundary loss</span>
+<span class="sd">        masking, also supply scalar ``positions`` starting at zero in each</span>
+<span class="sd">        subdocument.</span>
+
+<span class="sd">        A ``"loss_mask"`` payload field (a per-token supervised-vs-not mask,</span>
+<span class="sd">        e.g. from chat-template tokenization) is recognized automatically, like</span>
+<span class="sd">        ``"positions"``. With ``return_labels=True`` it is consumed: labels</span>
+<span class="sd">        whose mask entry (shifted into label alignment, ``mask[:, 1:]``) is 0</span>
+<span class="sd">        are set to ``ignore_index``. Set ``return_loss_mask=True`` to emit the</span>
+<span class="sd">        final label-aligned mask, derived as ``labels != ignore_index`` after</span>
+<span class="sd">        supervision, padding, and optional EOS masking. Listing ``"loss_mask"`` in</span>
+<span class="sd">        ``extra_fields`` together with ``return_labels`` is an error: extra</span>
+<span class="sd">        fields are sliced input-aligned (``[:, :-1]``), the wrong alignment for</span>
+<span class="sd">        a label mask. Without ``return_labels`` it is surfaced stacked and</span>
+<span class="sd">        unshifted, like any data field.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            tokens_field: Field name containing token IDs. "auto" detects</span>
+<span class="sd">                common names (input_ids, tokens, token_ids, ids), in that order.</span>
+<span class="sd">                An explicit field takes precedence. Independent of EOS masking;</span>
+<span class="sd">                output uses "input_ids" before rename_fields.</span>
+<span class="sd">            return_labels: If True, generates next-token prediction labels by</span>
+<span class="sd">                shifting tokens. input_ids becomes tokens[:, :-1] and labels</span>
+<span class="sd">                becomes tokens[:, 1:]. Extra fields are sliced like input_ids</span>
+<span class="sd">                (drop the last token), so they stay aligned with it.</span>
+<span class="sd">            dtype: Tensor dtype for stacking. Use "auto" to detect (prefers</span>
+<span class="sd">                torch.long if available, else np.int64, else returns lists).</span>
+<span class="sd">                Use None to explicitly return lists instead of tensors. This</span>
+<span class="sd">                preserves scalar types in input sequences and padding tails;</span>
+<span class="sd">                NumPy scalars are not recursively converted to Python scalars.</span>
+<span class="sd">                A requested loss mask always uses float32 (Python floats for</span>
+<span class="sd">                lists), independently of this dtype. Requested cumulative</span>
+<span class="sd">                sequence lengths and per-row maxima use int32 (Python ints for</span>
+<span class="sd">                lists). With flatten=True, the maximum is always a Python int.</span>
+<span class="sd">            extra_fields: Additional fields to include and stack (e.g.,</span>
+<span class="sd">                ["attention_mask"]). When return_labels=True they are sliced like</span>
+<span class="sd">                input_ids (drop the last token) to stay aligned with it. A</span>
+<span class="sd">                ``"positions"`` field (emitted by ``pack_flat``) is surfaced</span>
+<span class="sd">                automatically and need not be listed here. Extra fields cannot</span>
+<span class="sd">                overwrite generated output fields, such as input_ids or labels.</span>
+<span class="sd">            pad_to_length: Optional fixed token length before next-token shifting.</span>
+<span class="sd">                Right-pad shorter documents to this length; reject longer ones.</span>
+<span class="sd">                This supports unequal-length documents that were not already</span>
+<span class="sd">                padded by pack_flat. With return_labels=True, input_ids and</span>
+<span class="sd">                labels each have pad_to_length - 1 tokens.</span>
+<span class="sd">                Tokens use pad_token_id, ordinary token-aligned extra fields and</span>
+<span class="sd">                supervision use zero, and positions start a separate padding</span>
+<span class="sd">                segment. Padding and loss masks account for both existing padding</span>
+<span class="sd">                and padding added here. With None, add no padding:</span>
+<span class="sd">                tensor/array output requires stackable lengths, while dtype=None</span>
+<span class="sd">                returns lists that may have different lengths.</span>
+<span class="sd">                Already padded pack_flat output is supported: an equal target</span>
+<span class="sd">                adds nothing, a larger target extends its padding, and a smaller</span>
+<span class="sd">                target raises even if it would only remove existing padding.</span>
+<span class="sd">            pad_token_id: Nonnegative padding token ID required with pad_to_length.</span>
+<span class="sd">                May equal EOS: padding is identified by length, never token ID.</span>
+<span class="sd">            mask_segment_starts: Exclude the prediction from the last token of</span>
+<span class="sd">                one packed subdocument to the first token of the next. For</span>
+<span class="sd">                tokens [a1, a2, b1, b2] with positions [0, 1, 0, 1], generated</span>
+<span class="sd">                labels [a2, b1, b2] become [a2, ignore_index, b2]. This is useful</span>
+<span class="sd">                when unrelated documents should not contribute boundary targets.</span>
+<span class="sd">                Defaults to False, leaving those predictions supervised unless</span>
+<span class="sd">                another mask excludes them. Requires return_labels=True and</span>
+<span class="sd">                scalar payload positions that start at zero in each subdocument.</span>
+<span class="sd">                The first token in each packed input has no preceding target.</span>
+<span class="sd">                Existing supervision/padding masks still apply. This option does</span>
+<span class="sd">                not change attention or model positions.</span>
+<span class="sd">                Unlike eos_mask_loss, it also works without EOS and does not mask</span>
+<span class="sd">                predictions after BOS when BOS and EOS share an ID. When both</span>
+<span class="sd">                options are enabled, their loss exclusions are combined.</span>
+<span class="sd">            field_collators: Optional field-name to callable mapping. Each callable</span>
+<span class="sd">                receives ordered values and keyword-only length and shifted, once</span>
+<span class="sd">                per batch. Values are the original unpadded field values;</span>
+<span class="sd">                length is the token length before next-token shifting: either</span>
+<span class="sd">                pad_to_length or the common token length when padding is omitted.</span>
+<span class="sd">                shifted is return_labels. Without pad_to_length, all documents</span>
+<span class="sd">                must have equal token lengths when using callbacks.</span>
+<span class="sd">                Its result is emitted under that field's</span>
+<span class="sd">                name without dtype conversion, token slicing or flattening.</span>
+<span class="sd">                rename_fields/exclude_fields still apply. Fields are included</span>
+<span class="sd">                automatically and must exist in every payload. Callbacks own</span>
+<span class="sd">                media concatenation or model-position padding/slicing/stacking;</span>
+<span class="sd">                they must be deterministic, stateless and must not mutate inputs.</span>
+<span class="sd">                Generated/reserved fields cannot be overridden. Empty batches</span>
+<span class="sd">                call each callback with empty values and length=pad_to_length or</span>
+<span class="sd">                zero. Callbacks must return their empty result or raise a clear</span>
+<span class="sd">                ValueError when they do not support empty batches.</span>
+<span class="sd">            ignore_index: Loss-ignore sentinel (default ``-100``). With</span>
+<span class="sd">                ``return_labels``, each record's trailing pad labels</span>
+<span class="sd">                (``meta.padding_length``) are set to this value.</span>
+<span class="sd">            rename_fields: Optional ``{emitted_key: new_key}`` mapping applied to</span>
+<span class="sd">                the output dict before exclusion (e.g. ``{"input_ids":</span>
+<span class="sd">                "input"}``). Source keys must be present in the output, except</span>
+<span class="sd">                for empty batches, where missing sources are ignored. All</span>
+<span class="sd">                emitted fields are renamed, including for empty batches, and</span>
+<span class="sd">                their final names must be unique. Swaps are allowed.</span>
+<span class="sd">            flatten: Flatten stacked scalar token fields from ``[B, S]`` to</span>
+<span class="sd">                ``[B * S]`` after per-sequence shifting and masking. The ids/texts</span>
+<span class="sd">                fields remain per-record lists.</span>
+<span class="sd">            exclude_fields: Output names to omit after renaming, e.g.</span>
+<span class="sd">                ``("ids", "texts")``. Absent names are ignored.</span>
+<span class="sd">            return_num_valid_tokens: Include a Python int counting labels unequal</span>
+<span class="sd">                to ignore_index after masking (zero for empty batches). Requires</span>
+<span class="sd">                return_labels=True.</span>
+<span class="sd">            return_loss_mask: Include a label-aligned "loss_mask" with 1.0 for</span>
+<span class="sd">                non-ignored labels and 0.0 otherwise. Requires return_labels=True.</span>
+<span class="sd">                Uses float32 for tensors/arrays, Python floats for lists, and</span>
+<span class="sd">                an empty list for empty batches. Follows flatten, rename_fields,</span>
+<span class="sd">                and exclude_fields like other sequence fields.</span>
+<span class="sd">            return_padding_mask: Include a boolean input-aligned "padding_mask",</span>
+<span class="sd">                True only for trailing padding described by each record's</span>
+<span class="sd">                ``meta.padding_length`` plus padding added by pad_to_length</span>
+<span class="sd">                (missing metadata means no pre-existing padding).</span>
+<span class="sd">                Uses bool tensors/arrays or Python bools for lists. With labels,</span>
+<span class="sd">                drops the last token like input_ids; then follows flatten,</span>
+<span class="sd">                rename_fields, and exclude_fields. Independent of loss_mask:</span>
+<span class="sd">                real unsupervised tokens are not padding. Requires 2-D scalar</span>
+<span class="sd">                token rows for tensor/array output. Empty batches return [].</span>
+<span class="sd">                Does not infer padding from token IDs or ignore_index.</span>
+<span class="sd">            return_cu_seqlens: Include "cu_seqlens" and "max_seqlen" derived</span>
+<span class="sd">                from zeros in input-aligned "positions". Requires a positions</span>
+<span class="sd">                sequence matching the tokens in every payload, starting at zero</span>
+<span class="sd">                in every nonempty input row. With flatten=False, boundaries</span>
+<span class="sd">                have shape [B, K], where K is the largest boundary count in the</span>
+<span class="sd">                batch, padded with each row's input length. Maxima have shape [B].</span>
+<span class="sd">                With flatten=True, boundaries are one compact cumulative sequence</span>
+<span class="sd">                across the batch, ending at the total input length, and the</span>
+<span class="sd">                maximum is a Python int. Boundaries and per-row maxima use int32</span>
+<span class="sd">                for tensors/arrays, Python ints for lists. Empty batches return</span>
+<span class="sd">                []/[] for boundaries/maxima, or [0]/0 when flattened. Renaming</span>
+<span class="sd">                and exclusion apply normally. Padding segments are preserved;</span>
+<span class="sd">                this metadata does not itself enable attention masking or</span>
+<span class="sd">                change labels. Always uses the payload positions, independently</span>
+<span class="sd">                of position_mode. Works with or without return_labels.</span>
+<span class="sd">            return_document_ids: Include "document_ids", an input-aligned</span>
+<span class="sd">                per-token subdocument membership map of shape [batch, sequence].</span>
+<span class="sd">                For positions [0, 1, 2, 0, 1], this emits IDs [1, 1, 1, 2, 2].</span>
+<span class="sd">                Positive IDs start at one in each packed document; zero marks</span>
+<span class="sd">                padding from metadata or pad_to_length, never inferred from token</span>
+<span class="sd">                IDs or supervision. Requires scalar payload "positions" that</span>
+<span class="sd">                reset to zero at subdocument starts. position_mode does not</span>
+<span class="sd">                affect document IDs. With flatten,</span>
+<span class="sd">                returns [tokens] with positive IDs unique across the batch.</span>
+<span class="sd">                Uses int64 for torch/numpy and Python ints for lists. Empty</span>
+<span class="sd">                batches return []. Follows shifting, renaming and exclusion.</span>
+<span class="sd">                Unlike "ids", which contains record identities, there is one</span>
+<span class="sd">                entry per token.</span>
+<span class="sd">            eos_mask_loss: If True, set labels to ignore_index wherever the</span>
+<span class="sd">                corresponding input token equals eos_token_id. Requires</span>
+<span class="sd">                return_labels=True and a known EOS ID (see eos_token_id). For packed</span>
+<span class="sd">                ``[BOS, A, EOS, BOS, B, EOS]``, this masks the EOS -&gt; BOS</span>
+<span class="sd">                prediction, not the A -&gt; EOS or B -&gt; EOS predictions. Requested</span>
+<span class="sd">                loss masks and valid-token counts reflect this masking, together</span>
+<span class="sd">                with padding and supervision masks.</span>
+
+<span class="sd">                Defaults to False to preserve existing label generation. For</span>
+<span class="sd">                documents bracketed with BOS and EOS, this keeps EOS -&gt; BOS</span>
+<span class="sd">                transitions supervised. Enable it when the training recipe</span>
+<span class="sd">                excludes predictions made from EOS tokens.</span>
+
+<span class="sd">                CAREFUL: matching is by token ID, not document boundaries. If</span>
+<span class="sd">                BOS and EOS share an ID, this also masks predictions after BOS,</span>
+<span class="sd">                including the first content token.</span>
+<span class="sd">            eos_token_id: Nonnegative EOS ID, required when eos_mask_loss=True.</span>
+<span class="sd">                Supplying an ID alone does not enable masking and warns when</span>
+<span class="sd">                eos_mask_loss=False.</span>
+<span class="sd">                Automatic EOS propagation is in progress; for now, account for</span>
+<span class="sd">                Zephon EOS overrides and tokenizer defaults when choosing the ID.</span>
+<span class="sd">            position_mode: How to emit model positions. "preserve" (default)</span>
+<span class="sd">                forwards payload positions, sliced like input_ids, and omits</span>
+<span class="sd">                them when absent. With pack_flat(emit_positions=True), these</span>
+<span class="sd">                restart at zero for each packed segment: two three-token</span>
+<span class="sd">                documents have positions ``[0, 1, 2, 0, 1, 2]``. Preserving them</span>
+<span class="sd">                keeps the packer's document structure and existing caller</span>
+<span class="sd">                behavior, and is a natural default for independent packed</span>
+<span class="sd">                examples. It does not itself prevent attention across documents.</span>
+
+<span class="sd">                "sequence" generates ``[0, 1, ..., S-1]`` in every input row,</span>
+<span class="sd">                including when payload positions are absent. The same example</span>
+<span class="sd">                becomes ``[0, 1, 2, 3, 4, 5]``. Use it for recipes that number a</span>
+<span class="sd">                packed row continuously. Numbering restarts per row even with</span>
+<span class="sd">                flatten=True. Generated positions use the input dtype/device;</span>
+<span class="sd">                empty batches return an empty list.</span>
+
+<span class="sd">                For reference, TorchTitan's packed-text loaders preserve</span>
+<span class="sd">                segment-reset positions by default, whereas Megatron gives the</span>
+<span class="sd">                user control via --reset-position-ids and defaults to continuous</span>
+<span class="sd">                positions.</span>
+
+<span class="sd">                Resetting is not required for standard RoPE correctness: with</span>
+<span class="sd">                fixed rotary frequencies and isolated documents, a common</span>
+<span class="sd">                position offset cancels from within-document attention scores.</span>
+<span class="sd">                These choices can change training with cross-document attention</span>
+<span class="sd">                or absolute position embeddings. They never change loss masking.</span>
+<span class="sd">                Requested cu_seqlens/max_seqlen still use the original payload</span>
+<span class="sd">                positions, so document boundaries survive continuous numbering;</span>
+<span class="sd">                those original positions are still required for this metadata.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Dictionary with:</span>
+<span class="sd">            - "ids": List of sample IDs (always list, not stacked)</span>
+<span class="sd">            - "texts": List of text strings (always list, not stacked)</span>
+<span class="sd">            - "input_ids": Stacked token tensor (shifted if return_labels=True)</span>
+<span class="sd">            - "labels": Shifted labels tensor (only if return_labels=True), with</span>
+<span class="sd">              each record's trailing pad labels and loss-masked positions set to</span>
+<span class="sd">              ignore_index</span>
+<span class="sd">            - "positions": Payload positions sliced to match input_ids, or</span>
+<span class="sd">              generated per-row positions when position_mode="sequence"</span>
+<span class="sd">            - Any extra_fields as stacked tensors (shifted if return_labels=True)</span>
+<span class="sd">            - "num_valid_tokens": Number of non-ignored labels (only if</span>
+<span class="sd">              return_num_valid_tokens=True)</span>
+<span class="sd">            - "loss_mask": Float mask of non-ignored labels if</span>
+<span class="sd">              return_loss_mask=True; otherwise the raw payload mask if present</span>
+<span class="sd">              and return_labels=False</span>
+<span class="sd">            - "cu_seqlens", "max_seqlen": Cumulative segment boundaries and</span>
+<span class="sd">              maximum segment lengths (only if return_cu_seqlens=True)</span>
+<span class="sd">            - "padding_mask": Boolean input padding mask (only if</span>
+<span class="sd">              return_padding_mask=True)</span>
+<span class="sd">            - "document_ids": Input-aligned subdocument membership (only if</span>
+<span class="sd">              return_document_ids=True), zero at padding</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            TypeError: If payloads are neither dicts nor arrays, or exclude_fields</span>
+<span class="sd">                is a string instead of a sequence of field names.</span>
+<span class="sd">            ValueError: If tokens_field cannot be auto-detected or is missing,</span>
+<span class="sd">                if a loss_mask is present in only some payloads or misaligned</span>
+<span class="sd">                with the token field, if "loss_mask" is listed in extra_fields</span>
+<span class="sd">                with return_labels=True, or if rename_fields references a</span>
+<span class="sd">                missing source key in a nonempty batch or produces a key collision.</span>
+<span class="sd">                Also if return_num_valid_tokens or return_loss_mask is used without</span>
+<span class="sd">                return_labels, or an extra field would overwrite a generated</span>
+<span class="sd">                output field. Also if requested padding lengths fall outside their</span>
+<span class="sd">                token rows or tokens are not 2-D for a tensor/array padding mask.</span>
+<span class="sd">                Also if requested boundaries cannot be derived from aligned,</span>
+<span class="sd">                zero-start positions or represented as int32, position_mode is</span>
+<span class="sd">                unknown, eos_token_id is not a nonnegative integer, or</span>
+<span class="sd">                eos_mask_loss is used without</span>
+<span class="sd">                return_labels=True or a known EOS ID.</span>
+
+<span class="sd">        Warns:</span>
+<span class="sd">            UserWarning: If eos_token_id is supplied with eos_mask_loss=False.</span>
+<span class="sd">        """</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">exclude_fields</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="s2">"exclude_fields must be a sequence of names, not a string"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">return_loss_mask</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">return_labels</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"return_loss_mask requires return_labels=True"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">return_padding_mask</span> <span class="ow">and</span> <span class="s2">"padding_mask"</span> <span class="ow">in</span> <span class="n">extra_fields</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">"extra_fields cannot include 'padding_mask' with return_padding_mask=True"</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="n">position_mode</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">"preserve"</span><span class="p">,</span> <span class="s2">"sequence"</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"position_mode must be 'preserve' or 'sequence'"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">eos_token_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="p">(</span>
+            <span class="nb">isinstance</span><span class="p">(</span><span class="n">eos_token_id</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span>
+            <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">eos_token_id</span><span class="p">,</span> <span class="n">Integral</span><span class="p">)</span>
+            <span class="ow">or</span> <span class="n">eos_token_id</span> <span class="o">&lt;</span> <span class="mi">0</span>
+        <span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"eos_token_id must be a nonnegative integer or None"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">eos_mask_loss</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">return_labels</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"eos_mask_loss requires return_labels=True"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">eos_mask_loss</span> <span class="ow">and</span> <span class="n">eos_token_id</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"eos_mask_loss requires an explicit eos_token_id"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">eos_token_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">eos_mask_loss</span><span class="p">:</span>
+            <span class="n">warnings</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span>
+                <span class="s2">"eos_token_id is ignored when eos_mask_loss=False; "</span>
+                <span class="o">+</span> <span class="s2">"set eos_mask_loss=True to enable EOS loss masking."</span><span class="p">,</span>
+                <span class="ne">UserWarning</span><span class="p">,</span>
+                <span class="n">stacklevel</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="n">return_cu_seqlens</span> <span class="ow">and</span> <span class="p">{</span><span class="s2">"cu_seqlens"</span><span class="p">,</span> <span class="s2">"max_seqlen"</span><span class="p">}</span><span class="o">.</span><span class="n">intersection</span><span class="p">(</span>
+            <span class="n">extra_fields</span>
+        <span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">"extra_fields cannot include 'cu_seqlens' or 'max_seqlen' "</span>
+                <span class="o">+</span> <span class="s2">"with return_cu_seqlens=True"</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="n">return_document_ids</span> <span class="ow">and</span> <span class="s2">"document_ids"</span> <span class="ow">in</span> <span class="n">extra_fields</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">"extra_fields cannot include 'document_ids' with return_document_ids=True"</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="n">return_num_valid_tokens</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">return_labels</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"return_num_valid_tokens requires return_labels=True"</span><span class="p">)</span>
+            <span class="k">if</span> <span class="s2">"num_valid_tokens"</span> <span class="ow">in</span> <span class="n">extra_fields</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="s2">"extra_fields cannot include 'num_valid_tokens' "</span>
+                    <span class="o">+</span> <span class="s2">"with return_num_valid_tokens=True"</span>
+                <span class="p">)</span>
+        <span class="k">if</span> <span class="n">return_labels</span> <span class="ow">and</span> <span class="s2">"loss_mask"</span> <span class="ow">in</span> <span class="n">extra_fields</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">"extra_fields cannot include 'loss_mask' with return_labels=True: "</span>
+                <span class="o">+</span> <span class="s2">"extra fields are input-aligned, not label-aligned. Use "</span>
+                <span class="o">+</span> <span class="s2">"return_loss_mask=True for the label-aligned mask, or "</span>
+                <span class="o">+</span> <span class="s2">"return_labels=False for the raw mask."</span>
+            <span class="p">)</span>
+        <span class="n">items</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">records</span><span class="p">)</span>
+        <span class="n">payloads</span> <span class="o">=</span> <span class="p">[</span><span class="n">record</span><span class="o">.</span><span class="n">payload</span> <span class="k">for</span> <span class="n">record</span> <span class="ow">in</span> <span class="n">items</span><span class="p">]</span>
+        <span class="k">for</span> <span class="n">index</span><span class="p">,</span> <span class="n">payload</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">payloads</span><span class="p">):</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">and</span> <span class="s2">"packed_samples"</span> <span class="ow">in</span> <span class="n">payload</span><span class="p">:</span>
+                <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="s2">"Ambiguous pack_sequences envelope: 'packed_samples' must "</span>
+                        <span class="o">+</span> <span class="s2">"be the only outer field; put merged token/media fields inside it"</span>
+                    <span class="p">)</span>
+                <span class="n">merged</span> <span class="o">=</span> <span class="n">payload</span><span class="p">[</span><span class="s2">"packed_samples"</span><span class="p">]</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">merged</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="s2">"to_training requires a merged token mapping inside "</span>
+                        <span class="o">+</span> <span class="s2">"'packed_samples'; provide pack_sequences(pack_payloads=...) "</span>
+                        <span class="o">+</span> <span class="s2">"to concatenate subdocuments and retain scalar boundary positions. "</span>
+                        <span class="o">+</span> <span class="s2">"pad_to_length and flatten do not merge subdocuments"</span>
+                    <span class="p">)</span>
+                <span class="n">payloads</span><span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">=</span> <span class="n">merged</span>
+        <span class="n">resolved_tokens_field</span> <span class="o">=</span> <span class="n">tokens_field</span>
+        <span class="k">if</span> <span class="n">payloads</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">payloads</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">and</span> <span class="n">tokens_field</span> <span class="o">==</span> <span class="s2">"auto"</span><span class="p">:</span>
+            <span class="n">resolved_tokens_field</span> <span class="o">=</span> <span class="n">_detect_length_field</span><span class="p">(</span><span class="n">payloads</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="ow">or</span> <span class="s2">"auto"</span>
+        <span class="n">collators</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">field_collators</span> <span class="ow">or</span> <span class="p">{})</span>
+        <span class="n">overlap</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">collators</span><span class="p">)</span><span class="o">.</span><span class="n">intersection</span><span class="p">(</span><span class="n">extra_fields</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">overlap</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"field_collators and extra_fields overlap: </span><span class="si">{</span><span class="nb">sorted</span><span class="p">(</span><span class="n">overlap</span><span class="p">)</span><span class="si">!r}</span><span class="s2">"</span>
+            <span class="p">)</span>
+        <span class="n">reserved_fields</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">"ids"</span><span class="p">,</span>
+            <span class="s2">"texts"</span><span class="p">,</span>
+            <span class="s2">"input_ids"</span><span class="p">,</span>
+            <span class="s2">"labels"</span><span class="p">,</span>
+            <span class="s2">"positions"</span><span class="p">,</span>
+            <span class="s2">"loss_mask"</span><span class="p">,</span>
+            <span class="s2">"padding_mask"</span><span class="p">,</span>
+            <span class="s2">"cu_seqlens"</span><span class="p">,</span>
+            <span class="s2">"max_seqlen"</span><span class="p">,</span>
+            <span class="s2">"num_valid_tokens"</span><span class="p">,</span>
+            <span class="s2">"document_ids"</span><span class="p">,</span>
+        <span class="p">}</span>
+        <span class="n">reserved_fields</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">resolved_tokens_field</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">collator</span> <span class="ow">in</span> <span class="n">collators</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">name</span> <span class="ow">or</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">reserved_fields</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">"field_collators cannot override reserved field </span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2">"</span>
+                <span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">callable</span><span class="p">(</span><span class="n">collator</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"field_collators[</span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2">] must be callable"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">if</span> <span class="p">(</span>
+                <span class="nb">isinstance</span><span class="p">(</span><span class="n">pad_to_length</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span>
+                <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">pad_to_length</span><span class="p">,</span> <span class="n">Integral</span><span class="p">)</span>
+                <span class="ow">or</span> <span class="n">pad_to_length</span> <span class="o">&lt;</span> <span class="mi">0</span>
+            <span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"pad_to_length must be a nonnegative integer or None"</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">pad_token_id</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"pad_to_length requires pad_token_id"</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="n">pad_token_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"pad_token_id requires pad_to_length"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">pad_token_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="p">(</span>
+            <span class="nb">isinstance</span><span class="p">(</span><span class="n">pad_token_id</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span>
+            <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">pad_token_id</span><span class="p">,</span> <span class="n">Integral</span><span class="p">)</span>
+            <span class="ow">or</span> <span class="n">pad_token_id</span> <span class="o">&lt;</span> <span class="mi">0</span>
+        <span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"pad_token_id must be a nonnegative integer or None"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">mask_segment_starts</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">return_labels</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"mask_segment_starts requires return_labels=True"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">items</span><span class="p">:</span>
+            <span class="n">empty</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"ids"</span><span class="p">:</span> <span class="p">[],</span> <span class="s2">"texts"</span><span class="p">:</span> <span class="p">[]}</span>
+            <span class="n">empty</span><span class="o">.</span><span class="n">update</span><span class="p">(</span>
+                <span class="p">{</span>
+                    <span class="n">name</span><span class="p">:</span> <span class="n">collator</span><span class="p">((),</span> <span class="n">length</span><span class="o">=</span><span class="n">pad_to_length</span> <span class="ow">or</span> <span class="mi">0</span><span class="p">,</span> <span class="n">shifted</span><span class="o">=</span><span class="n">return_labels</span><span class="p">)</span>
+                    <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">collator</span> <span class="ow">in</span> <span class="n">collators</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
+                <span class="p">}</span>
+            <span class="p">)</span>
+            <span class="k">if</span> <span class="n">return_num_valid_tokens</span><span class="p">:</span>
+                <span class="n">empty</span><span class="p">[</span><span class="s2">"num_valid_tokens"</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+            <span class="k">if</span> <span class="n">return_loss_mask</span><span class="p">:</span>
+                <span class="n">empty</span><span class="p">[</span><span class="s2">"loss_mask"</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">if</span> <span class="n">return_padding_mask</span><span class="p">:</span>
+                <span class="n">empty</span><span class="p">[</span><span class="s2">"padding_mask"</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">if</span> <span class="n">return_document_ids</span><span class="p">:</span>
+                <span class="n">empty</span><span class="p">[</span><span class="s2">"document_ids"</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">if</span> <span class="n">position_mode</span> <span class="o">==</span> <span class="s2">"sequence"</span><span class="p">:</span>
+                <span class="n">empty</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">if</span> <span class="n">return_cu_seqlens</span><span class="p">:</span>
+                <span class="n">empty</span><span class="p">[</span><span class="s2">"cu_seqlens"</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="n">flatten</span> <span class="k">else</span> <span class="p">[]</span>
+                <span class="n">empty</span><span class="p">[</span><span class="s2">"max_seqlen"</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span> <span class="k">if</span> <span class="n">flatten</span> <span class="k">else</span> <span class="p">[]</span>
+            <span class="k">return</span> <span class="n">_rename_and_exclude_fields</span><span class="p">(</span>
+                <span class="n">empty</span><span class="p">,</span> <span class="n">rename_fields</span><span class="p">,</span> <span class="n">exclude_fields</span><span class="p">,</span> <span class="n">allow_missing_sources</span><span class="o">=</span><span class="kc">True</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Extract based on payload type</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">payloads</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="nb">dict</span><span class="p">):</span>
+            <span class="n">token_lists</span><span class="p">,</span> <span class="n">texts</span><span class="p">,</span> <span class="n">extra_data</span><span class="p">,</span> <span class="n">loss_mask_lists</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_extract_from_dicts</span><span class="p">(</span>
+                <span class="n">payloads</span><span class="p">,</span> <span class="n">resolved_tokens_field</span><span class="p">,</span> <span class="p">(</span><span class="o">*</span><span class="n">extra_fields</span><span class="p">,</span> <span class="o">*</span><span class="n">collators</span><span class="p">)</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">token_lists</span><span class="p">,</span> <span class="n">texts</span><span class="p">,</span> <span class="n">extra_data</span><span class="p">,</span> <span class="n">loss_mask_lists</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_extract_from_arrays</span><span class="p">(</span>
+                <span class="n">items</span>
+            <span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">return_cu_seqlens</span> <span class="ow">or</span> <span class="n">return_document_ids</span> <span class="ow">or</span> <span class="n">mask_segment_starts</span><span class="p">:</span>
+            <span class="k">if</span> <span class="s2">"positions"</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">extra_data</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="s2">"return_cu_seqlens/return_document_ids/mask_segment_starts requires a 'positions' field in every payload; "</span>
+                    <span class="o">+</span> <span class="s2">"use pack_flat(emit_positions=True)"</span>
+                <span class="p">)</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="p">(</span><span class="n">tokens_row</span><span class="p">,</span> <span class="n">positions_row</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span>
+                <span class="nb">zip</span><span class="p">(</span><span class="n">token_lists</span><span class="p">,</span> <span class="n">extra_data</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">])</span>
+            <span class="p">):</span>
+                <span class="k">if</span> <span class="p">(</span>
+                    <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">positions_row</span><span class="p">,</span> <span class="n">Sized</span><span class="p">)</span>
+                    <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tokens_row</span><span class="p">,</span> <span class="n">Sized</span><span class="p">)</span>
+                    <span class="ow">or</span> <span class="nb">len</span><span class="p">(</span><span class="n">positions_row</span><span class="p">)</span> <span class="o">!=</span> <span class="nb">len</span><span class="p">(</span><span class="n">tokens_row</span><span class="p">)</span>
+                <span class="p">):</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">"'positions' must match the token sequence length at index </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">"</span>
+                    <span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">collators</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">items</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">payload</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">"field_collators require mapping payloads with named fields"</span>
+            <span class="p">)</span>
+        <span class="n">custom_values</span> <span class="o">=</span> <span class="p">{</span><span class="n">name</span><span class="p">:</span> <span class="n">extra_data</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">name</span><span class="p">)</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">collators</span><span class="p">}</span>
+        <span class="n">pad_lengths</span> <span class="o">=</span> <span class="p">[</span><span class="n">r</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">padding_length</span> <span class="ow">or</span> <span class="mi">0</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">items</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">lengths</span> <span class="o">=</span> <span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="n">values</span><span class="p">)</span> <span class="k">for</span> <span class="n">values</span> <span class="ow">in</span> <span class="n">token_lists</span><span class="p">]</span>
+            <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="ow">not</span> <span class="mi">0</span> <span class="o">&lt;=</span> <span class="n">pad</span> <span class="o">&lt;=</span> <span class="n">length</span> <span class="k">for</span> <span class="n">pad</span><span class="p">,</span> <span class="n">length</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">pad_lengths</span><span class="p">,</span> <span class="n">lengths</span><span class="p">)):</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="s2">"padding_length must lie within its token document's length"</span>
+                <span class="p">)</span>
+            <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">values</span> <span class="ow">in</span> <span class="n">extra_data</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="o">!=</span> <span class="n">length</span> <span class="k">for</span> <span class="n">value</span><span class="p">,</span> <span class="n">length</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">values</span><span class="p">,</span> <span class="n">lengths</span><span class="p">)):</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">"'</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">' must match tokens when padding; use field_collators for non-token fields"</span>
+                    <span class="p">)</span>
+            <span class="n">pad_lengths</span> <span class="o">=</span> <span class="p">[</span>
+                <span class="n">pad</span> <span class="o">+</span> <span class="n">pad_to_length</span> <span class="o">-</span> <span class="n">length</span>
+                <span class="k">for</span> <span class="n">pad</span><span class="p">,</span> <span class="n">length</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">pad_lengths</span><span class="p">,</span> <span class="n">lengths</span><span class="p">)</span>
+            <span class="p">]</span>
+        <span class="n">collator_length</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="k">if</span> <span class="n">collators</span><span class="p">:</span>
+            <span class="n">lengths</span> <span class="o">=</span> <span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="n">values</span><span class="p">)</span> <span class="k">for</span> <span class="n">values</span> <span class="ow">in</span> <span class="n">token_lists</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">lengths</span><span class="p">))</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="s2">"field_collators require equal token lengths; set pad_to_length for unequal documents"</span>
+                <span class="p">)</span>
+            <span class="n">collator_length</span> <span class="o">=</span> <span class="n">pad_to_length</span> <span class="k">if</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">lengths</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+        <span class="c1"># Resolve dtype</span>
+        <span class="n">resolved_dtype</span><span class="p">,</span> <span class="n">framework</span> <span class="o">=</span> <span class="n">_resolve_dtype</span><span class="p">(</span><span class="n">dtype</span><span class="p">)</span>
+
+        <span class="c1"># Build base result</span>
+        <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">"ids"</span><span class="p">:</span> <span class="p">[</span><span class="n">r</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">sample_id</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">items</span><span class="p">],</span>
+            <span class="s2">"texts"</span><span class="p">:</span> <span class="n">texts</span><span class="p">,</span>
+        <span class="p">}</span>
+
+        <span class="c1"># Stack tokens</span>
+        <span class="n">tokens</span> <span class="o">=</span> <span class="n">_stack_sequences</span><span class="p">(</span>
+            <span class="n">token_lists</span><span class="p">,</span>
+            <span class="n">resolved_dtype</span><span class="p">,</span>
+            <span class="n">framework</span><span class="p">,</span>
+            <span class="n">length</span><span class="o">=</span><span class="n">pad_to_length</span><span class="p">,</span>
+            <span class="n">pad_value</span><span class="o">=</span><span class="n">pad_token_id</span> <span class="ow">or</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="n">padding_mask</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="n">return_padding_mask</span> <span class="ow">or</span> <span class="n">return_document_ids</span><span class="p">:</span>
+            <span class="n">padding_mask</span> <span class="o">=</span> <span class="n">_padding_lengths_to_mask</span><span class="p">(</span>
+                <span class="n">tokens</span><span class="p">,</span>
+                <span class="n">pad_lengths</span><span class="p">,</span>
+                <span class="n">framework</span><span class="p">,</span>
+                <span class="n">shifted</span><span class="o">=</span><span class="n">return_labels</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="k">if</span> <span class="n">return_padding_mask</span><span class="p">:</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"padding_mask"</span><span class="p">]</span> <span class="o">=</span> <span class="n">padding_mask</span>
+
+        <span class="k">if</span> <span class="n">return_labels</span><span class="p">:</span>
+            <span class="c1"># Shift for next-token prediction: input = tokens[:-1], labels = tokens[1:]</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"input_ids"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_slice_last_dim</span><span class="p">(</span><span class="n">tokens</span><span class="p">,</span> <span class="nb">slice</span><span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">),</span> <span class="n">framework</span><span class="p">)</span>
+            <span class="n">labels</span> <span class="o">=</span> <span class="n">_slice_last_dim</span><span class="p">(</span><span class="n">tokens</span><span class="p">,</span> <span class="nb">slice</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="kc">None</span><span class="p">),</span> <span class="n">framework</span><span class="p">)</span>
+            <span class="c1"># After the shift, a record's trailing padding_length labels are</span>
+            <span class="c1"># exactly its right-pad tokens; mask by position, not by id.</span>
+            <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="n">pad_lengths</span><span class="p">):</span>
+                <span class="c1"># An all-padding row loses one padding label in the shift too.</span>
+                <span class="n">label_pad_lengths</span> <span class="o">=</span> <span class="p">[</span>
+                    <span class="n">n</span>
+                    <span class="o">-</span> <span class="nb">int</span><span class="p">(</span>
+                        <span class="n">n</span> <span class="o">&gt;</span> <span class="mi">0</span>
+                        <span class="ow">and</span> <span class="n">n</span>
+                        <span class="o">==</span> <span class="p">(</span><span class="n">pad_to_length</span> <span class="k">if</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">len</span><span class="p">(</span><span class="n">row</span><span class="p">))</span>
+                    <span class="p">)</span>
+                    <span class="k">for</span> <span class="n">n</span><span class="p">,</span> <span class="n">row</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">pad_lengths</span><span class="p">,</span> <span class="n">token_lists</span><span class="p">)</span>
+                <span class="p">]</span>
+                <span class="n">labels</span> <span class="o">=</span> <span class="n">_mask_padding_labels</span><span class="p">(</span>
+                    <span class="n">labels</span><span class="p">,</span> <span class="n">label_pad_lengths</span><span class="p">,</span> <span class="n">ignore_index</span><span class="p">,</span> <span class="n">framework</span>
+                <span class="p">)</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">]</span> <span class="o">=</span> <span class="n">labels</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"input_ids"</span><span class="p">]</span> <span class="o">=</span> <span class="n">tokens</span>
+
+        <span class="n">boundary_positions</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="c1"># Handle extra fields</span>
+        <span class="k">for</span> <span class="n">field_name</span><span class="p">,</span> <span class="n">field_lists</span> <span class="ow">in</span> <span class="n">extra_data</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="c1"># Final renaming cannot detect an input/label overwrite that already</span>
+            <span class="c1"># happened here, so reject collisions before assigning extras.</span>
+            <span class="k">if</span> <span class="n">field_name</span> <span class="ow">in</span> <span class="n">result</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">"extra_fields cannot overwrite generated field '</span><span class="si">{</span><span class="n">field_name</span><span class="si">}</span><span class="s2">'"</span>
+                <span class="p">)</span>
+            <span class="k">if</span> <span class="p">(</span>
+                <span class="n">field_name</span> <span class="o">==</span> <span class="s2">"positions"</span>
+                <span class="ow">and</span> <span class="n">position_mode</span> <span class="o">==</span> <span class="s2">"sequence"</span>
+                <span class="ow">and</span> <span class="ow">not</span> <span class="n">return_cu_seqlens</span>
+                <span class="ow">and</span> <span class="ow">not</span> <span class="n">return_document_ids</span>
+                <span class="ow">and</span> <span class="ow">not</span> <span class="n">mask_segment_starts</span>
+            <span class="p">):</span>
+                <span class="c1"># Sequence mode replaces emitted positions. Keep the original</span>
+                <span class="c1"># resets only when boundaries or boundary-label masking need them.</span>
+                <span class="k">continue</span>
+            <span class="n">tails</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="k">if</span> <span class="n">field_name</span> <span class="o">==</span> <span class="s2">"positions"</span> <span class="ow">and</span> <span class="n">pad_to_length</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">tails</span> <span class="o">=</span> <span class="p">[</span>
+                    <span class="n">_positions_from_segment_lengths</span><span class="p">((</span><span class="n">pad_to_length</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">value</span><span class="p">),))</span>
+                    <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">field_lists</span>
+                <span class="p">]</span>
+            <span class="n">field_tensor</span> <span class="o">=</span> <span class="n">_stack_sequences</span><span class="p">(</span>
+                <span class="n">field_lists</span><span class="p">,</span>
+                <span class="n">resolved_dtype</span><span class="p">,</span>
+                <span class="n">framework</span><span class="p">,</span>
+                <span class="n">length</span><span class="o">=</span><span class="n">pad_to_length</span><span class="p">,</span>
+                <span class="n">tails</span><span class="o">=</span><span class="n">tails</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="k">if</span> <span class="n">field_name</span> <span class="o">==</span> <span class="s2">"positions"</span><span class="p">:</span>
+                <span class="n">boundary_positions</span> <span class="o">=</span> <span class="n">field_tensor</span>
+
+            <span class="k">if</span> <span class="n">return_labels</span><span class="p">:</span>
+                <span class="c1"># Shift extra fields to match input_ids shape</span>
+                <span class="n">result</span><span class="p">[</span><span class="n">field_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">_slice_last_dim</span><span class="p">(</span>
+                    <span class="n">field_tensor</span><span class="p">,</span> <span class="nb">slice</span><span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">),</span> <span class="n">framework</span>
+                <span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">result</span><span class="p">[</span><span class="n">field_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">field_tensor</span>
+
+        <span class="k">if</span> <span class="n">loss_mask_lists</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">masks</span> <span class="o">=</span> <span class="n">_stack_sequences</span><span class="p">(</span>
+                <span class="n">loss_mask_lists</span><span class="p">,</span> <span class="n">resolved_dtype</span><span class="p">,</span> <span class="n">framework</span><span class="p">,</span> <span class="n">length</span><span class="o">=</span><span class="n">pad_to_length</span>
+            <span class="p">)</span>
+            <span class="k">if</span> <span class="n">return_labels</span><span class="p">:</span>
+                <span class="c1"># The label at position i supervises token i+1, so the mask</span>
+                <span class="c1"># shifts like labels (drop the first entry), not like inputs.</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_mask_unsupervised_labels</span><span class="p">(</span>
+                    <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">],</span>
+                    <span class="n">_slice_last_dim</span><span class="p">(</span><span class="n">masks</span><span class="p">,</span> <span class="nb">slice</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="kc">None</span><span class="p">),</span> <span class="n">framework</span><span class="p">),</span>
+                    <span class="n">ignore_index</span><span class="p">,</span>
+                    <span class="n">framework</span><span class="p">,</span>
+                <span class="p">)</span>
+            <span class="k">elif</span> <span class="s2">"loss_mask"</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">result</span><span class="p">:</span>
+                <span class="c1"># extra_fields may have already emitted it explicitly.</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"loss_mask"</span><span class="p">]</span> <span class="o">=</span> <span class="n">masks</span>
+
+        <span class="k">if</span> <span class="n">mask_segment_starts</span><span class="p">:</span>
+            <span class="k">assert</span> <span class="n">boundary_positions</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_mask_segment_start_labels</span><span class="p">(</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">],</span> <span class="n">boundary_positions</span><span class="p">,</span> <span class="n">ignore_index</span><span class="p">,</span> <span class="n">framework</span>
+            <span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">eos_mask_loss</span><span class="p">:</span>
+            <span class="k">assert</span> <span class="n">eos_token_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>  <span class="c1"># Validated before extracting payloads.</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_mask_eos_labels</span><span class="p">(</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">],</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"input_ids"</span><span class="p">],</span>
+                <span class="n">eos_token_id</span><span class="p">,</span>
+                <span class="n">ignore_index</span><span class="p">,</span>
+                <span class="n">framework</span><span class="p">,</span>
+            <span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">return_loss_mask</span><span class="p">:</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"loss_mask"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_labels_to_loss_mask</span><span class="p">(</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">],</span> <span class="n">ignore_index</span><span class="p">,</span> <span class="n">framework</span>
+            <span class="p">)</span>
+
+        <span class="n">num_valid_tokens</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="n">return_num_valid_tokens</span><span class="p">:</span>
+            <span class="n">num_valid_tokens</span> <span class="o">=</span> <span class="n">_count_valid_tokens</span><span class="p">(</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"labels"</span><span class="p">],</span> <span class="n">ignore_index</span><span class="p">,</span> <span class="n">framework</span>
+            <span class="p">)</span>
+
+        <span class="n">sequence_metadata</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">if</span> <span class="n">return_cu_seqlens</span><span class="p">:</span>
+            <span class="k">if</span> <span class="p">(</span>
+                <span class="n">framework</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+                <span class="ow">and</span> <span class="n">result</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">]</span><span class="o">.</span><span class="n">shape</span> <span class="o">!=</span> <span class="n">result</span><span class="p">[</span><span class="s2">"input_ids"</span><span class="p">]</span><span class="o">.</span><span class="n">shape</span>
+            <span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"'positions' must match the input_ids shape"</span><span class="p">)</span>
+            <span class="n">cu_seqlens</span><span class="p">,</span> <span class="n">max_seqlen</span> <span class="o">=</span> <span class="n">_positions_to_cu_seqlens</span><span class="p">(</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">],</span> <span class="n">framework</span><span class="p">,</span> <span class="n">flatten</span><span class="o">=</span><span class="n">flatten</span>
+            <span class="p">)</span>
+            <span class="n">sequence_metadata</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"cu_seqlens"</span><span class="p">:</span> <span class="n">cu_seqlens</span><span class="p">,</span> <span class="s2">"max_seqlen"</span><span class="p">:</span> <span class="n">max_seqlen</span><span class="p">}</span>
+
+        <span class="k">if</span> <span class="n">return_document_ids</span><span class="p">:</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"document_ids"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_positions_to_document_ids</span><span class="p">(</span>
+                <span class="n">result</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">],</span> <span class="n">padding_mask</span><span class="p">,</span> <span class="n">framework</span><span class="p">,</span> <span class="n">flatten</span><span class="o">=</span><span class="n">flatten</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Derive structural boundaries before replacing the model's positions.</span>
+        <span class="k">if</span> <span class="n">position_mode</span> <span class="o">==</span> <span class="s2">"sequence"</span><span class="p">:</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"positions"</span><span class="p">]</span> <span class="o">=</span> <span class="n">_sequence_positions</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">"input_ids"</span><span class="p">],</span> <span class="n">framework</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">flatten</span><span class="p">:</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="p">{</span>
+                <span class="n">k</span><span class="p">:</span> <span class="n">v</span> <span class="k">if</span> <span class="n">k</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">"ids"</span><span class="p">,</span> <span class="s2">"texts"</span><span class="p">)</span> <span class="k">else</span> <span class="n">_flatten_sequences</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="n">framework</span><span class="p">)</span>
+                <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
+            <span class="p">}</span>
+
+        <span class="k">if</span> <span class="n">num_valid_tokens</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">result</span><span class="p">[</span><span class="s2">"num_valid_tokens"</span><span class="p">]</span> <span class="o">=</span> <span class="n">num_valid_tokens</span>
+        <span class="n">result</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">sequence_metadata</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">collator</span> <span class="ow">in</span> <span class="n">collators</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">result</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">collator</span><span class="p">(</span>
+                <span class="nb">tuple</span><span class="p">(</span><span class="n">custom_values</span><span class="p">[</span><span class="n">name</span><span class="p">]),</span>
+                <span class="n">length</span><span class="o">=</span><span class="n">collator_length</span><span class="p">,</span>
+                <span class="n">shifted</span><span class="o">=</span><span class="n">return_labels</span><span class="p">,</span>
+            <span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">_rename_and_exclude_fields</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">rename_fields</span><span class="p">,</span> <span class="n">exclude_fields</span><span class="p">)</span></div>
+</div>
+
+
+
+<span class="c1"># Payload typing --------------------------------------------------------------</span>
+<span class="n">SampleNumeric</span><span class="p">:</span> <span class="n">TypeAlias</span> <span class="o">=</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">complex</span> <span class="o">|</span> <span class="n">_NumpyNumber</span>
+
+<span class="n">SamplePayloadAtom</span><span class="p">:</span> <span class="n">TypeAlias</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="nb">bytes</span>
+    <span class="o">|</span> <span class="nb">memoryview</span>
+    <span class="o">|</span> <span class="nb">str</span>
+    <span class="o">|</span> <span class="n">SampleNumeric</span>
+    <span class="o">|</span> <span class="n">_NumpyTemporal</span>
+    <span class="o">|</span> <span class="n">SamplePayloadArray</span>
+    <span class="o">|</span> <span class="kc">None</span>
+<span class="p">)</span>
+<span class="n">SamplePayload</span><span class="p">:</span> <span class="n">TypeAlias</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">SamplePayloadAtom</span> <span class="o">|</span> <span class="nb">list</span><span class="p">[</span><span class="s2">"SamplePayload"</span><span class="p">]</span> <span class="o">|</span> <span class="nb">dict</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="s2">"SamplePayload"</span><span class="p">]</span>
+<span class="p">)</span>
+<span class="n">SamplePayloadDict</span><span class="p">:</span> <span class="n">TypeAlias</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="n">SamplePayload</span><span class="p">]</span>
+
+
+<span class="c1"># Pipeline items travel between operators and stages; op authors annotate</span>
+<span class="c1"># against this. The runner-boundary wire aliases (EngineSample, Microbatch,</span>
+<span class="c1"># RunnerStage*, LazyPayload) live in zephon._internal.stream.</span>
+<span class="n">StreamItem</span><span class="p">:</span> <span class="n">TypeAlias</span> <span class="o">=</span> <span class="n">SampleRecord</span> <span class="o">|</span> <span class="n">SampleBatch</span>
+
+
+<span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="s2">"ChunkId"</span><span class="p">,</span>
+    <span class="s2">"ChunkOffset"</span><span class="p">,</span>
+    <span class="s2">"ComponentId"</span><span class="p">,</span>
+    <span class="s2">"ContributorRef"</span><span class="p">,</span>
+    <span class="s2">"DatasetId"</span><span class="p">,</span>
+    <span class="s2">"FieldCollator"</span><span class="p">,</span>
+    <span class="s2">"LaneId"</span><span class="p">,</span>
+    <span class="s2">"LineageIndex"</span><span class="p">,</span>
+    <span class="s2">"LineagePath"</span><span class="p">,</span>
+    <span class="s2">"LocalSampleId"</span><span class="p">,</span>
+    <span class="s2">"SampleBatch"</span><span class="p">,</span>
+    <span class="s2">"SampleCursor"</span><span class="p">,</span>
+    <span class="s2">"SampleCursorKey"</span><span class="p">,</span>
+    <span class="s2">"SampleId"</span><span class="p">,</span>
+    <span class="s2">"SampleMeta"</span><span class="p">,</span>
+    <span class="s2">"SampleNumeric"</span><span class="p">,</span>
+    <span class="s2">"SamplePayload"</span><span class="p">,</span>
+    <span class="s2">"SamplePayloadArray"</span><span class="p">,</span>
+    <span class="s2">"SamplePayloadAtom"</span><span class="p">,</span>
+    <span class="s2">"SamplePayloadDict"</span><span class="p">,</span>
+    <span class="s2">"SampleRecord"</span><span class="p">,</span>
+    <span class="s2">"ShardId"</span><span class="p">,</span>
+    <span class="s2">"StreamItem"</span><span class="p">,</span>
+<span class="p">]</span>
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../_static/copybutton.js?v=f281be69"></script>
+    <script src="../../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

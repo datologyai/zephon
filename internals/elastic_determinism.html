@@ -1,0 +1,598 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Operators and runners" href="operators_and_runners.html"><link rel="prev" title="WorkSources and work chunks" href="worksources_and_work_chunks.html">
+        <link rel="prefetch" href="../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+        <title>Elastic determinism - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="main" data-page="internals/elastic_determinism.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../pipelines/index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../api/datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/operators.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/internals/elastic_determinism.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="elastic-determinism">
+<h1>Elastic determinism<a class="headerlink" href="#elastic-determinism" title="Link to this heading">¶</a></h1>
+<p><a class="reference internal" href="../why_zephon.html"><span class="std std-doc">Why Zephon?</span></a> claims that a run resumed on a different number of GPUs
+sees the same global batches, and <a class="reference internal" href="../pipelines/distributed_training.html"><span class="std std-doc">Distributed
+Training</span></a> tells you which options to set in order to
+get it. This page explains the mechanism behind that claim, and just as importantly, where
+its boundaries are.</p>
+<p id="determinism-by-induction"><strong>Determinism by induction.</strong> Zephon’s determinism guarantee is compositional, which means
+we get it by making each piece deterministic rather than by coordinating the pieces. The
+<code class="docutils literal notranslate"><span class="pre">WorkSource</span></code> produces pointers in a fixed order for a given seed and lane, and each
+operator is deterministic given its inputs, so by induction over the operator chain the
+whole <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> produces the same output for the same configuration and the same starting
+state. There is no global coordination step that fixes up the order after the fact.</p>
+<p>This is why the guarantee survives things that would break a less structured design. You
+can checkpoint in the middle of training, restart on different hardware, and still get the
+same global sample order, as long as the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> definition stays the same: the seed,
+the operators, the mixture weights, and the number of lanes. The induction does not care
+which machine runs which step.</p>
+<p>Turning determinism off with <code class="docutils literal notranslate"><span class="pre">Pipeline.options(deterministic=False)</span></code> therefore costs you
+more than the ordering guarantee it names. Elastic determinism goes with it, because the
+per-lane ordering that the rest of this page depends on is exactly what gets relaxed.</p>
+<p id="execution-parameters-are-not-data-parameters"><strong>Execution parameters are not data parameters.</strong> The most useful property Zephon has is a
+negative one: <strong>changing how a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> runs never changes what it produces.</strong> Execution
+settings (the runner type, the parallelism of each operator, the queue depths, the prefetch
+settings, and the worker counts) never appear anywhere in the data path. You can tune them
+for a week and the experiment you ran on the first day is still comparable to the one you
+run on the last.</p>
+<p>Batch shape (the microbatch size and the number of batches per step) and
+<code class="docutils literal notranslate"><span class="pre">flush_every_k_chunks</span></code> are a different matter: they are data settings. Batch shape decides
+which samples land together, and <code class="docutils literal notranslate"><span class="pre">flush_every_k_chunks</span></code> decides where packing and mixture
+operators cut their buffers, so changing either changes the sample stream of any pipeline
+that packs. Fix them at the start of a run, like the seed and <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code>.</p>
+<p>The two mechanisms that buy you this, sequence-number reordering and the single-threaded
+accumulator, are the ones <a class="reference internal" href="../pipelines/how_pipelines_run.html"><span class="std std-doc">How pipelines run</span></a>
+introduces and <a class="reference internal" href="operators_and_runners.html"><span class="std std-doc">Operators and runners</span></a> takes apart.</p>
+<p>Not every loader separates the two. <a class="reference external" href="https://nvidia.github.io/Megatron-Energon/advanced/repro_scaling.html">Megatron
+Energon</a>, for
+example, documents that reproducibility requires the global worker count
+(<code class="docutils literal notranslate"><span class="pre">world_size</span> <span class="pre">*</span> <span class="pre">num_workers</span></code>) to stay fixed, so tuning the loader costs you the comparison.</p>
+<p id="the-problem-with-partitioning-by-gpu"><strong>The problem with partitioning by GPU.</strong> The naive way to distribute data is to partition
+it across the physical GPU count, so that with 8 GPUs, GPU <em>k</em> takes every eighth sample.
+Resume that run on 4 GPUs and every GPU’s stream changes completely, because the partition
+function changed. The run is no longer a continuation of the old one in any meaningful
+sense; it is a new run that happens to start from an old set of weights.</p>
+<p>The standard fix is a layer of indirection between the logical data order and the physical
+hardware. Mosaic Streaming calls its version <strong>canonical nodes</strong>, a fixed number of
+logical partitions that are mapped onto physical nodes at runtime. Keep the number of
+canonical nodes constant and the global sample order survives a change in node count.</p>
+<p id="zephon-s-version-lanes"><strong>Zephon’s version: lanes.</strong> <a class="reference internal" href="../pipelines/distributed_training.html#planning-for-elasticity"><span class="std std-ref">Planning for elasticity</span></a>
+introduces the <strong>lane</strong> as the fixed logical data stream you size with
+<code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code>, which is the natural equivalent of a canonical node for an iterable
+pipeline. What matters here is the consequence: the per-lane sample streams are identical
+at every <code class="docutils literal notranslate"><span class="pre">dp_degree</span></code>, and the only thing a topology change moves is which group owns which
+lane. The owner is one GPU in a job without tensor or pipeline parallelism, and otherwise
+the set of GPUs that share a <code class="docutils literal notranslate"><span class="pre">dp_group_id</span></code>.</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">canonical_replicas</span> <span class="o">=</span> <span class="mi">8</span><span class="p">,</span> <span class="n">dp_degree</span> <span class="o">=</span> <span class="mi">2</span>
+
+  <span class="n">group</span> <span class="mi">0</span> <span class="n">owns</span> <span class="n">lanes</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">]</span>      <span class="n">group</span> <span class="mi">1</span> <span class="n">owns</span> <span class="n">lanes</span> <span class="p">[</span><span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="mi">7</span><span class="p">]</span>
+
+<span class="n">Resume</span> <span class="k">with</span> <span class="n">dp_degree</span> <span class="o">=</span> <span class="mi">4</span><span class="p">:</span>
+
+  <span class="n">group</span> <span class="mi">0</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]</span>   <span class="n">group</span> <span class="mi">1</span><span class="p">:</span> <span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">]</span>   <span class="n">group</span> <span class="mi">2</span><span class="p">:</span> <span class="p">[</span><span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">]</span>   <span class="n">group</span> <span class="mi">3</span><span class="p">:</span> <span class="p">[</span><span class="mi">6</span><span class="p">,</span> <span class="mi">7</span><span class="p">]</span>
+
+<span class="n">Resume</span> <span class="k">with</span> <span class="n">dp_degree</span> <span class="o">=</span> <span class="mi">8</span><span class="p">:</span>
+
+  <span class="n">group</span> <span class="mi">0</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">]</span>  <span class="n">group</span> <span class="mi">1</span><span class="p">:</span> <span class="p">[</span><span class="mi">1</span><span class="p">]</span>  <span class="n">group</span> <span class="mi">2</span><span class="p">:</span> <span class="p">[</span><span class="mi">2</span><span class="p">]</span>  <span class="n">group</span> <span class="mi">3</span><span class="p">:</span> <span class="p">[</span><span class="mi">3</span><span class="p">]</span>  <span class="n">group</span> <span class="mi">4</span><span class="p">:</span> <span class="p">[</span><span class="mi">4</span><span class="p">]</span>  <span class="o">...</span>
+</pre></div>
+</div>
+<p>The per-lane order is a function of the seed and <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code>, so both are fixed
+for the lifetime of a run. The seed is stored in the checkpoint and restored from it, so a
+resume always continues with the original seed whatever the new <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> was configured
+with. <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code> is checked instead: Zephon refuses to restore a checkpoint whose
+<code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code> does not match.</p>
+<p id="samples-do-not-travel-in-separate-lane-streams"><strong>Samples do not travel in separate lane streams.</strong>
+Zephon does <strong>not</strong> physically separate the data into one stream per lane. Every record
+carries its <code class="docutils literal notranslate"><span class="pre">lane_id</span></code> in its metadata, and the operators process records from every owned
+lane together, through the same queues and the same worker pools.</p>
+<p>We do it this way because the alternative is wasteful. Separate per-lane streams would
+mean separate per-lane operator instances, each with its own buffers and its own slice of
+the worker pool, so a group that owns eight lanes would end up running eight tokenizer
+pools with an eighth of the work each. Keeping the lanes mixed means one pool, sized once, shared across all of them.</p>
+<p>Zephon feeds the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> in fair round-robin across the lanes the group owns, taking
+one sample from lane 0, one from lane 1, and so on, skipping lanes that have finished.
+That keeps the lanes progressing at roughly the same rate, which matters because the
+output end has to pull one batch from each lane in turn. How a lane works out which chunks
+belong to it in the first place, without asking any other rank, is covered in
+<a class="reference internal" href="worksources_and_work_chunks.html#chunk-to-lane-routing"><span class="std std-ref">Chunk-to-lane routing</span></a>.</p>
+<p>What mixing costs us is that any operator holding per-record state has to be
+<strong>lane-aware</strong>, or it will mix data across lanes and destroy the per-lane determinism that
+the whole scheme rests on. Packing keeps separate bins per lane, so a sequence from lane 0
+is never packed together with one from lane 3, batching fills separate per-lane buffers,
+and the shuffle buffer keeps separate reservoirs. Stateless operators such as maps,
+tokenization and filters never have to think about lanes at all, and that covers most of
+them.</p>
+<p id="the-output-multiplexer"><strong>The output multiplexer.</strong> Because the lanes are interleaved on the way in, and operators
+like packing and filtering change the rate at which each lane produces output, the raw
+output of a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> does not emit lanes in any predictable order. A group that owns
+lanes 0 through 3 might see batches finish as lane 2, lane 0, lane 2, lane 1, and so on.</p>
+<p>The training loop needs better than that, because each optimizer step has to contain a
+whole number of round-robin cycles across the lanes or its composition depends on the
+topology. So Zephon ends every <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> with a <strong>tail multiplexer</strong> that buffers output
+per lane and emits in strict round-robin:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Raw pipeline output (arrival order varies with processing time):
+
+  ... lane2  lane0  lane2  lane1  lane3  lane0  lane1  lane3 ...
+         │      │      │      │      │      │      │      │
+         v      v      v      v      v      v      v      v
+  ┌──────────────────────────────────────────────────────────────┐
+  │                     Per-lane buffers                         │
+  │   lane 0: [batch, batch, ...]    lane 2: [batch, ...]        │
+  │   lane 1: [batch, batch, ...]    lane 3: [batch, ...]        │
+  └───────────────────────┬──────────────────────────────────────┘
+                          │  strict round-robin emission
+                          v
+  Training loop sees:  lane0  lane1  lane2  lane3  lane0  lane1 ...
+</pre></div>
+</div>
+<p>A group that owns exactly one lane skips the multiplexer entirely and passes its upstream
+through unchanged, which is the common case for a run at full width. Flush sentinels pass
+through without consuming a turn, since they are bookkeeping rather than data.</p>
+<p id="what-actually-survives-a-topology-change"><strong>What is preserved across topology changes.</strong> The guarantee rests on two layers:</p>
+<ul class="simple">
+<li><p><strong>Per-lane progress is the source of truth.</strong> Each lane independently records how far it
+has advanced, as a chunk ID and an offset within that chunk. This state is durable,
+topology-independent, and checkpointed, and it is what guarantees that no sample is ever
+skipped or delivered twice, no matter how the lanes are redistributed. That guarantee is
+unconditional.</p></li>
+<li><p><strong>The round-robin pointer is a physical detail.</strong> It records which lane the tail
+multiplexer should emit from next, and it is keyed by the DataLoader worker, the number
+of active workers, and the exact list of owned lanes, deliberately not by rank, so that
+peers inside a data-parallel group own identical lanes and share one entry. When the
+topology is unchanged, the key still matches on restore, the pointer comes back exactly,
+and the per-group output is identical sample for sample to an uninterrupted run. When the topology changes, the old key no longer matches and the engine recomputes a starting point from per-lane progress.</p></li>
+</ul>
+<p>That recomputation is why you want to checkpoint at global step boundaries. At the end of
+a step every lane has contributed exactly once per cycle, so every lane sits at the same
+frontier, the tiebreaker resolves to the same place regardless of topology, and the
+recomputed pointer starts where the saved one would have. Checkpoint in the middle of a
+step and the lanes are at different frontiers; the no-skip and no-duplicate guarantees
+still hold, but we cannot promise you the exact interleaving across the remap.</p>
+<p>What is preserved is the <strong>global training step</strong>: the union of the per-lane
+batches across all groups contains the same samples whatever the topology. What can differ is the assignment of lanes to GPUs. With eight groups and eight lanes, each group handles one
+lane’s batch; with two groups, each handles four lanes’ batches through the tail
+round-robin. The samples are the same; only the physical distribution changes. The same holds when you change the
+per-device microbatch size, because that changes how many samples a lane puts in one local
+batch while the round-robin still cycles the same lanes producing the same data.</p>
+<figure class="zephon-post zephon-embed">
+  <iframe src="../_static/embeds/lane-multiplexing.html" height="414" loading="lazy"
+          title="Multiplex lanes, accumulate gradients"></iframe>
+  <figcaption>
+    <strong>The same global batch on two GPUs and on four.</strong> A global batch of 16
+    samples drawn from four fixed lanes, at a per-device microbatch of 4. On two groups
+    each one accumulates gradients over a microbatch from each of its two lanes; on four
+    groups each takes one microbatch from its single lane. Either way the step contains
+    the next four samples from every lane.
+  </figcaption>
+</figure>
+<p id="mapping-strategies"><strong>Mapping strategies.</strong> When a GPU owns multiple lanes, the engine needs to decide which lanes it gets. Two strategies are available via <code class="docutils literal notranslate"><span class="pre">Pipeline.options(mapping_strategy=...)</span></code>. Both
+are deterministic and produce identical global batches, so all they decide is which group
+does which work.</p>
+<p><code class="docutils literal notranslate"><span class="pre">&quot;contiguous&quot;</span></code> is the default and gives each group a contiguous block of lane IDs, so with
+<code class="docutils literal notranslate"><span class="pre">canonical_replicas=8</span></code> and <code class="docutils literal notranslate"><span class="pre">dp_degree=3</span></code> the groups get <code class="docutils literal notranslate"><span class="pre">[0,1,2]</span></code>, <code class="docutils literal notranslate"><span class="pre">[3,4,5]</span></code>, and <code class="docutils literal notranslate"><span class="pre">[6,7]</span></code>.
+Adjacent lanes tend to read adjacent data, which makes this the choice that maximizes
+shard and block-cache locality.</p>
+<p><code class="docutils literal notranslate"><span class="pre">&quot;interleaved&quot;</span></code> deals lanes round-robin, so lane <em>i</em> goes to group <em>i % num_groups</em> and
+the same numbers give the groups <code class="docutils literal notranslate"><span class="pre">[0,3,6]</span></code>, <code class="docutils literal notranslate"><span class="pre">[1,4,7]</span></code>, and <code class="docutils literal notranslate"><span class="pre">[2,5]</span></code>. This spreads
+heterogeneous shards more evenly and tends to reduce tail variance between groups.</p>
+<p>Note the uneven split in both examples, since eight lanes across three groups has to leave
+somebody short. That is the reason for the divisibility advice in
+<a class="reference internal" href="../pipelines/distributed_training.html#planning-for-elasticity"><span class="std std-ref">planning for elasticity</span></a>: a lane count that is not
+divisible by the group count means some groups own more lanes than others, and therefore
+do more work per step.</p>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="operators_and_runners.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Operators and runners</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="worksources_and_work_chunks.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">WorkSources and work chunks</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Elastic determinism</a><ul>
+<li><a class="reference internal" href="#determinism-by-induction">Determinism by induction</a></li>
+<li><a class="reference internal" href="#execution-parameters-are-not-data-parameters">Execution parameters are not data parameters</a></li>
+<li><a class="reference internal" href="#the-problem-with-partitioning-by-gpu">The problem with partitioning by GPU</a></li>
+<li><a class="reference internal" href="#zephon-s-version-lanes">Zephon’s version: lanes</a></li>
+<li><a class="reference internal" href="#samples-do-not-travel-in-separate-lane-streams">Samples do not travel in separate lane streams</a></li>
+<li><a class="reference internal" href="#the-output-multiplexer">The output multiplexer</a></li>
+<li><a class="reference internal" href="#what-actually-survives-a-topology-change">What is preserved across topology changes</a></li>
+<li><a class="reference internal" href="#mapping-strategies">Mapping strategies</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

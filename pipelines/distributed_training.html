@@ -1,0 +1,731 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Checkpointing and resuming pipelines" href="checkpointing_and_resuming.html"><link rel="prev" title="Inspecting and tuning pipelines" href="inspecting_and_tuning_pipelines.html">
+        <link rel="prefetch" href="../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+        <title>Distributed training - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="main" data-page="pipelines/distributed_training.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 current has-children"><a class="reference internal" href="index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" checked="" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2 current current-page"><a class="current reference internal" href="#">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../internals/index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../api/datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/operators.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/pipelines/distributed_training.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="distributed-training">
+<h1>Distributed training<a class="headerlink" href="#distributed-training" title="Link to this heading">¶</a></h1>
+<p>Most of the examples in this user guide (well, probably all of them, now that I think
+about it) have used a single <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> feeding a single training loop. Real training runs
+are spread across many GPUs, and the training job needs to divide the model and the data
+across those GPUs using some combination of data parallelism (DP), tensor parallelism
+(TP), pipeline parallelism (PP, and no, not the same as a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>), and context
+parallelism (CP) (people love inventing new ways to parallelize so in context of MoEs, we
+also have expert parallelism — EP). This page explains what Zephon needs to know about
+that division, how to derive this information from your training run’s topology, and how
+to plan a run so that it can later be resumed on a different number of GPUs.</p>
+<p id="one-pipeline-per-rank"><strong>One pipeline per rank.</strong> Of all of the different ways that a training job can be
+parallelized, the one that we care about the most from a Zephon perspective is the
+data-parallelism dimension. Each data-parallel group needs its own unique, non-overlapping
+slice of the training curriculum, while all of the ranks within the same data-parallel
+group need to see exactly the same data at exactly the same time.</p>
+<p>Zephon handles both of these requirements without any communication between ranks during
+data loading. Each rank that needs data builds its own <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> from the same <code class="docutils literal notranslate"><span class="pre">Dataset</span></code>,
+<code class="docutils literal notranslate"><span class="pre">WorkSource</span></code>, and operator definitions, and tells that <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instance which
+data-parallel group it belongs to. Because each part of the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> is deterministic,
+each instance can work out for itself which samples belong to its group, and peers within
+the same group process identical batches by construction instead of by broadcasting them
+to each other. The only time that the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instances need to explicitly coordinate
+with each other is when they take a checkpoint. This means that every <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instance
+in a distributed training job needs to know two pieces of information: its <em>data identity</em>
+so it can determine which samples to produce, and its <em>coordination identity</em> so it can
+determine how to participate in the checkpointing process.</p>
+<p id="data-identity-which-samples-to-produce"><strong>Data identity: which samples to produce.</strong> The data identity of a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> is
+defined via two options:</p>
+<ol class="arabic simple">
+<li><p>the <code class="docutils literal notranslate"><span class="pre">dp_degree</span></code>, which is the number of independent data streams in the job, equivalent
+to the training frameworks’ data-parallel dimension.</p></li>
+<li><p>The <code class="docutils literal notranslate"><span class="pre">dp_group_id</span></code> identifies which of those streams this particular <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instance
+produces, from <code class="docutils literal notranslate"><span class="pre">0</span></code> to <code class="docutils literal notranslate"><span class="pre">dp_degree</span> <span class="pre">-</span> <span class="pre">1</span></code>.</p></li>
+</ol>
+<p>Both of these values should come from the data-parallel sub-mesh of your training
+framework’s topology, not from the global rank. Here is an example for a job on 8 GPUs
+that uses tensor parallelism of degree 2, leaving 4 data-parallel groups:</p>
+<div class="literal-block-wrapper docutils container" id="id1">
+<div class="code-block-caption"><span class="caption-text">examples/guide/pipelines/data_identity_device_mesh.py</span><a class="headerlink" href="#id1" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Take the data identity from the data-parallel sub-mesh."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.device_mesh</span><span class="w"> </span><span class="kn">import</span> <span class="n">init_device_mesh</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+
+<span class="c1"># 8 GPUs with tensor parallelism of 2 leaves 4 data-parallel groups. The TP,</span>
+<span class="c1"># PP and CP degrees never reach Zephon: they do not change who reads what.</span>
+<span class="n">mesh</span> <span class="o">=</span> <span class="n">init_device_mesh</span><span class="p">(</span><span class="s2">"cuda"</span><span class="p">,</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span> <span class="n">mesh_dim_names</span><span class="o">=</span><span class="p">(</span><span class="s2">"dp"</span><span class="p">,</span> <span class="s2">"tp"</span><span class="p">))</span>
+<span class="n">dp_mesh</span> <span class="o">=</span> <span class="n">mesh</span><span class="p">[</span><span class="s2">"dp"</span><span class="p">]</span>
+
+<span class="n">pipeline</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">(</span><span class="n">work_source</span><span class="p">)</span><span class="o">.</span><span class="n">options</span><span class="p">(</span>
+    <span class="n">dp_degree</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">size</span><span class="p">(),</span>
+    <span class="n">dp_group_id</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">get_local_rank</span><span class="p">(),</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<p>Here, GPUs 0 and 1 are tensor parallel peers that share <code class="docutils literal notranslate"><span class="pre">dp_group_id=0</span></code>, so each of them
+runs its own <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> and both produce identical batches, while GPUs 2 and 3 share
+<code class="docutils literal notranslate"><span class="pre">dp_group_id=1</span></code>, and so on. Zephon does not need to know anything about the tensor-,
+pipeline-, or context-parallel degrees of the job since those do not influence which ranks
+should see the same data.</p>
+<p>From the perspective of Zephon, different flavors of data parallelism like DDP-style
+replication or FSDP-style sharding, are both data-parallel dimensions that need different
+data on every rank. The differences between them are really about how the model’s
+parameters and gradients are managed, and not about what data each rank reads. If your
+framework exposes these as separate mesh dimensions (e.g., <code class="docutils literal notranslate"><span class="pre">dp_replicate</span></code> and <code class="docutils literal notranslate"><span class="pre">dp_shard</span></code>
+for hybrid sharded data parallelism), flatten them into a single data-parallel dimension
+and use its size and local rank as <code class="docutils literal notranslate"><span class="pre">dp_degree</span></code> and <code class="docutils literal notranslate"><span class="pre">dp_group_id</span></code>:</p>
+<div class="literal-block-wrapper docutils container" id="id2">
+<div class="code-block-caption"><span class="caption-text">examples/guide/pipelines/data_identity_hsdp_mesh.py</span><a class="headerlink" href="#id2" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Flatten replicate and shard dimensions into one data-parallel degree."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.device_mesh</span><span class="w"> </span><span class="kn">import</span> <span class="n">init_device_mesh</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+
+<span class="c1"># Hybrid sharding spreads data parallelism over two mesh dimensions, but both</span>
+<span class="c1"># need different data per rank, so Zephon is given their product.</span>
+<span class="n">mesh</span> <span class="o">=</span> <span class="n">init_device_mesh</span><span class="p">(</span>
+    <span class="s2">"cuda"</span><span class="p">,</span> <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span> <span class="n">mesh_dim_names</span><span class="o">=</span><span class="p">(</span><span class="s2">"dp_replicate"</span><span class="p">,</span> <span class="s2">"dp_shard"</span><span class="p">,</span> <span class="s2">"tp"</span><span class="p">)</span>
+<span class="p">)</span>
+<span class="n">replicate</span><span class="p">,</span> <span class="n">shard</span> <span class="o">=</span> <span class="n">mesh</span><span class="p">[</span><span class="s2">"dp_replicate"</span><span class="p">],</span> <span class="n">mesh</span><span class="p">[</span><span class="s2">"dp_shard"</span><span class="p">]</span>
+
+<span class="n">pipeline</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">(</span><span class="n">work_source</span><span class="p">)</span><span class="o">.</span><span class="n">options</span><span class="p">(</span>
+    <span class="n">dp_degree</span><span class="o">=</span><span class="n">replicate</span><span class="o">.</span><span class="n">size</span><span class="p">()</span> <span class="o">*</span> <span class="n">shard</span><span class="o">.</span><span class="n">size</span><span class="p">(),</span>
+    <span class="n">dp_group_id</span><span class="o">=</span><span class="n">replicate</span><span class="o">.</span><span class="n">get_local_rank</span><span class="p">()</span> <span class="o">*</span> <span class="n">shard</span><span class="o">.</span><span class="n">size</span><span class="p">()</span> <span class="o">+</span> <span class="n">shard</span><span class="o">.</span><span class="n">get_local_rank</span><span class="p">(),</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<p>Note that if you do not explicitly set <code class="docutils literal notranslate"><span class="pre">dp_degree</span></code> and <code class="docutils literal notranslate"><span class="pre">dp_group_id</span></code>, they will default to
+<code class="docutils literal notranslate"><span class="pre">world_size</span></code> and <code class="docutils literal notranslate"><span class="pre">global_rank</span></code>, which is correct for a job that only uses data parallelism.</p>
+<p id="coordination-identity-which-pipelines-checkpoint-together"><strong>Coordination identity: which pipelines checkpoint together.</strong> The coordination
+identity of a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> is defined by the <code class="docutils literal notranslate"><span class="pre">world_size</span></code> and <code class="docutils literal notranslate"><span class="pre">global_rank</span></code> options, and
+it describes the set of <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instances that take checkpoints together. The
+<code class="docutils literal notranslate"><span class="pre">world_size</span></code> is simply the number of <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instances that participate in each
+checkpoint, and <code class="docutils literal notranslate"><span class="pre">global_rank</span></code> is the unique identifier for a particular <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>
+instance in that set from <code class="docutils literal notranslate"><span class="pre">0</span></code> to <code class="docutils literal notranslate"><span class="pre">world_size</span> <span class="pre">-</span> <span class="pre">1</span></code>. The instance that has <code class="docutils literal notranslate"><span class="pre">global_rank=0</span></code>
+acts as the leader that combines the progress of the other instances into a single
+checkpoint.</p>
+<p>Whenever <code class="docutils literal notranslate"><span class="pre">world_size</span></code> is greater than 1, every <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instance must also be configured
+with 1) a shared place to exchange checkpoint state, which is usually a common
+<code class="docutils literal notranslate"><span class="pre">aggregate_dir</span></code> that all of the participating instances can read and write to, either as
+a shared filesystem directory or as a prefix in object storage and 2) a <code class="docutils literal notranslate"><span class="pre">run_id</span></code> that is
+unique to this training run so that different jobs that share the same <code class="docutils literal notranslate"><span class="pre">aggregate_dir</span></code> do
+not collide with each other.</p>
+<div class="literal-block-wrapper docutils container" id="id3">
+<div class="code-block-caption"><span class="caption-text">examples/guide/pipelines/coordination_identity.py</span><a class="headerlink" href="#id3" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Name the Pipelines that checkpoint together."""</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+
+<span class="c1"># Every rank builds a Pipeline, so every rank checkpoints. Rank 0 leads and</span>
+<span class="c1"># writes the combined checkpoint; the others hand it their progress through</span>
+<span class="c1"># aggregate_dir, which run_id keeps apart from other jobs sharing it.</span>
+<span class="n">pipeline</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">(</span><span class="n">work_source</span><span class="p">)</span><span class="o">.</span><span class="n">options</span><span class="p">(</span>
+    <span class="n">world_size</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">distributed</span><span class="o">.</span><span class="n">get_world_size</span><span class="p">(),</span>
+    <span class="n">global_rank</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">distributed</span><span class="o">.</span><span class="n">get_rank</span><span class="p">(),</span>
+    <span class="n">aggregate_dir</span><span class="o">=</span><span class="s2">"s3://my-bucket/runs/aggregate"</span><span class="p">,</span>
+    <span class="n">run_id</span><span class="o">=</span><span class="s2">"pretrain-7b-2026-03-14"</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<p>If your nodes don’t share a filesystem or bucket with read-after-write consistency, you
+can set <code class="docutils literal notranslate"><span class="pre">aggregate_store</span></code> instead of <code class="docutils literal notranslate"><span class="pre">aggregate_dir</span></code> (but not both). With
+<code class="docutils literal notranslate"><span class="pre">aggregate_store=&quot;torch://&quot;</span></code>, the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instances exchange checkpoint state through
+the TCPStore at <code class="docutils literal notranslate"><span class="pre">MASTER_ADDR</span></code>/<code class="docutils literal notranslate"><span class="pre">MASTER_PORT</span></code> that your job might already be using for
+<code class="docutils literal notranslate"><span class="pre">torch.distributed</span></code>, so there’s no extra storage to set up; use <code class="docutils literal notranslate"><span class="pre">torch://host:port</span></code> to
+point at a different store. Both options support the same setups, whether a rank has no
+DataLoader workers, several of them, or more workers than it has lanes. On a single node,
+though, a local <code class="docutils literal notranslate"><span class="pre">aggregate_dir</span></code> (e.g., in <code class="docutils literal notranslate"><span class="pre">/tmp/</span></code>) is usually the simpler choice, even
+with many GPUs.</p>
+<div class="literal-block-wrapper docutils container" id="id4">
+<div class="code-block-caption"><span class="caption-text">examples/guide/pipelines/coordination_store.py</span><a class="headerlink" href="#id4" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Exchange checkpoint state through torchrun's TCPStore."""</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+
+<span class="c1"># Launched with torchrun, whose agent runs a TCPStore at MASTER_ADDR and</span>
+<span class="c1"># MASTER_PORT. Initializing the process group first also starts that store</span>
+<span class="c1"># on rank 0 in setups where the agent doesn't share it.</span>
+<span class="n">dist</span><span class="o">.</span><span class="n">init_process_group</span><span class="p">(</span><span class="s2">"nccl"</span><span class="p">)</span>
+
+<span class="n">pipeline</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">(</span><span class="n">work_source</span><span class="p">)</span><span class="o">.</span><span class="n">options</span><span class="p">(</span>
+    <span class="n">world_size</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">get_world_size</span><span class="p">(),</span>
+    <span class="n">global_rank</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">get_rank</span><span class="p">(),</span>
+    <span class="n">aggregate_store</span><span class="o">=</span><span class="s2">"torch://"</span><span class="p">,</span>
+    <span class="n">run_id</span><span class="o">=</span><span class="s2">"pretrain-7b-2026-03-14"</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<p>Zephon connects to the store but doesn’t start it, so it needs to be running by the time
+the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> starts. Under <code class="docutils literal notranslate"><span class="pre">torchrun</span></code>, the launcher’s agent runs it for you. If you set
+<code class="docutils literal notranslate"><span class="pre">TORCH_DISABLE_SHARE_RDZV_TCP_STORE=1</span></code> or launch some other way, rank 0 starts it inside
+<code class="docutils literal notranslate"><span class="pre">torch.distributed.init_process_group()</span></code>, so call that before iterating the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>,
+and keep rank 0 running until every rank has finished its last checkpoint. Zephon checks
+that it can reach the store when a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> that takes part in checkpoints starts, so a
+misconfigured store fails right away instead of at the first checkpoint.</p>
+<p>The store holds everything in the memory of the process that runs it. During a checkpoint,
+that includes every instance’s state and the combined checkpoint, which each instance then
+reads in full, so a very large checkpoint is better served by <code class="docutils literal notranslate"><span class="pre">aggregate_dir</span></code>.</p>
+<p>Every <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instance that is part of the same coordination group must call
+<code class="docutils literal notranslate"><span class="pre">Pipeline.checkpoint()</span></code> at the same training step. If one of them does not, the leader
+will wait for the missing instance until the aggregation timeout (<code class="docutils literal notranslate"><span class="pre">aggregate_timeout_s</span></code>,
+which is set to three minutes by default) expires, and then the checkpoint operation will
+fail. When the leader’s <code class="docutils literal notranslate"><span class="pre">checkpoint()</span></code> call returns, every other instance has its copy of
+the checkpoint as well, so there’s no need for a barrier afterwards. The details of when
+to take a checkpoint and how to restore it are covered in
+<a class="reference internal" href="checkpointing_and_resuming.html"><span class="std std-doc">Checkpointing and resuming pipelines</span></a>.</p>
+<p>In many jobs, the coordination identity is simply the global rank and the world size of
+the training job itself. But it doesn’t have to be set this way, and up next we explain
+why it might not be.</p>
+<p id="choosing-which-ranks-build-a-pipeline"><strong>Choosing which ranks build a pipeline.</strong> Because the peer ranks within a single
+data-parallel group all produce the same batches, a training job has a choice to make
+about which of these ranks need to build a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> at all. There are two common
+strategies for doing this with different tradeoffs.</p>
+<p>The simplest approach is to have every rank build its own <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>. This means that
+every one of these ranks will need to take part in checkpointing, and the coordination
+identity is the training job’s global <code class="docutils literal notranslate"><span class="pre">world_size</span></code> and <code class="docutils literal notranslate"><span class="pre">rank</span></code>. The tensor- and
+pipeline-parallel peers within each data-parallel group do redundant work to produce
+identical batches, but they never have to exchange data with each other. In practice, this
+redundant work is rarely a bottleneck, since the model training loop (including the
+forward and backward passes and any collective communication steps) tends to dominate the
+time of each training step. This is the approach that our TorchTitan integration takes, as
+discussed in <a class="reference internal" href="../training_integrations.html"><span class="std std-doc">Training integrations</span></a>.</p>
+<p>It is also possible to configure things such that only some of the ranks need to build a
+<code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>. Some frameworks build each batch on one rank of a model-parallel group and
+then broadcast it to the others, so only the ranks that actually load data need to build a
+<code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>. In this situation, the coordination identity should describe only the
+instances that actually load data, since those are the only ones that need to participate
+in checkpoints. Our Megatron integration (see
+<a class="reference internal" href="../training_integrations.html"><span class="std std-doc">Training integrations</span></a>) builds a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> on
+tensor-parallel rank 0 of the model pipeline stage that consumes the batch, and only the
+first of these stages saves the data loader state, so exactly one <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> per
+data-parallel group participates in each checkpoint. It therefore uses the data-parallel
+size and rank for both the data identity <em>and</em> the coordination identity:</p>
+<div class="literal-block-wrapper docutils container" id="id5">
+<div class="code-block-caption"><span class="caption-text">examples/guide/pipelines/coordination_identity_per_dp_group.py</span><a class="headerlink" href="#id5" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Checkpoint with one Pipeline per data-parallel group."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.device_mesh</span><span class="w"> </span><span class="kn">import</span> <span class="n">init_device_mesh</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+
+<span class="c1"># Only the ranks that load data build a Pipeline -- the others are broadcast</span>
+<span class="c1"># the batch -- so the coordination group is the data-parallel one, and the</span>
+<span class="c1"># same two numbers serve as both identities.</span>
+<span class="n">mesh</span> <span class="o">=</span> <span class="n">init_device_mesh</span><span class="p">(</span><span class="s2">"cuda"</span><span class="p">,</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span> <span class="n">mesh_dim_names</span><span class="o">=</span><span class="p">(</span><span class="s2">"dp"</span><span class="p">,</span> <span class="s2">"tp"</span><span class="p">))</span>
+<span class="n">dp_mesh</span> <span class="o">=</span> <span class="n">mesh</span><span class="p">[</span><span class="s2">"dp"</span><span class="p">]</span>
+
+<span class="n">pipeline</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">(</span><span class="n">work_source</span><span class="p">)</span><span class="o">.</span><span class="n">options</span><span class="p">(</span>
+    <span class="n">dp_degree</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">size</span><span class="p">(),</span>
+    <span class="n">dp_group_id</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">get_local_rank</span><span class="p">(),</span>
+    <span class="n">world_size</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">size</span><span class="p">(),</span>
+    <span class="n">global_rank</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">get_local_rank</span><span class="p">(),</span>
+    <span class="n">aggregate_dir</span><span class="o">=</span><span class="s2">"s3://my-bucket/runs/aggregate"</span><span class="p">,</span>
+    <span class="n">run_id</span><span class="o">=</span><span class="s2">"pretrain-7b-2026-03-14"</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<p>No matter which strategy you use, it’s important to keep two rules in mind. First, every
+<code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> that shares a <code class="docutils literal notranslate"><span class="pre">dp_group_id</span></code> must be built from identical definitions and
+options, since they can only produce the same batches if they are running the same
+pipeline. Second, the instances counted in the <code class="docutils literal notranslate"><span class="pre">world_size</span></code> must be exactly the instances
+that call <code class="docutils literal notranslate"><span class="pre">checkpoint()</span></code> — no more, no less.</p>
+<p id="planning-for-elasticity"><strong>Planning for elasticity.</strong> Training runs don’t always finish on the hardware that they
+started on. A job that starts on 64 GPUs may need to be resumed on 32 after a
+preemption, or scaled up to 128 GPUs if more capacity is needed. Zephon supports this by
+dividing the training curriculum into a fixed number of logical data streams called
+<strong>lanes</strong> which are controlled by the <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code> option. The lanes are then
+partitioned among the data-parallel groups the current run has:</p>
+<div class="literal-block-wrapper docutils container" id="id6">
+<div class="code-block-caption"><span class="caption-text">examples/guide/pipelines/canonical_replicas.py</span><a class="headerlink" href="#id6" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Fix the number of lanes so the run can be resumed on another topology."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.device_mesh</span><span class="w"> </span><span class="kn">import</span> <span class="n">init_device_mesh</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+
+<span class="n">mesh</span> <span class="o">=</span> <span class="n">init_device_mesh</span><span class="p">(</span><span class="s2">"cuda"</span><span class="p">,</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span> <span class="n">mesh_dim_names</span><span class="o">=</span><span class="p">(</span><span class="s2">"dp"</span><span class="p">,</span> <span class="s2">"tp"</span><span class="p">))</span>
+<span class="n">dp_mesh</span> <span class="o">=</span> <span class="n">mesh</span><span class="p">[</span><span class="s2">"dp"</span><span class="p">]</span>
+
+<span class="c1"># Eight lanes over four groups: two lanes each. It cannot be changed later, so</span>
+<span class="c1"># pick it for the largest dp_degree the run may reach, and keep every dp_degree</span>
+<span class="c1"># the run uses a divisor of it.</span>
+<span class="n">pipeline</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">(</span><span class="n">work_source</span><span class="p">)</span><span class="o">.</span><span class="n">options</span><span class="p">(</span>
+    <span class="n">canonical_replicas</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span>
+    <span class="n">dp_degree</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">size</span><span class="p">(),</span>
+    <span class="n">dp_group_id</span><span class="o">=</span><span class="n">dp_mesh</span><span class="o">.</span><span class="n">get_local_rank</span><span class="p">(),</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<p><a class="reference internal" href="../internals/elastic_determinism.html"><span class="std std-doc">Elastic determinism</span></a> explains how lanes are fed, how
+their outputs are recombined, and exactly which pieces of state survive a topology change.</p>
+<p>With <code class="docutils literal notranslate"><span class="pre">canonical_replicas=8</span></code>, a run with 8 data-parallel groups assigns one lane to each
+group, while a run with 4 data-parallel groups assigns two lanes to each of them. As long
+as <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code> stays the same, the run can be restored on a different <code class="docutils literal notranslate"><span class="pre">dp_degree</span></code>
+and each global training step will contain the same samples.
+<a class="reference internal" href="checkpointing_and_resuming.html#elastic-resumption"><span class="std std-ref">Elastic resumption</span></a> covers the restore
+process itself; here we will only focus on the settings that you need to choose at the
+start of a run because they cannot be changed later.</p>
+<ol class="arabic simple">
+<li><p><strong>Choose <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code> for the largest run you expect.</strong> The <code class="docutils literal notranslate"><span class="pre">dp_degree</span></code> can
+never exceed <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code>, so set it to the largest number of data-parallel
+groups you expect during the run. If it is left unset, it defaults to the initial
+<code class="docutils literal notranslate"><span class="pre">dp_degree</span></code> value, which allows the run to be resumed on fewer data-parallel groups,
+but not more.</p></li>
+<li><p><strong>Keep <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code> divisible by each <code class="docutils literal notranslate"><span class="pre">dp_degree</span></code> you use.</strong> Otherwise some
+data-parallel groups own more streams than others, which unbalances the load between
+them. Zephon warns when this happens, and both of our reference integrations check for
+this condition and refuse to start if it isn’t satisfied.
+<a class="reference external" href="https://en.wikipedia.org/wiki/Highly_composite_number">Highly composite numbers</a> are
+your friend here.</p></li>
+<li><p><strong>Consume a multiple of <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code> batches per optimizer step.</strong> Each lane
+produces its own fixed sequence of batches, and each data-parallel group takes turns
+delivering batches from the lanes that it owns. If every optimizer step consumes a
+multiple of <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code> batches across all of the data-parallel groups, then
+every lane contributes the same number of batches to every step, and each step contains
+the same batches no matter how the lanes are assigned to the groups. For example, with
+<code class="docutils literal notranslate"><span class="pre">canonical_replicas=8</span></code>, a step that consumes 16 batches always contains the next two
+batches from each of the eight lanes. A step that consumes only four batches contains
+batches from just four of the lanes, and which four lanes those are depends on the
+current topology, so a run that is resumed on a different topology would group its
+samples into steps differently than the original run would have. Our reference
+integrations check for this condition at startup and will raise an error if this
+doesn’t hold.</p></li>
+</ol>
+<p id="sharing-a-node"><strong>Sharing a node.</strong> Because every rank that loads data will need to run its own
+<code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>, keep in mind that a node that has 8 GPUs will be running 8 independent
+<code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instances, each with its own memory buffers and workers for fetching and
+transforming data. These instances may end up competing with each other (and with the
+training process itself) for CPU cores, memory, and network bandwidth, so be sure that
+when you are sizing the <code class="docutils literal notranslate"><span class="pre">parallelism</span></code> and other settings described in <a class="reference internal" href="inspecting_and_tuning_pipelines.html"><span class="std std-doc">Inspecting and
+tuning pipelines</span></a> that you are scaling the
+per-<code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> values down as the number of <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> instances on each node goes up,
+and double-check <code class="docutils literal notranslate"><span class="pre">Pipeline.explain()</span></code> to verify the total number of threads and
+processes that will be running on each node before you launch at scale.</p>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="checkpointing_and_resuming.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Checkpointing and resuming pipelines</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="inspecting_and_tuning_pipelines.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Inspecting and tuning pipelines</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Distributed training</a><ul>
+<li><a class="reference internal" href="#one-pipeline-per-rank">One pipeline per rank</a></li>
+<li><a class="reference internal" href="#data-identity-which-samples-to-produce">Data identity: which samples to produce</a></li>
+<li><a class="reference internal" href="#coordination-identity-which-pipelines-checkpoint-together">Coordination identity: which pipelines checkpoint together</a></li>
+<li><a class="reference internal" href="#choosing-which-ranks-build-a-pipeline">Choosing which ranks build a pipeline</a></li>
+<li><a class="reference internal" href="#planning-for-elasticity">Planning for elasticity</a></li>
+<li><a class="reference internal" href="#sharing-a-node">Sharing a node</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

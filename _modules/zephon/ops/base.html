@@ -1,0 +1,656 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
+        <link rel="prefetch" href="../../../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../../../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+        <title>zephon.ops.base - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../../../_versions/switcher.js" data-version="main" data-page="_modules/zephon/ops/base.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../../../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../../../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../pipelines/index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/operators.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for zephon.ops.base</h1><div class="highlight"><pre>
+<span></span><span class="c1"># Copyright 2025 DatologyAI</span>
+<span class="c1"># SPDX-License-Identifier: Apache-2.0</span>
+
+<span class="sd">"""Public operator authoring contracts."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">ABC</span><span class="p">,</span> <span class="n">abstractmethod</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Optional</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.ops.accumulators</span><span class="w"> </span><span class="kn">import</span> <span class="n">Accumulator</span><span class="p">,</span> <span class="n">PassthroughAccumulator</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.ops.traits</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpTraits</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.types</span><span class="w"> </span><span class="kn">import</span> <span class="n">SampleRecord</span>
+
+
+<div class="viewcode-block" id="StageInfo">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.StageInfo">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">StageInfo</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Stage metadata passed through :attr:`OpContext.stage_info`.</span>
+
+<span class="sd">    Default values indicate that setup has not run. ``stage_index`` and</span>
+<span class="sd">    ``stage_name`` identify the stage, ``op_index`` identifies the operator</span>
+<span class="sd">    within it, and ``collect_stats`` enables per-operator metrics.</span>
+
+<span class="sd">    ``copies_mapped_arrays`` indicates that the runner copies file-mapped NumPy</span>
+<span class="sd">    arrays into independent storage when sending outputs. Operators can then</span>
+<span class="sd">    skip copying those arrays themselves.</span>
+<span class="sd">    """</span>
+
+    <span class="n">stage_index</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+    <span class="n">stage_name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">""</span>
+    <span class="n">op_index</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+    <span class="n">collect_stats</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
+    <span class="n">copies_mapped_arrays</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span></div>
+
+
+
+<div class="viewcode-block" id="OpContext">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.OpContext">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">OpContext</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Container exposing runner-provided services to operator instances.</span>
+
+<span class="sd">    Plan metadata lives on the context so setup overrides keep a stable</span>
+<span class="sd">    signature.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">services</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+        <span class="n">stage_info</span><span class="p">:</span> <span class="n">StageInfo</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_services</span> <span class="o">=</span> <span class="n">services</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stage_info</span><span class="p">:</span> <span class="n">StageInfo</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="n">stage_info</span> <span class="k">if</span> <span class="n">stage_info</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">StageInfo</span><span class="p">()</span>
+        <span class="p">)</span>
+
+<div class="viewcode-block" id="OpContext.get">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.OpContext.get">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">default</span><span class="p">:</span> <span class="n">Any</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Fetch a service by name, returning ``default`` when unavailable."""</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_services</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">default</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="BaseOp">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.BaseOp">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">BaseOp</span><span class="p">(</span><span class="n">ABC</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Base class for operators — both built-in and user-authored.</span>
+
+<span class="sd">    Attach a subclass to a pipeline via the instance form of</span>
+<span class="sd">    :py:meth:`zephon.Pipeline.add_op`::</span>
+
+<span class="sd">        pipeline.add_op(MyOp(...))</span>
+
+<span class="sd">    Built-in operators subclass `BaseOp` and are attached internally;</span>
+<span class="sd">    the same class hierarchy is what user code subclasses for ops that</span>
+<span class="sd">    need full lifecycle control (``__init__`` / ``setup`` / ``traits`` /</span>
+<span class="sd">    ``accumulator`` / ``process_many``).  The kwargs form of ``add_op``</span>
+<span class="sd">    is the lighter alternative for stateless transforms — it wraps user</span>
+<span class="sd">    callables in an internal `BaseOp` subclass, so the same contract</span>
+<span class="sd">    documented here applies either way.</span>
+
+<span class="sd">    **Operators are stateless.**  Instance attributes set in ``__init__``</span>
+<span class="sd">    are read-only configuration or shared resources (a codec table, a</span>
+<span class="sd">    threshold, a tokenizer name).  ``process_many`` must not depend on or</span>
+<span class="sd">    mutate state carried across calls — any cross-invocation or per-lane</span>
+<span class="sd">    state (buffers, counters, open bins) lives in the operator's</span>
+<span class="sd">    accumulator, not on the op instance.  This is the invariant that</span>
+<span class="sd">    lets the runtime fan ``process_many`` out across parallel workers</span>
+<span class="sd">    deterministically.</span>
+
+<span class="sd">    Fan-out operators must preserve ``SampleMeta.sample_id`` and derive child</span>
+<span class="sd">    lineage with helpers from :mod:`zephon.ops.children`. This preserves</span>
+<span class="sd">    deterministic ordering and replay.</span>
+
+<span class="sd">    Worker retries do not roll back in-place changes to shared inputs.</span>
+
+<span class="sd">    Lifecycle: ``__init__`` vs ``setup``</span>
+<span class="sd">    ------------------------------------</span>
+<span class="sd">    ``__init__`` runs **once on the user's main process**: store config</span>
+<span class="sd">    and lightweight references, and leave runtime fields defaulted to</span>
+<span class="sd">    ``None``. The op instance is then deep-copied per parallel worker;</span>
+<span class="sd">    on the process and Ray runners it is also cloudpickled across the</span>
+<span class="sd">    process boundary, so anything assigned in ``__init__`` must survive</span>
+<span class="sd">    cloudpickle on those runners.</span>
+
+<span class="sd">    ``setup`` runs **once per worker after the deep copy** (and, on</span>
+<span class="sd">    cross-process runners, after the cloudpickle round trip). It is the</span>
+<span class="sd">    only place to read services from :class:`OpContext`, construct heavy</span>
+<span class="sd">    or non-picklable resources (tokenizers, model handles, open file</span>
+<span class="sd">    descriptors), and reset per-worker state. Resources built in</span>
+<span class="sd">    ``setup`` never need to survive pickling.</span>
+
+<span class="sd">    The convention in this repo is to construct tokenizers (and similar</span>
+<span class="sd">    heavy resources) in ``setup``, not ``__init__``::</span>
+
+<span class="sd">        class MyOp(BaseOp):</span>
+<span class="sd">            def __init__(self, tokenizer_name: str):</span>
+<span class="sd">                super().__init__()</span>
+<span class="sd">                self._tokenizer_name = tokenizer_name  # picklable config</span>
+<span class="sd">                self._tokenizer = None  # built per-worker in setup()</span>
+
+<span class="sd">            def traits(self) -&gt; OpTraits:</span>
+<span class="sd">                return OpTraits(</span>
+<span class="sd">                    preserves_cursor_order=True, calibration_replayable=True</span>
+<span class="sd">                )</span>
+
+<span class="sd">            def setup(self, ctx):</span>
+<span class="sd">                super().setup(ctx)</span>
+<span class="sd">                self._tokenizer = load_tokenizer(self._tokenizer_name)</span>
+
+<span class="sd">            def process_many(self, elems):</span>
+<span class="sd">                # Records in, records out: rebuild payload, preserve meta.</span>
+<span class="sd">                for e in elems:</span>
+<span class="sd">                    e.payload = {**e.payload, "ids": self._tokenizer.encode(e.payload["text"])}</span>
+<span class="sd">                return elems</span>
+
+<span class="sd">        pipeline.add_op(MyOp("gpt2"))</span>
+
+<span class="sd">    Defaults supplied:</span>
+
+<span class="sd">    - ``setup`` records ``ctx.stage_info`` as ``self.stage_info``. Overrides</span>
+<span class="sd">      should call ``super().setup(ctx)`` before initializing worker resources.</span>
+<span class="sd">    - ``teardown`` releases worker resources after processing stops. The default</span>
+<span class="sd">      does nothing; resource-owning operators should override it.</span>
+<span class="sd">    - ``accumulator`` — returns `PassthroughAccumulator` so each upstream</span>
+<span class="sd">      micro-batch is forwarded as one ready batch. Override to enable</span>
+<span class="sd">      size-based per-lane batching via `CountingAccumulator` or any custom</span>
+<span class="sd">      `Accumulator`.</span>
+<span class="sd">    - ``process_one`` — wraps the element in a single-item list and routes</span>
+<span class="sd">      it through ``process_many``. Override only when the single-element</span>
+<span class="sd">      fast path differs (rare).</span>
+
+<span class="sd">    Abstract — every subclass must implement:</span>
+
+<span class="sd">    - ``process_many`` — the workhorse transform.</span>
+<span class="sd">    - ``traits`` — must return an `OpTraits` with ``preserves_cursor_order``</span>
+<span class="sd">      declared; the subclass must declare ``True`` (1:1 maps, payload</span>
+<span class="sd">      transforms, non-reordering filters) or ``False`` (reorders, shuffles,</span>
+<span class="sd">      packs).</span>
+
+<span class="sd">    Instantiating a subclass that doesn't override both ``process_many``</span>
+<span class="sd">    and ``traits`` raises ``TypeError`` at construction time.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stage_info</span><span class="p">:</span> <span class="n">StageInfo</span> <span class="o">=</span> <span class="n">StageInfo</span><span class="p">()</span>
+
+<div class="viewcode-block" id="BaseOp.plan_identity">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.BaseOp.plan_identity">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">plan_identity</span><span class="p">(</span><span class="bp">cls</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the stable operator identity used in plan fingerprints."""</span>
+        <span class="k">if</span> <span class="bp">cls</span><span class="o">.</span><span class="vm">__module__</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"zephon._internal."</span><span class="p">):</span>
+            <span class="k">return</span> <span class="sa">f</span><span class="s2">"zephon.builtin.</span><span class="si">{</span><span class="bp">cls</span><span class="o">.</span><span class="vm">__qualname__</span><span class="si">}</span><span class="s2">"</span>
+        <span class="k">return</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="bp">cls</span><span class="o">.</span><span class="vm">__module__</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="bp">cls</span><span class="o">.</span><span class="vm">__qualname__</span><span class="si">}</span><span class="s2">"</span></div>
+
+
+<div class="viewcode-block" id="BaseOp.setup">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.BaseOp.setup">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">ctx</span><span class="p">:</span> <span class="n">OpContext</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Record plan metadata before worker processing begins.</span>
+
+<span class="sd">        The runner calls this once per worker after copying or deserializing the</span>
+<span class="sd">        operator. Overrides should call ``super().setup(ctx)``.</span>
+<span class="sd">        """</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stage_info</span> <span class="o">=</span> <span class="n">ctx</span><span class="o">.</span><span class="n">stage_info</span></div>
+
+
+<div class="viewcode-block" id="BaseOp.teardown">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.BaseOp.teardown">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">teardown</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Release resources created by ``setup`` after processing stops.</span>
+
+<span class="sd">        Runners call this when closing and if setup fails. Hard shutdown</span>
+<span class="sd">        may defer local cleanup until an active call returns; forced worker</span>
+<span class="sd">        termination may bypass it. Overrides must tolerate partial setup and</span>
+<span class="sd">        repeated calls.</span>
+<span class="sd">        """</span></div>
+
+
+<div class="viewcode-block" id="BaseOp.traits">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.BaseOp.traits">[docs]</a>
+    <span class="nd">@abstractmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">traits</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">OpTraits</span><span class="p">:</span> <span class="o">...</span></div>
+
+
+<div class="viewcode-block" id="BaseOp.accumulator">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.BaseOp.accumulator">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">accumulator</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">deterministic</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span> <span class="n">ctx</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Accumulator</span><span class="p">[</span><span class="n">Any</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Create the accumulator that defines worker batch boundaries.</span>
+
+<span class="sd">        The accumulator runs serially and owns state shared across</span>
+<span class="sd">        ``process_many`` calls.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            deterministic: Whether to disable behavior such as timed flushing.</span>
+<span class="sd">            ctx: Runtime services available to the accumulator.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            A new accumulator.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="n">PassthroughAccumulator</span><span class="p">[</span><span class="n">Any</span><span class="p">]()</span></div>
+
+
+<div class="viewcode-block" id="BaseOp.process_one">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.BaseOp.process_one">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">process_one</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">elem</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">process_many</span><span class="p">([</span><span class="n">elem</span><span class="p">])</span></div>
+
+
+<div class="viewcode-block" id="BaseOp.process_many">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.BaseOp.process_many">[docs]</a>
+    <span class="nd">@abstractmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">process_many</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">elems</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]:</span> <span class="o">...</span></div>
+
+
+<div class="viewcode-block" id="BaseOp.validation_samples">
+<a class="viewcode-back" href="../../../api/operators.html#zephon.ops.BaseOp.validation_samples">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">validation_samples</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="n">SampleRecord</span><span class="p">]]:</span>
+<span class="w">        </span><span class="sd">"""Optional records for the validation harness.</span>
+
+<span class="sd">        Override to opt this op into the validator's runtime check</span>
+<span class="sd">        suite.  Returning a small batch (~12 records across a couple of</span>
+<span class="sd">        lanes) lets the harness run determinism, cross-call-state,</span>
+<span class="sd">        self-mutation, state-diff, sample-identity, and calibration-replay</span>
+<span class="sd">        probes against ``process_many``.</span>
+
+<span class="sd">        Why instance-form ops are gated this way: the validator never</span>
+<span class="sd">        invokes ``setup``, so probing a `BaseOp` subclass whose</span>
+<span class="sd">        ``process_many`` depends on setup-built resources (the typical</span>
+<span class="sd">        pattern — tokenizers, model handles, etc.) would raise</span>
+<span class="sd">        spuriously.  Returning ``None`` (the default) tells the</span>
+<span class="sd">        validator to skip the runtime checks for this op and surface a</span>
+<span class="sd">        single ``OP_INSTANCE_RUNTIME_CHECKS_SKIPPED`` warning instead</span>
+<span class="sd">        of crashing the pipeline under ``auto_validation="strict"``.</span>
+<span class="sd">        Static-AST checks (self-writes, non-deterministic stdlib calls)</span>
+<span class="sd">        run unconditionally either way.</span>
+
+<span class="sd">        Returning an empty list, a list of the wrong type, or raising</span>
+<span class="sd">        surfaces an ``OP_VALIDATION_SAMPLES_FACTORY_FAILED`` warning</span>
+<span class="sd">        and falls back to the skip path — the validator never dies on</span>
+<span class="sd">        a buggy factory.</span>
+
+<span class="sd">        Tip: include at least two distinct ``lane_id`` values so the</span>
+<span class="sd">        cross-call-state probe (which derives an A-vs-B sample-id</span>
+<span class="sd">        variant from your records) and the lane-purity accumulator</span>
+<span class="sd">        checks remain meaningful.  Records must work *without*</span>
+<span class="sd">        ``setup`` having run — pre-tokenize / pre-encode your payload</span>
+<span class="sd">        rather than relying on the resources the real ``setup`` would</span>
+<span class="sd">        build.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="kc">None</span></div>
+</div>
+
+
+
+<span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"BaseOp"</span><span class="p">,</span> <span class="s2">"OpContext"</span><span class="p">,</span> <span class="s2">"StageInfo"</span><span class="p">]</span>
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../_static/copybutton.js?v=f281be69"></script>
+    <script src="../../../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>
