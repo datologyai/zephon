@@ -22,14 +22,17 @@
     return version;
   };
 
-  /* The same page in another version, or that version's front page when the
-   * page doesn't exist there. Over file:// the check can't run; go anyway. */
+  /* The same page in another version, keeping its query (a search) and anchor,
+   * or that version's front page when the page doesn't exist there. Over
+   * file:// the check can't run; go anyway. */
   async function go(version, latest) {
     const base = baseFor(version, latest);
     const target = new URL(page, base);
+    target.search = location.search;
+    target.hash = location.hash;
     try {
       const response = await fetch(target, { method: "HEAD" });
-      location.href = response.ok ? target.href + location.hash : base.href;
+      location.href = response.ok ? target.href : base.href;
     } catch {
       location.href = target.href;
     }

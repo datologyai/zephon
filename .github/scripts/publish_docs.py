@@ -8,8 +8,12 @@ Each build goes into a directory named for its version:
 
 The site root holds a copy of the newest final release (no ``rc``/``b``/``a``
 suffix), so the bare Pages URL, and every URL published before the docs were
-versioned, shows the latest release. Until a release has been published, the
-root holds ``main``.
+versioned, shows the latest release. Until a final release has been published,
+the root holds ``main``, or the newest pre-release if there is no ``main``.
+
+A release directory is named for its tag, which must match ``vN(.N)*`` with an
+optional ``aN``, ``bN`` or ``rcN`` suffix (``v0.2.1``, ``v0.3.0rc1``). The docs
+workflow enforces the same grammar.
 
 Every page gets a ``<script>`` tag for ``_versions/switcher.js``, which reads
 ``versions.json`` and adds a version picker, plus a banner on any version other
@@ -38,7 +42,9 @@ VERSIONS_FILE = "versions.json"
 # directories themselves.
 RESERVED = frozenset({SWITCHER_DIR, VERSIONS_FILE, ".git", ".nojekyll"})
 
-_RELEASE = re.compile(r"^v(\d+(?:\.\d+)*)(.*)$")
+# Anchored with \Z, not $, which would also accept a trailing newline.
+_RELEASE = re.compile(r"\Av(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?\Z")
+_PRE_RANK = {"a": 0, "b": 1, "rc": 2}
 _SCRIPT_TAG = re.compile(r'<script data-zephon-versions="1"[^>]*></script>\n?')
 
 
@@ -48,27 +54,31 @@ def _is_release(name: str) -> bool:
 
 def _is_final(name: str) -> bool:
     match = _RELEASE.match(name)
-    return match is not None and not match.group(2)
+    return match is not None and match.group(2) is None
 
 
-def _release_key(name: str) -> tuple[tuple[int, ...], int, str]:
+def _release_key(name: str) -> tuple[tuple[int, ...], int, int, int]:
     match = _RELEASE.match(name)
     assert match is not None
     numbers = tuple(int(part) for part in match.group(1).split("."))
-    suffix = match.group(2)
-    # A final release sorts after its own pre-releases: v0.2.0rc1 < v0.2.0.
-    return numbers, 0 if suffix else 1, suffix
+    if match.group(2) is None:
+        # A final release sorts after its own pre-releases: v0.2.0rc1 < v0.2.0.
+        return numbers, 1, 0, 0
+    return numbers, 0, _PRE_RANK[match.group(2)], int(match.group(3))
 
 
-def _version_dirs(site: Path) -> list[str]:
-    """Version directories on the site: ``main`` first, then releases, newest first."""
-    names = [
+def _ordered(names: set[str]) -> list[str]:
+    """``main`` first, then releases, newest first."""
+    releases = sorted((n for n in names if n != "main"), key=_release_key, reverse=True)
+    return (["main"] if "main" in names else []) + releases
+
+
+def _version_dirs(site: Path) -> set[str]:
+    return {
         p.name
         for p in site.iterdir()
         if p.is_dir() and (p.name == "main" or _is_release(p.name))
-    ]
-    releases = sorted((n for n in names if n != "main"), key=_release_key, reverse=True)
-    return (["main"] if "main" in names else []) + releases
+    }
 
 
 def _inject(
@@ -117,11 +127,20 @@ def _refresh_root(site: Path, source: str, versions: list[str]) -> None:
 def publish(site: Path, build: Path, version: str) -> dict[str, object]:
     """Copy ``build`` into ``site/version``, then rebuild the root copy and index."""
     if version != "main" and not _is_release(version):
-        raise SystemExit(f"version must be 'main' or a vX.Y.Z tag, not {version!r}")
+        raise SystemExit(
+            f"version must be 'main' or a release tag such as v0.2.1 or v0.3.0rc1, "
+            f"not {version!r}"
+        )
     if not (build / "index.html").is_file():
         raise SystemExit(f"{build} holds no index.html; is it a Sphinx HTML build?")
 
     site.mkdir(parents=True, exist_ok=True)
+    # Chosen before anything is written; the root source is always a version
+    # that exists once this one is in place.
+    versions = _ordered(_version_dirs(site) | {version})
+    finals = [v for v in versions if _is_final(v)]
+    latest = finals[0] if finals else versions[0]
+
     dest = site / version
     if dest.exists():
         shutil.rmtree(dest)
@@ -129,10 +148,6 @@ def publish(site: Path, build: Path, version: str) -> dict[str, object]:
         build, dest, ignore=shutil.ignore_patterns(".buildinfo", ".doctrees")
     )
     _inject(site, dest, version)
-
-    versions = _version_dirs(site)
-    finals = [v for v in versions if _is_final(v)]
-    latest = finals[0] if finals else "main"
 
     # Rebuilt on every publish: it is cheap, and the root then never lags a
     # republished version.

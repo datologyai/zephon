@@ -17,10 +17,11 @@ permissions:
   id-token: write
 
 # Shares the group with the main docs workflow so a preview and a main deploy
-# can never race for the single Pages site.
+# can never race for the single Pages site. queue: max, as there, so queueing a
+# preview never cancels a pending publish.
 concurrency:
   group: "pages"
-  cancel-in-progress: false
+  queue: max
 
 jobs:
   build:
