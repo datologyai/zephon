@@ -224,6 +224,9 @@ def _install_obstore_stubs(monkeypatch) -> dict:
         def bytes(self) -> bytes:
             return self._data
 
+        def stream(self) -> Iterator[bytes]:
+            yield self._data
+
     def mock_get(store, key):
         url = getattr(store, "_url", "")
         bucket = url.split("://", 1)[-1]

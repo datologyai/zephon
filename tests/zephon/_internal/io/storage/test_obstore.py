@@ -2,6 +2,8 @@
 
 import importlib.util
 import sys
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import obstore as obs
@@ -28,6 +30,75 @@ class _MemoryBackend(ObstoreBackend):
 
 def _keys(store: MemoryStore) -> list[str]:
     return sorted(obj["path"] for chunk in obs.list(store) for obj in chunk)
+
+
+@pytest.mark.parametrize(
+    "data", [b"", b"first\x00second" * 1024], ids=["empty", "binary"]
+)
+def test_download_from_real_obstore(tmp_path: Path, data: bytes) -> None:
+    backend = _MemoryBackend()
+    obs.put(backend.store, "file.bin", data)
+    destination = tmp_path / "nested" / "out.bin"
+
+    backend.download("mem://b/file.bin", str(destination))
+
+    assert destination.read_bytes() == data
+
+
+def test_download_writes_chunks_incrementally(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    backend = _MemoryBackend()
+    destination = tmp_path / "nested" / "out.bin"
+    # Exceed file buffering so each write is visible before requesting more data.
+    first = b"a" * (1024 * 1024)
+    second = b"b" * (1024 * 1024)
+
+    class StreamingResult:
+        def bytes(self) -> bytes:
+            raise AssertionError("download must not collect the entire object")
+
+        def stream(self) -> Iterator[memoryview]:
+            yield memoryview(first)
+            assert destination.read_bytes() == first
+            yield memoryview(second)
+
+    monkeypatch.setattr(obs, "get", lambda store, key: StreamingResult())
+
+    backend.download("mem://b/file.bin", str(destination))
+
+    assert destination.read_bytes() == first + second
+
+
+@pytest.mark.parametrize(
+    ("message", "error_type", "match"),
+    [
+        ("403 AccessDenied", FileNotFoundError, "Access denied: mem://b/file.bin"),
+        ("404 NotFound", FileNotFoundError, "Object not found: mem://b/file.bin"),
+        ("connection reset", RuntimeError, "connection reset"),
+    ],
+)
+def test_download_propagates_stream_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    message: str,
+    error_type: type[Exception],
+    match: str,
+) -> None:
+    backend = _MemoryBackend()
+    error = RuntimeError(message)
+
+    class FailingResult:
+        def stream(self) -> Iterator[bytes]:
+            yield b"partial"
+            raise error
+
+    monkeypatch.setattr(obs, "get", lambda store, key: FailingResult())
+
+    with pytest.raises(error_type, match=match) as caught:
+        backend.download("mem://b/file.bin", str(tmp_path / "out.bin"))
+
+    assert caught.value is error or caught.value.__cause__ is error
 
 
 def test_mkdir_writes_no_marker_objects() -> None:
