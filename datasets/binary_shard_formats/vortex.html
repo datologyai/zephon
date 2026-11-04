@@ -7,7 +7,7 @@
         <link rel="prefetch" href="../../_static/zephon-wordmark-teal.png" as="image">
         <link rel="prefetch" href="../../_static/zephon-wordmark-mint.png" as="image">
 
-    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
         <title>Vortex - Zephon</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo.css?v=7bdb33bb" />
@@ -86,7 +86,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="main" data-page="datasets/binary_shard_formats/vortex.html"></script>
+</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="v0.2.0" data-page="datasets/binary_shard_formats/vortex.html"></script>
 </head>
   <body>
     
@@ -428,27 +428,10 @@ shard to be created.</p>
 <p>Vortex structs return dictionaries keyed by field name, including single-field structs.
 Files containing bare values, such as strings or numeric lists, return those values
 directly. Both use the <a class="reference internal" href="../parquet.html#sample-payloads"><span class="std std-ref">same conversion rules as Parquet</span></a>.</p>
-<p id="memory-mapped-reads"><strong>Memory-mapped reads.</strong> Zephon uses regular file IO and Vortex’s segment cache by
-default. You can opt into memory-mapped reads with <code class="docutils literal notranslate"><span class="pre">memory_map=True</span></code>. This can help
-with large payloads such as images, but can slow down token and text reads, so measure
-your workload before enabling it:</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">pipeline</span><span class="o">.</span><span class="n">options</span><span class="p">(</span><span class="n">io_options</span><span class="o">=</span><span class="p">{</span><span class="s2">"vortex"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"memory_map"</span><span class="p">:</span> <span class="kc">True</span><span class="p">}})</span>
-</pre></div>
-</div>
-<p>Mmap reads segments as slices of the mapped file, using the operating system’s page
-cache instead of the segment cache. Decoding and output conversion can still allocate
-and copy. Mapped shards must not change while in use.</p>
-<p>When mmap is enabled, the default <code class="docutils literal notranslate"><span class="pre">safe_mmap=True</span></code> setting copies array views into
-owned memory so retained samples cannot keep evicted shard files on disk beyond the
-shard cache’s budget.
-Process and Ray fetch stages skip this extra copy because sending outputs already
-copies mapped arrays into independent storage. Set <code class="docutils literal notranslate"><span class="pre">safe_mmap=False</span></code> to keep array
-views on the thread or inline runner, accepting that retained samples may keep shard
-files on disk after eviction.</p>
-<p id="caching-reads"><strong>Caching reads.</strong> Zephon caches Vortex metadata in memory to speed up repeated reads.
-When memory maps are disabled, it also caches encoded file segments. Each fetch replica
-has its own caches, separate from the on-disk shard cache. You can adjust their sizes
-through the pipeline’s <code class="docutils literal notranslate"><span class="pre">io_options</span></code>; these are the defaults:</p>
+<p id="caching-reads"><strong>Caching reads.</strong> Zephon caches Vortex metadata and encoded file segments in memory to
+speed up repeated reads. Each fetch replica has its own caches, separate from the on-disk
+shard cache. You can adjust their sizes through the pipeline’s <code class="docutils literal notranslate"><span class="pre">io_options</span></code>; these are
+the defaults:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">pipeline</span><span class="o">.</span><span class="n">options</span><span class="p">(</span>
     <span class="n">io_options</span><span class="o">=</span><span class="p">{</span>
         <span class="s2">"metadata_cache_entries"</span><span class="p">:</span> <span class="mi">256</span><span class="p">,</span>
@@ -527,7 +510,6 @@ You can change the pool size through the pipeline’s <code class="docutils lite
 <li><a class="reference internal" href="#">Vortex</a><ul>
 <li><a class="reference internal" href="#preparing-vortex-shards">Preparing Vortex shards</a></li>
 <li><a class="reference internal" href="#reading-vortex-shards-in-zephon">Reading Vortex shards in Zephon</a></li>
-<li><a class="reference internal" href="#memory-mapped-reads">Memory-mapped reads</a></li>
 <li><a class="reference internal" href="#caching-reads">Caching reads</a></li>
 <li><a class="reference internal" href="#worker-threads">Worker threads</a></li>
 </ul>

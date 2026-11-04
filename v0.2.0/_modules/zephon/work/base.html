@@ -1,0 +1,922 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
+        <link rel="prefetch" href="../../../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../../../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>zephon.work.base - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../../../../_versions/switcher.js" data-version="v0.2.0" data-page="_modules/zephon/work/base.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../../../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../../../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../pipelines/index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/operators.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for zephon.work.base</h1><div class="highlight"><pre>
+<span></span><span class="c1"># Copyright 2025 DatologyAI</span>
+<span class="c1"># SPDX-License-Identifier: Apache-2.0</span>
+
+<span class="sd">"""Abstract base definitions for work sources and chunks."""</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">copy</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">ABC</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">Enum</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Iterator</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">,</span> <span class="n">MutableMapping</span><span class="p">,</span> <span class="n">Sequence</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.checkpoint</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">WORK_CHUNK_VERSION</span> <span class="k">as</span> <span class="n">_WORK_CHUNK_VERSION</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.checkpoint</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">WorkChunkStateV3</span> <span class="k">as</span> <span class="n">_WorkChunkStateV3</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.swrr</span><span class="w"> </span><span class="kn">import</span> <span class="n">swrr_iterate</span> <span class="k">as</span> <span class="n">_swrr_iterate</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.io.dataset</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dataset</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.types</span><span class="w"> </span><span class="kn">import</span> <span class="n">SampleId</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.work.mixture</span><span class="w"> </span><span class="kn">import</span> <span class="n">MixtureSpec</span>
+
+<span class="n">MixtureComponent</span> <span class="o">=</span> <span class="nb">str</span>
+<span class="n">SourcedSampleId</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">SampleId</span><span class="p">,</span> <span class="n">MixtureComponent</span><span class="p">]</span>
+<span class="n">SamplesPerComponent</span> <span class="o">=</span> <span class="n">MutableMapping</span><span class="p">[</span><span class="n">MixtureComponent</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">SampleId</span><span class="p">]]</span>
+
+
+<div class="viewcode-block" id="MixtureReadMode">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.MixtureReadMode">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">MixtureReadMode</span><span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="n">Enum</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Supported sampling strategies when iterating over a ``WorkChunk``."""</span>
+
+    <span class="n">WEIGHTED_RANDOM</span> <span class="o">=</span> <span class="s2">"weighted_random"</span>
+    <span class="n">WEIGHTED_ROUND_ROBIN</span> <span class="o">=</span> <span class="s2">"weighted_round_robin"</span></div>
+
+
+
+<div class="viewcode-block" id="ComponentOrder">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.ComponentOrder">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ComponentOrder</span><span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="n">Enum</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""How to traverse samples within an individual mixture component."""</span>
+
+    <span class="n">AS_IS</span> <span class="o">=</span> <span class="s2">"as_is"</span>
+    <span class="n">SHUFFLE</span> <span class="o">=</span> <span class="s2">"shuffle"</span></div>
+
+
+
+<div class="viewcode-block" id="MixtureReadConfig">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.MixtureReadConfig">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">MixtureReadConfig</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Reader configuration controlling deterministic traversal of a chunk."""</span>
+
+    <span class="n">mode</span><span class="p">:</span> <span class="n">MixtureReadMode</span> <span class="o">=</span> <span class="n">MixtureReadMode</span><span class="o">.</span><span class="n">WEIGHTED_ROUND_ROBIN</span>
+    <span class="n">seed</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">precompute</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>  <span class="c1"># Whether to pre-compute sample order. Might cause performance spikes when requesting the first item.</span>
+    <span class="n">within_component</span><span class="p">:</span> <span class="n">ComponentOrder</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="n">ComponentOrder</span><span class="o">.</span><span class="n">AS_IS</span>
+    <span class="p">)</span>  <span class="c1"># how to yield samples within the same component.</span></div>
+
+
+
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">_Bucket</span><span class="p">:</span>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">items</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">SampleId</span><span class="p">]</span>  <span class="c1"># for trivial concatenate</span>
+    <span class="n">it</span><span class="p">:</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">SampleId</span><span class="p">]</span>  <span class="c1"># for streaming</span>
+    <span class="n">weight</span><span class="p">:</span> <span class="nb">float</span>
+
+
+<div class="viewcode-block" id="WorkChunk">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkChunk">[docs]</a>
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">WorkChunk</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Bundle of sample identifiers handed to the engine for processing.</span>
+
+<span class="sd">    ``components`` stores each mixture component (for example, ``"German"``) and</span>
+<span class="sd">    the ordered sample identifiers that belong to it.  Mapping insertion order is used</span>
+<span class="sd">    as a stable tie-breaker whenever behaviour depends on component ordering.</span>
+
+<span class="sd">    ``target_mixture``, when set, is the per-component target the engine should</span>
+<span class="sd">    deliver to downstream mixture correctors (``ensure_mixture``) *instead of*</span>
+<span class="sd">    the counted composition. Token-aware work sources stamp the user's token</span>
+<span class="sd">    mixture here because their chunks deliberately carry a different sample</span>
+<span class="sd">    composition (long-doc components contribute fewer pointers). Redistributing</span>
+<span class="sd">    sample sources also stamp their intended target for sparse or partial chunks.</span>
+<span class="sd">    The counted :attr:`mixture` stays composition-derived for within-chunk interleaving.</span>
+<span class="sd">    Continuing sources may remove exhausted components from this target, but</span>
+<span class="sd">    must keep their identities in :meth:`WorkSource.component_ids` for late records.</span>
+
+<span class="sd">    ``source_exhausted`` must list every component whose final source sample was</span>
+<span class="sd">    produced in this or an earlier chunk. Each lane emits an end-of-data (EOD) sentinel</span>
+<span class="sd">    after that component's last sample in its first such chunk, or before the</span>
+<span class="sd">    chunk if absent. This also applies on replay. Buffered data may arrive after</span>
+<span class="sd">    the sentinel; lanes with no such chunk receive none.</span>
+<span class="sd">    """</span>
+
+    <span class="n">components</span><span class="p">:</span> <span class="n">SamplesPerComponent</span>
+    <span class="n">seed</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">target_mixture</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">float</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">source_exhausted</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">()</span>
+
+    <span class="c1">### INTERNAL ATTRIBUTES ###</span>
+    <span class="n">_order_cache</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">SourcedSampleId</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span>
+        <span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span>
+    <span class="p">)</span>
+    <span class="n">_order_cache_key</span><span class="p">:</span> <span class="nb">tuple</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="n">_component_order</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">MixtureComponent</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="n">_total_samples</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">names</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">source_exhausted</span>
+        <span class="k">if</span> <span class="p">(</span>
+            <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">names</span><span class="p">,</span> <span class="p">(</span><span class="nb">tuple</span><span class="p">,</span> <span class="nb">list</span><span class="p">))</span>
+            <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">n</span> <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">names</span><span class="p">)</span>
+            <span class="ow">or</span> <span class="nb">len</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">names</span><span class="p">))</span> <span class="o">!=</span> <span class="nb">len</span><span class="p">(</span><span class="n">names</span><span class="p">)</span>
+        <span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">"source_exhausted must be a tuple or list of unique non-empty names"</span>
+            <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">source_exhausted</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="n">names</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_component_order</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="o">.</span><span class="n">keys</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_total_samples</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">items</span><span class="p">)</span> <span class="k">for</span> <span class="n">items</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="o">.</span><span class="n">values</span><span class="p">())</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">target_mixture</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="c1"># Normalize to canonical ratios (matches the `mixture` property) and</span>
+            <span class="c1"># validate (non-empty, positive) in one step.</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">target_mixture</span> <span class="o">=</span> <span class="n">MixtureSpec</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">target_mixture</span><span class="p">)</span><span class="o">.</span><span class="n">normalized</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_total_samples</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__iter__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">SourcedSampleId</span><span class="p">]:</span>
+        <span class="k">yield from</span> <span class="bp">self</span><span class="o">.</span><span class="n">iter_samples</span><span class="p">()</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">mixture</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Return normalized mixture weights for the *active* components."""</span>
+        <span class="n">comps</span> <span class="o">=</span> <span class="p">[</span><span class="n">c</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_component_order</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">c</span><span class="p">)]</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">comps</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{}</span>
+
+        <span class="c1"># Otherwise derive from counts (skip empty buckets so MixtureSpec stays &gt;0).</span>
+        <span class="n">counts</span> <span class="o">=</span> <span class="p">{</span><span class="n">c</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">[</span><span class="n">c</span><span class="p">])</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">comps</span><span class="p">}</span>
+        <span class="k">return</span> <span class="n">MixtureSpec</span><span class="p">(</span><span class="n">counts</span><span class="p">)</span><span class="o">.</span><span class="n">normalized</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_resolve_config</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">MixtureReadConfig</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">MixtureReadConfig</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return an effective config with defaults applied (no mutation of input)."""</span>
+        <span class="n">base</span> <span class="o">=</span> <span class="n">config</span> <span class="ow">or</span> <span class="n">MixtureReadConfig</span><span class="p">()</span>
+        <span class="c1"># Fill seed from chunk if missing.</span>
+        <span class="n">seed</span> <span class="o">=</span> <span class="n">base</span><span class="o">.</span><span class="n">seed</span> <span class="k">if</span> <span class="n">base</span><span class="o">.</span><span class="n">seed</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">seed</span>
+        <span class="c1"># If you want a dynamic default (None for single-component), keep mode as-is here</span>
+        <span class="c1"># and change MixtureReadConfig.mode to Optional[MixtureReadMode] with default None.</span>
+        <span class="k">return</span> <span class="n">MixtureReadConfig</span><span class="p">(</span>
+            <span class="n">mode</span><span class="o">=</span><span class="n">base</span><span class="o">.</span><span class="n">mode</span><span class="p">,</span>
+            <span class="n">seed</span><span class="o">=</span><span class="n">seed</span><span class="p">,</span>
+            <span class="n">precompute</span><span class="o">=</span><span class="n">base</span><span class="o">.</span><span class="n">precompute</span><span class="p">,</span>
+            <span class="n">within_component</span><span class="o">=</span><span class="n">base</span><span class="o">.</span><span class="n">within_component</span><span class="p">,</span>
+        <span class="p">)</span>
+
+<div class="viewcode-block" id="WorkChunk.iter_samples">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkChunk.iter_samples">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">iter_samples</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">MixtureReadConfig</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">SourcedSampleId</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Iterate samples in mixture order, yielding (sample_id, component_name) tuples."""</span>
+        <span class="n">cfg</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_resolve_config</span><span class="p">(</span><span class="n">config</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">cfg</span><span class="o">.</span><span class="n">precompute</span><span class="p">:</span>
+            <span class="k">yield from</span> <span class="bp">self</span><span class="o">.</span><span class="n">materialize_order</span><span class="p">(</span><span class="n">cfg</span><span class="p">)</span>
+            <span class="k">return</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_total_samples</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span>
+
+        <span class="k">yield from</span> <span class="bp">self</span><span class="o">.</span><span class="n">_iter_streaming</span><span class="p">(</span><span class="n">cfg</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="WorkChunk.materialize_order">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkChunk.materialize_order">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">materialize_order</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">MixtureReadConfig</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">SourcedSampleId</span><span class="p">]:</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">mode</span><span class="p">,</span> <span class="n">config</span><span class="o">.</span><span class="n">seed</span><span class="p">,</span> <span class="n">config</span><span class="o">.</span><span class="n">within_component</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_order_cache</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_order_cache_key</span> <span class="o">==</span> <span class="n">key</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_order_cache</span>
+
+        <span class="c1"># Populate cache</span>
+        <span class="n">no_precompute_cfg</span> <span class="o">=</span> <span class="n">MixtureReadConfig</span><span class="p">(</span>
+            <span class="n">mode</span><span class="o">=</span><span class="n">config</span><span class="o">.</span><span class="n">mode</span><span class="p">,</span>
+            <span class="n">seed</span><span class="o">=</span><span class="n">config</span><span class="o">.</span><span class="n">seed</span><span class="p">,</span>
+            <span class="n">precompute</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="n">within_component</span><span class="o">=</span><span class="n">config</span><span class="o">.</span><span class="n">within_component</span><span class="p">,</span>
+        <span class="p">)</span>  <span class="c1"># avoid recursion</span>
+        <span class="n">order</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">iter_samples</span><span class="p">(</span><span class="n">no_precompute_cfg</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_order_cache</span> <span class="o">=</span> <span class="n">order</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_order_cache_key</span> <span class="o">=</span> <span class="n">key</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_order_cache</span></div>
+
+
+<div class="viewcode-block" id="WorkChunk.sample_at">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkChunk.sample_at">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">sample_at</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">MixtureReadConfig</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SourcedSampleId</span><span class="p">:</span>
+        <span class="n">cfg</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_resolve_config</span><span class="p">(</span><span class="n">config</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">materialize_order</span><span class="p">(</span><span class="n">cfg</span><span class="p">)[</span><span class="n">index</span><span class="p">]</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_iter_streaming</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">MixtureReadConfig</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">SourcedSampleId</span><span class="p">]:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_total_samples</span><span class="p">:</span>
+            <span class="k">return</span>
+
+        <span class="n">buckets</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_build_buckets</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">seed</span><span class="p">,</span> <span class="n">config</span><span class="o">.</span><span class="n">within_component</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">buckets</span><span class="p">:</span>
+            <span class="k">return</span>
+
+        <span class="c1"># Single-bucket fast path (covers both None/WRR/Random cases)</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">buckets</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="n">name</span> <span class="o">=</span> <span class="n">buckets</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span>
+            <span class="k">for</span> <span class="n">sample_id</span> <span class="ow">in</span> <span class="n">buckets</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">items</span><span class="p">:</span>
+                <span class="k">yield</span> <span class="p">(</span><span class="n">sample_id</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+            <span class="k">return</span>
+
+        <span class="k">if</span> <span class="n">config</span><span class="o">.</span><span class="n">mode</span> <span class="ow">is</span> <span class="n">MixtureReadMode</span><span class="o">.</span><span class="n">WEIGHTED_RANDOM</span><span class="p">:</span>
+            <span class="k">yield from</span> <span class="bp">self</span><span class="o">.</span><span class="n">_emit_weighted_random</span><span class="p">(</span><span class="n">buckets</span><span class="p">,</span> <span class="n">config</span><span class="o">.</span><span class="n">seed</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="n">config</span><span class="o">.</span><span class="n">mode</span> <span class="ow">is</span> <span class="n">MixtureReadMode</span><span class="o">.</span><span class="n">WEIGHTED_ROUND_ROBIN</span><span class="p">:</span>
+            <span class="k">yield from</span> <span class="bp">self</span><span class="o">.</span><span class="n">_emit_weighted_round_robin</span><span class="p">(</span><span class="n">buckets</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Unsupported mixture read mode: </span><span class="si">{</span><span class="n">config</span><span class="o">.</span><span class="n">mode</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_build_buckets</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">seed</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">within_component</span><span class="p">:</span> <span class="n">ComponentOrder</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">_Bucket</span><span class="p">]:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">random</span><span class="w"> </span><span class="kn">import</span> <span class="n">Random</span>
+
+        <span class="n">mix</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">mixture</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">mix</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">[]</span>
+
+        <span class="n">rng</span> <span class="o">=</span> <span class="n">Random</span><span class="p">()</span>
+        <span class="n">buckets</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">_Bucket</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">pos</span><span class="p">,</span> <span class="n">name</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_component_order</span><span class="p">):</span>
+            <span class="n">items</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="p">[])</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">items</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="n">seq</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">SampleId</span><span class="p">]</span>
+
+            <span class="k">if</span> <span class="n">within_component</span> <span class="ow">is</span> <span class="n">ComponentOrder</span><span class="o">.</span><span class="n">SHUFFLE</span><span class="p">:</span>
+                <span class="n">seq</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">items</span><span class="p">)</span>
+                <span class="n">effective_seed</span> <span class="o">=</span> <span class="n">seed</span> <span class="k">if</span> <span class="n">seed</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">seed</span>
+                <span class="k">if</span> <span class="n">effective_seed</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">rng</span><span class="o">.</span><span class="n">seed</span><span class="p">((</span><span class="n">effective_seed</span> <span class="o">&lt;&lt;</span> <span class="mi">16</span><span class="p">)</span> <span class="o">+</span> <span class="n">pos</span><span class="p">)</span>
+                <span class="n">rng</span><span class="o">.</span><span class="n">shuffle</span><span class="p">(</span><span class="n">seq</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">seq</span> <span class="o">=</span> <span class="n">items</span>
+
+            <span class="n">buckets</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                <span class="n">_Bucket</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span> <span class="n">items</span><span class="o">=</span><span class="n">seq</span><span class="p">,</span> <span class="n">it</span><span class="o">=</span><span class="nb">iter</span><span class="p">(</span><span class="n">seq</span><span class="p">),</span> <span class="n">weight</span><span class="o">=</span><span class="n">mix</span><span class="p">[</span><span class="n">name</span><span class="p">])</span>
+            <span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">buckets</span>
+
+    <span class="c1"># further modes: just random next sample (random without weights), trivial round robin</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_emit_weighted_random</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">buckets</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">_Bucket</span><span class="p">],</span> <span class="n">seed</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">SourcedSampleId</span><span class="p">]:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">random</span><span class="w"> </span><span class="kn">import</span> <span class="n">Random</span>
+
+        <span class="n">active</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">buckets</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">active</span><span class="p">:</span>
+            <span class="k">return</span>
+
+        <span class="n">weights</span> <span class="o">=</span> <span class="p">[</span><span class="n">b</span><span class="o">.</span><span class="n">weight</span> <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">active</span><span class="p">]</span>
+        <span class="n">rng</span> <span class="o">=</span> <span class="n">Random</span><span class="p">(</span><span class="n">seed</span><span class="p">)</span>
+
+        <span class="k">while</span> <span class="n">active</span><span class="p">:</span>
+            <span class="c1"># pick a bucket index according to its weight</span>
+            <span class="n">idx</span> <span class="o">=</span> <span class="n">rng</span><span class="o">.</span><span class="n">choices</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">active</span><span class="p">)),</span> <span class="n">weights</span><span class="o">=</span><span class="n">weights</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">1</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="n">b</span> <span class="o">=</span> <span class="n">active</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">yield</span> <span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">b</span><span class="o">.</span><span class="n">it</span><span class="p">),</span> <span class="n">b</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">StopIteration</span><span class="p">:</span>
+                <span class="c1"># drop exhausted bucket and its weight</span>
+                <span class="k">del</span> <span class="n">active</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
+                <span class="k">del</span> <span class="n">weights</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_emit_weighted_round_robin</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">buckets</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">_Bucket</span><span class="p">]</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">SourcedSampleId</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Smooth Weighted Round Robin (SWRR) using shared implementation.</span>
+
+<span class="sd">        Delegates to swrr_iterate() which provides deterministic, proportional</span>
+<span class="sd">        emission matching target weights over time.</span>
+<span class="sd">        """</span>
+        <span class="k">yield from</span> <span class="n">_swrr_iterate</span><span class="p">(</span>
+            <span class="n">components</span><span class="o">=</span><span class="p">{</span><span class="n">b</span><span class="o">.</span><span class="n">name</span><span class="p">:</span> <span class="n">b</span><span class="o">.</span><span class="n">items</span> <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">buckets</span><span class="p">},</span>
+            <span class="n">weights</span><span class="o">=</span><span class="p">{</span><span class="n">b</span><span class="o">.</span><span class="n">name</span><span class="p">:</span> <span class="n">b</span><span class="o">.</span><span class="n">weight</span> <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">buckets</span><span class="p">},</span>
+            <span class="n">order</span><span class="o">=</span><span class="p">[</span><span class="n">b</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">buckets</span><span class="p">],</span>
+        <span class="p">)</span>
+
+<div class="viewcode-block" id="WorkChunk.state_dict">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkChunk.state_dict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">state_dict</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Portable, JSON-friendly snapshot of this chunk (always the current version)."""</span>
+        <span class="n">comps_serial</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="nb">int</span><span class="p">]]]]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_component_order</span><span class="p">:</span>
+            <span class="n">items</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="p">[])</span>
+            <span class="n">comps_serial</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">name</span><span class="p">,</span> <span class="p">[</span><span class="nb">list</span><span class="p">(</span><span class="n">sid</span><span class="p">)</span> <span class="k">for</span> <span class="n">sid</span> <span class="ow">in</span> <span class="n">items</span><span class="p">]))</span>
+
+        <span class="n">state</span> <span class="o">=</span> <span class="n">_WorkChunkStateV3</span><span class="p">(</span>
+            <span class="n">version</span><span class="o">=</span><span class="n">_WORK_CHUNK_VERSION</span><span class="p">,</span>
+            <span class="n">seed</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">seed</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">seed</span><span class="p">),</span>
+            <span class="n">components</span><span class="o">=</span><span class="n">comps_serial</span><span class="p">,</span>
+            <span class="n">component_order</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_component_order</span><span class="p">),</span>
+            <span class="n">total_samples</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_total_samples</span><span class="p">),</span>
+            <span class="n">source_exhausted</span><span class="o">=</span><span class="nb">sorted</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">source_exhausted</span><span class="p">),</span>
+            <span class="n">target_mixture</span><span class="o">=</span><span class="p">(</span>
+                <span class="kc">None</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">target_mixture</span> <span class="ow">is</span> <span class="kc">None</span>
+                <span class="k">else</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">target_mixture</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+            <span class="p">),</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">state</span><span class="o">.</span><span class="n">to_dict</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="WorkChunk.from_state">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkChunk.from_state">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_state</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">payload</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="s2">"WorkChunk"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Rebuild a WorkChunk from state_dict()."""</span>
+        <span class="n">ckpt</span> <span class="o">=</span> <span class="n">_WorkChunkStateV3</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+
+        <span class="n">comps</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">SampleId</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">items</span> <span class="ow">in</span> <span class="n">ckpt</span><span class="o">.</span><span class="n">components</span><span class="p">:</span>
+            <span class="n">restored</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">SampleId</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">for</span> <span class="n">raw</span> <span class="ow">in</span> <span class="n">items</span><span class="p">:</span>
+                <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">3</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Bad SampleId for component </span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">raw</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+                <span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="n">c</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">raw</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="nb">int</span><span class="p">(</span><span class="n">raw</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span> <span class="nb">int</span><span class="p">(</span><span class="n">raw</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span>
+                <span class="n">restored</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="n">c</span><span class="p">))</span>
+            <span class="n">comps</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">restored</span>
+
+        <span class="n">chunk</span> <span class="o">=</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">components</span><span class="o">=</span><span class="n">comps</span><span class="p">,</span>
+            <span class="n">seed</span><span class="o">=</span><span class="n">ckpt</span><span class="o">.</span><span class="n">seed</span><span class="p">,</span>
+            <span class="n">target_mixture</span><span class="o">=</span><span class="n">ckpt</span><span class="o">.</span><span class="n">target_mixture</span><span class="p">,</span>
+            <span class="n">source_exhausted</span><span class="o">=</span><span class="nb">tuple</span><span class="p">(</span><span class="n">ckpt</span><span class="o">.</span><span class="n">source_exhausted</span><span class="p">),</span>
+        <span class="p">)</span>
+
+        <span class="k">if</span> <span class="p">(</span>
+            <span class="n">ckpt</span><span class="o">.</span><span class="n">component_order</span>
+            <span class="ow">and</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">ckpt</span><span class="o">.</span><span class="n">component_order</span><span class="p">)</span> <span class="o">!=</span> <span class="n">chunk</span><span class="o">.</span><span class="n">_component_order</span>
+        <span class="p">):</span>
+            <span class="n">ordered</span> <span class="o">=</span> <span class="p">{</span><span class="n">name</span><span class="p">:</span> <span class="n">comps</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">ckpt</span><span class="o">.</span><span class="n">component_order</span><span class="p">}</span>
+            <span class="n">chunk</span><span class="o">.</span><span class="n">components</span> <span class="o">=</span> <span class="n">ordered</span>
+            <span class="n">chunk</span><span class="o">.</span><span class="n">__post_init__</span><span class="p">()</span>
+
+        <span class="k">if</span> <span class="p">(</span>
+            <span class="n">ckpt</span><span class="o">.</span><span class="n">total_samples</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+            <span class="ow">and</span> <span class="n">ckpt</span><span class="o">.</span><span class="n">total_samples</span> <span class="o">!=</span> <span class="n">chunk</span><span class="o">.</span><span class="n">_total_samples</span>
+        <span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"WorkChunk total_samples mismatch: payload=</span><span class="si">{</span><span class="n">ckpt</span><span class="o">.</span><span class="n">total_samples</span><span class="si">}</span><span class="s2">, "</span>
+                <span class="sa">f</span><span class="s2">"computed=</span><span class="si">{</span><span class="n">chunk</span><span class="o">.</span><span class="n">_total_samples</span><span class="si">}</span><span class="s2">"</span>
+            <span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">chunk</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="WorkSource">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">WorkSource</span><span class="p">(</span><span class="n">ABC</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Abstract producer of `WorkChunk` instances for the engine."""</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lane</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_canon</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cloned</span> <span class="o">=</span> <span class="kc">False</span>
+
+<div class="viewcode-block" id="WorkSource.next_chunk">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource.next_chunk">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">next_chunk</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">WorkChunk</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">()</span></div>
+
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">requires_token_priming</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Whether :meth:`prime` must run before this source produces chunks."""</span>
+        <span class="k">return</span> <span class="kc">False</span>
+
+<div class="viewcode-block" id="WorkSource.prime">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource.prime">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">prime</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">io_options</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">counting_spec</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">pre_tokenize_replay</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">mp_context</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Driver-side calibration hook; no-op by default."""</span></div>
+
+
+<div class="viewcode-block" id="WorkSource.state_dict">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource.state_dict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">state_dict</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">"lane_id"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lane</span><span class="p">,</span>
+            <span class="s2">"canonical_replicas"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_canon</span><span class="p">,</span>
+            <span class="s2">"chunk_size_hint"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">chunk_size_hint</span><span class="p">(),</span>
+        <span class="p">}</span></div>
+
+
+<div class="viewcode-block" id="WorkSource.load_state_dict">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource.load_state_dict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">load_state_dict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">state</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_verify_base_state</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">state</span><span class="p">[</span><span class="s2">"lane_id"</span><span class="p">]),</span> <span class="nb">int</span><span class="p">(</span><span class="n">state</span><span class="p">[</span><span class="s2">"canonical_replicas"</span><span class="p">]))</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_verify_base_state</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">lane_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">canonical_replicas</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Verify lane/canonical-replicas identity against this instance.</span>
+
+<span class="sd">        Subclasses that route state through a typed schema should call this</span>
+<span class="sd">        directly (passing schema fields) instead of ``super().load_state_dict(state)``</span>
+<span class="sd">        so a future rename in the schema does not desync from the base.</span>
+<span class="sd">        """</span>
+        <span class="k">if</span> <span class="n">lane_id</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lane</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"Lane mismatch loading LaneWorkSource state."</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">canonical_replicas</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_canon</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">"canonical_replicas changed; migration required."</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_bind_lane</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">lane_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">canonical_replicas</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Bind the clone to a specific lane.</span>
+
+<span class="sd">        Update any internal seed/cursors using lane_id if needed.</span>
+<span class="sd">        """</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cloned</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="s2">"State Error: The WorkSource should have been cloned internally before binding it."</span>
+            <span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lane</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">lane_id</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_canon</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">canonical_replicas</span><span class="p">)</span>
+
+<div class="viewcode-block" id="WorkSource.clone_for_lane">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource.clone_for_lane">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">clone_for_lane</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">lane_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">canonical_replicas</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"WorkSource"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Default clone strategy: config-based if available, else deepcopy."""</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cloned</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="s2">"State Error: clone_for_lane should only be called on user-defined WorkSource instances."</span>
+            <span class="p">)</span>
+        <span class="n">ws</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+        <span class="n">ws</span><span class="o">.</span><span class="n">_cloned</span> <span class="o">=</span> <span class="kc">True</span>
+        <span class="n">ws</span><span class="o">.</span><span class="n">_bind_lane</span><span class="p">(</span><span class="n">lane_id</span><span class="p">,</span> <span class="n">canonical_replicas</span><span class="p">)</span>
+
+        <span class="c1"># TODO(MaxiBoether): Implement an alternative to deepcopy if worksources support it.</span>
+        <span class="c1"># try:</span>
+        <span class="c1">#    cfg = self.config_dict()</span>
+        <span class="c1">#    ws = type(self).from_config(cfg)</span>
+        <span class="c1"># except Exception:</span>
+        <span class="c1"># fall back to deepcopy; ensure your subclass is deepcopy-safe</span>
+        <span class="c1">#    ws = copy.deepcopy(self)</span>
+        <span class="k">return</span> <span class="n">ws</span></div>
+
+
+<div class="viewcode-block" id="WorkSource.supports_indexing">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource.supports_indexing">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">supports_indexing</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">()</span>
+
+<div class="viewcode-block" id="WorkSource.sample_id_at">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource.sample_id_at">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">sample_id_at</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SampleId</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">()</span></div>
+
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">datasets_by_id</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="n">Dataset</span><span class="p">]:</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">()</span>
+
+<div class="viewcode-block" id="WorkSource.component_ids">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource.component_ids">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">component_ids</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Static component-name -&gt; id vocabulary.</span>
+
+<span class="sd">        Fixed for the source's lifetime and covering every component it will</span>
+<span class="sd">        ever emit (curriculum stages included), so ids are a pure function of</span>
+<span class="sd">        config across ranks, topology changes, and resumes. Ids are unique</span>
+<span class="sd">        non-negative ints, not necessarily dense.</span>
+
+<span class="sd">        The final EOD is recognized only after every declared component has been</span>
+<span class="sd">        announced exhausted on that lane, including components that emit no records.</span>
+<span class="sd">        See :attr:`~zephon.ops.accumulators.SourceExhaustion.final_component`.</span>
+<span class="sd">        """</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="WorkSource.continues_after_exhaustion">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource.continues_after_exhaustion">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">continues_after_exhaustion</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">frozenset</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Components whose exhaustion allows the source to keep producing.</span>
+
+<span class="sd">        Return a subset of :meth:`component_ids`, fixed across lanes and restores.</span>
+<span class="sd">        The engine marks each end-of-data (EOD) sentinel with this policy. The runner</span>
+<span class="sd">        exposes the observed exhausted component ids that permit continuation as</span>
+<span class="sd">        ``SourceExhaustion.continuing``. Accumulators obtain the callback with</span>
+<span class="sd">        ``ctx.get("get_source_exhaustion")``; it may be absent during validation</span>
+<span class="sd">        (see :meth:`~zephon.ops.accumulators.Accumulator.on_source_exhausted`).</span>
+<span class="sd">        EOD sentinels are emitted independently of this policy.</span>
+
+<span class="sd">        The default is empty. Later chunk targets may omit listed components,</span>
+<span class="sd">        but their ids must remain in :meth:`component_ids` for buffered records.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="nb">frozenset</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="WorkSource.chunk_size_hint">
+<a class="viewcode-back" href="../../../api/worksources.html#zephon.work.WorkSource.chunk_size_hint">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">chunk_size_hint</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the configured chunk size, if known; individual chunks may be shorter.</span>
+
+<span class="sd">        Used for deterministic resume validation. Default None.</span>
+<span class="sd">        """</span>
+        <span class="k">return</span> <span class="kc">None</span></div>
+</div>
+
+
+
+<span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="s2">"ComponentOrder"</span><span class="p">,</span>
+    <span class="s2">"MixtureComponent"</span><span class="p">,</span>
+    <span class="s2">"MixtureReadConfig"</span><span class="p">,</span>
+    <span class="s2">"MixtureReadMode"</span><span class="p">,</span>
+    <span class="s2">"SamplesPerComponent"</span><span class="p">,</span>
+    <span class="s2">"SourcedSampleId"</span><span class="p">,</span>
+    <span class="s2">"WorkChunk"</span><span class="p">,</span>
+    <span class="s2">"WorkSource"</span><span class="p">,</span>
+<span class="p">]</span>
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../_static/copybutton.js?v=f281be69"></script>
+    <script src="../../../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

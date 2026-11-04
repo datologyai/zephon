@@ -6,7 +6,7 @@
         <link rel="prefetch" href="../../../_static/zephon-wordmark-teal.png" as="image">
         <link rel="prefetch" href="../../../_static/zephon-wordmark-mint.png" as="image">
 
-    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
         <title>zephon.io.options - Zephon</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
@@ -85,7 +85,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../../../_versions/switcher.js" data-version="main" data-page="_modules/zephon/io/options.html"></script>
+</style><script data-zephon-versions="1" defer src="../../../_versions/switcher.js" data-version="v0.2.0" data-page="_modules/zephon/io/options.html"></script>
 </head>
   <body>
     
@@ -457,8 +457,6 @@
     <span class="n">open_retry_max_backoff</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="n">_option</span><span class="p">(</span><span class="mf">2.0</span><span class="p">)</span>
     <span class="n">min_slack_bytes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">_option</span><span class="p">(</span><span class="mi">512</span> <span class="o">*</span> <span class="mi">1024</span><span class="p">)</span>  <span class="c1"># 512 KiB minimum slack</span>
     <span class="n">max_slack_bytes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">_option</span><span class="p">(</span><span class="mi">64</span> <span class="o">*</span> <span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span><span class="p">)</span>  <span class="c1"># 64 MiB maximum slack</span>
-    <span class="c1"># Keep shards across runs; reused only if the next run reads the same shards.</span>
-    <span class="n">persist_state</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="n">_option</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
     <span class="n">_provided_fields</span><span class="p">:</span> <span class="nb">frozenset</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span>
         <span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
         <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
@@ -668,18 +666,8 @@
 <span class="k">class</span><span class="w"> </span><span class="nc">VortexOptions</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">"""Vortex read-cache and process-wide worker-pool configuration.</span>
 
-<span class="sd">    ``memory_map`` defaults to False, using file IO and the segment cache.</span>
-<span class="sd">    True maps local shards and reads segments as slices of the map, using the</span>
-<span class="sd">    OS page cache instead. Decoding and output conversion can still allocate</span>
-<span class="sd">    and copy. Mapped shards must not change while in use.</span>
-<span class="sd">    ``safe_mmap`` copies array views from mapped reads into owned memory so</span>
-<span class="sd">    retained samples cannot keep evicted shard files on disk. Process and Ray</span>
-<span class="sd">    stages skip this extra copy because sending outputs already copies mapped</span>
-<span class="sd">    arrays into independent storage. False keeps array views on thread and</span>
-<span class="sd">    inline runners.</span>
 <span class="sd">    ``segment_cache_bytes`` sets the encoded-segment cache's target size per</span>
-<span class="sd">    fetch replica when ``memory_map`` is False. Zero disables it. The target is</span>
-<span class="sd">    not a strict memory bound.</span>
+<span class="sd">    fetch replica. Zero disables it. The target is not a strict memory bound.</span>
 <span class="sd">    ``worker_threads`` defaults to one background worker; calling fetch threads</span>
 <span class="sd">    can also execute Vortex work. Zero disables background workers, and explicit</span>
 <span class="sd">    None leaves the pool unchanged. An explicit count overrides VORTEX_MAX_THREADS;</span>
@@ -689,10 +677,6 @@
 
     <span class="n">segment_cache_bytes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">_option</span><span class="p">(</span><span class="mi">64</span> <span class="o">*</span> <span class="mi">1024</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span>
     <span class="n">worker_threads</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">_option</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">preserve_none</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-    <span class="c1"># Mmap can help with large payloads such as images, but can slow down</span>
-    <span class="c1"># token and text reads. Measure your workload before enabling it.</span>
-    <span class="n">memory_map</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="n">_option</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
-    <span class="n">safe_mmap</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="n">_option</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
     <span class="n">_provided_fields</span><span class="p">:</span> <span class="nb">frozenset</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span>
         <span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
         <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
@@ -701,11 +685,6 @@
 
     <span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">_normalize_options</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
-        <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">memory_map</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="nb">bool</span><span class="p">:</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"vortex.memory_map must be a boolean"</span><span class="p">)</span>
-        <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">safe_mmap</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="nb">bool</span><span class="p">:</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"vortex.safe_mmap must be a boolean"</span><span class="p">)</span>
-
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">worker_threads</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">_validate_non_negative_int</span><span class="p">(</span><span class="s2">"vortex.worker_threads"</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">worker_threads</span><span class="p">)</span>
         <span class="n">_validate_non_negative_int</span><span class="p">(</span>

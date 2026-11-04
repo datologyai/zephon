@@ -1,0 +1,619 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Pipelines: from a curriculum to training batches" href="../pipelines/index.html"><link rel="prev" title="Mixing datasets" href="mixing_datasets.html">
+        <link rel="prefetch" href="../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Shuffling and repeating samples - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="v0.2.0" data-page="worksources/shuffling_and_repeating_samples.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 current has-children"><a class="reference internal" href="index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" checked="" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2 current current-page"><a class="current reference internal" href="#">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../pipelines/index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../internals/index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../api/datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/operators.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/worksources/shuffling_and_repeating_samples.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="shuffling-and-repeating-samples">
+<h1>Shuffling and repeating samples<a class="headerlink" href="#shuffling-and-repeating-samples" title="Link to this heading">¶</a></h1>
+<p id="sample-order-is-part-of-the-curriculum"><strong>Sample order is part of the curriculum.</strong> While the mixture specification determines
+how many samples each <code class="docutils literal notranslate"><span class="pre">Dataset</span></code> contributes to each training epoch and how samples from
+different <code class="docutils literal notranslate"><span class="pre">Dataset</span></code>s are interleaved, the shuffle specification determines the order in
+which the <code class="docutils literal notranslate"><span class="pre">StaticMixtureWorkSource</span></code> draws samples from each individual <code class="docutils literal notranslate"><span class="pre">Dataset</span></code> before
+that interleaving occurs. Shuffling is critical because the samples that are adjacent to
+one another within the shards of a <code class="docutils literal notranslate"><span class="pre">Dataset</span></code> often share common attributes (like source,
+format, language, or quality) that likely do not reflect the overall representation of
+those attributes in the overall data that we want to train on. Ideally, each local batch
+of training data is made up of a mixture of samples that reflect the overall
+distribution of the training data to ensure that the optimization process does not
+over-index on one specific type of data, which can make the training process unstable or
+lead to misleading loss curves. A random shuffle of the training data is one of the best
+tools we have to help local batches better reflect the overall distribution of data from
+the training set as a whole.</p>
+<p>Of course, there is a tradeoff between the strength of the random shuffle we perform and
+the throughput of our data loading pipeline: while a purely random global shuffle reduces
+local correlation between samples caused by the original ordering during the training
+epoch to a maximum, it comes at a cost for the I/O locality and efficiency of reading the
+data, especially for data formats that are not designed for efficient random access to
+individual records within a file or cloud setups. Zephon provides a number of settings on
+the <code class="docutils literal notranslate"><span class="pre">StaticMixtureWorkSource</span></code> that allows you to control how samples are shuffled within
+each training epoch so that you can maximize the performance of your data loading pipeline
+while minimizing the impact of spurious correlations between samples on your training
+loop.</p>
+<p id="choosing-a-shuffle-strategy"><strong>Choosing a shuffle strategy.</strong> Our shuffling configuration is inspired by <a class="reference external" href="https://docs.mosaicml.com/projects/streaming/en/latest/dataset_configuration/shuffling.html">Mosaic
+Streaming</a>.
+By default, the <code class="docutils literal notranslate"><span class="pre">StaticMixtureWorkSource</span></code> will shuffle the order of the individual
+shards within a <code class="docutils literal notranslate"><span class="pre">Dataset</span></code>. You can turn this default behavior off by setting
+<code class="docutils literal notranslate"><span class="pre">shuffle_shards=False</span></code> on the constructor. Shuffling the shards within each <code class="docutils literal notranslate"><span class="pre">Dataset</span></code>
+every time it is processed during an epoch is a mechanism for getting a minimal amount
+of randomness in your training loop without any meaningful cost in I/O efficiency,
+because the <code class="docutils literal notranslate"><span class="pre">WorkSource</span></code> will be able to draw the samples from each shard in the
+<code class="docutils literal notranslate"><span class="pre">Dataset</span></code> sequentially.</p>
+<p>The next level of shuffling is <code class="docutils literal notranslate"><span class="pre">shuffle_within_shard</span></code>, which is disabled by default; it
+randomizes the order in which samples from a single shard are read on each epoch. This is
+a good option to enable when the adjacent samples within a shard have strongly correlated
+properties that we would like to avoid training on, but it does impose an additional
+compute cost when the format of our <code class="docutils literal notranslate"><span class="pre">Dataset</span></code> is not designed for efficient random access
+of individual records (most notably <a class="reference internal" href="../datasets/parquet.html"><span class="std std-doc">Parquet</span></a>).</p>
+<p>The third level is the <code class="docutils literal notranslate"><span class="pre">shuffle_block_size</span></code> setting, which allows us to optionally shuffle
+samples within a single <code class="docutils literal notranslate"><span class="pre">Dataset</span></code> across a window of samples that may cross shards (it
+defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code>, which disables this additional shuffling). If you don’t have a strong
+sense of what a good shuffle window size would be for your dataset, setting
+<code class="docutils literal notranslate"><span class="pre">shuffle_block_size=&quot;auto&quot;</span></code> will have Zephon choose a shuffle block size that is equal to
+eight times the number of samples in the largest shard in any <code class="docutils literal notranslate"><span class="pre">Dataset</span></code> included in the
+mixture (or simply the size of the <code class="docutils literal notranslate"><span class="pre">Dataset</span></code> itself if it happens to be smaller than that
+window size). This setting provides cross-shard mixing over several shards and is a solid
+default until you have a compelling reason to set a different window size yourself.</p>
+<p>Finally, setting the <code class="docutils literal notranslate"><span class="pre">shuffle_block_size</span></code> to the string <code class="docutils literal notranslate"><span class="pre">&quot;global&quot;</span></code> will apply a truly
+global shuffle across the entire <code class="docutils literal notranslate"><span class="pre">Dataset</span></code>. Note that this requires us to materialize all
+sample IDs of the entire <code class="docutils literal notranslate"><span class="pre">Dataset</span></code> upfront and shuffle them. At trillion-token scale
+training, this might not be possible as just the sample identifiers can take hundreds of
+gigabytes of DRAM, and this is slow. Our other shuffle algorithms avoid full
+materialization of the identifiers up front.</p>
+<p>A global shuffle is not as important as you might think it is: our friends at Mosaic
+Streaming have observed that the entropy of a shuffle across the shards is
+<a class="reference external" href="https://docs.mosaicml.com/projects/streaming/en/latest/distributed_training/performance_tuning.html#shuffle-quality">extremely close to an actual global shuffle</a>.</p>
+<p id="repeating-samples"><strong>Repeating samples.</strong> In addition to determining the order in which the records from
+each <code class="docutils literal notranslate"><span class="pre">Dataset</span></code> are processed, we also need to decide when to stop drawing samples from
+each <code class="docutils literal notranslate"><span class="pre">Dataset</span></code>, i.e., when an epoch ends. By default, the <code class="docutils literal notranslate"><span class="pre">StaticMixtureWorkSource</span></code>
+repeats datasets that finish a pass sooner under the requested mixture in order to
+maintain the requested mixture until every dataset has reached the end of its first
+pass. To continue drawing samples until every dataset has reached the end of at least
+<code class="docutils literal notranslate"><span class="pre">n</span></code> passes, set the <code class="docutils literal notranslate"><span class="pre">stop_after_passes</span></code> argument to <code class="docutils literal notranslate"><span class="pre">n</span></code> instead of the default value of
+<code class="docutils literal notranslate"><span class="pre">1</span></code>:</p>
+<div class="literal-block-wrapper docutils container" id="id1">
+<div class="code-block-caption"><span class="caption-text">examples/guide/worksources/repeat_passes.py</span><a class="headerlink" href="#id1" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Keep drawing samples until every dataset has completed three passes."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.io</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dataset</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.work</span><span class="w"> </span><span class="kn">import</span> <span class="n">MixtureSpec</span><span class="p">,</span> <span class="n">StaticMixtureWorkSource</span>
+
+<span class="n">code</span> <span class="o">=</span> <span class="n">Dataset</span><span class="o">.</span><span class="n">from_path</span><span class="p">(</span><span class="s2">"code"</span><span class="p">,</span> <span class="s2">"s3://my-bucket/corpora/code"</span><span class="p">)</span>
+<span class="n">web</span> <span class="o">=</span> <span class="n">Dataset</span><span class="o">.</span><span class="n">from_path</span><span class="p">(</span><span class="s2">"web"</span><span class="p">,</span> <span class="s2">"s3://my-bucket/corpora/web"</span><span class="p">)</span>
+
+<span class="c1"># Datasets that get there first keep repeating to hold the mixture while the</span>
+<span class="c1"># others catch up, reshuffled on each pass unless reshuffle_on_repeat is off.</span>
+<span class="n">work_source</span> <span class="o">=</span> <span class="n">StaticMixtureWorkSource</span><span class="p">(</span>
+    <span class="n">datasets</span><span class="o">=</span><span class="p">[</span><span class="n">code</span><span class="p">,</span> <span class="n">web</span><span class="p">],</span>
+    <span class="n">mixture</span><span class="o">=</span><span class="n">MixtureSpec</span><span class="p">({</span><span class="s2">"code"</span><span class="p">:</span> <span class="mf">0.25</span><span class="p">,</span> <span class="s2">"web"</span><span class="p">:</span> <span class="mf">0.75</span><span class="p">}),</span>
+    <span class="n">seed</span><span class="o">=</span><span class="mi">42</span><span class="p">,</span>
+    <span class="n">stop_after_passes</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<p>Note that each time a <code class="docutils literal notranslate"><span class="pre">Dataset</span></code> is processed, its shuffle settings will be applied to it
+with a deterministic per-epoch shuffle seed in order to generate a different ordering of
+the samples for that pass; you can disable this behavior by setting the
+<code class="docutils literal notranslate"><span class="pre">reshuffle_on_repeat</span></code> argument to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">stop_after_passes</span></code> argument controls how many passes <strong>every dataset</strong> must complete
+before the work source stops. Datasets that reach this target sooner continue repeating to
+maintain the requested mixture while the remaining datasets catch up.</p>
+<p>You can instead control what happens when an individual dataset runs out of samples using
+<code class="docutils literal notranslate"><span class="pre">exhausted_policy</span></code>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">exhausted_policy=&quot;stop&quot;</span></code> stops the entire work source as soon as any dataset can no
+longer supply its requested allocation. No dataset repeats, but other datasets may still
+have unread samples. This means that setting both <code class="docutils literal notranslate"><span class="pre">exhausted_policy=&quot;stop&quot;</span></code> and
+<code class="docutils literal notranslate"><span class="pre">stop_after_passes</span></code> is an invalid configuration. An empty dataset gives you an error
+when you create the work source. If it can’t produce its first chunk, you’ll get an
+error when you start reading.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">exhausted_policy=&quot;repeat&quot;</span></code> restarts each dataset independently whenever it runs out.
+Without an additional stopping limit, the work source continues indefinitely. This is
+useful when your training loop controls termination through a fixed number of steps or
+tokens.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">exhausted_policy=&quot;redistribute&quot;</span></code> reads each dataset once. When a dataset runs out,
+its weight is redistributed proportionally over the remaining datasets. The work source
+stops once every dataset has been consumed. In token mode, the remaining datasets keep
+their relative token weights. Chunks can be shorter when a dataset runs out.
+Empty datasets are allowed as long as at least one dataset has samples.</p></li>
+</ul>
+<p>A short chunk keeps the target from before exhaustion; its contents may differ.
+For example, in sample mode with a 50:50 A:B mixture and chunk size 4, if only one A
+remains, the chunk contains one A and two B, still with a 50:50 target. Later chunks
+use a 100% B target.</p>
+<p>With redistribution, <code class="docutils literal notranslate"><span class="pre">len(source)</span></code> is exact when every dataset redistributes. When mixed
+with stop or capped-repeat policies, it is an estimate.</p>
+<p>With <code class="docutils literal notranslate"><span class="pre">exhausted_policy=&quot;repeat&quot;</span></code>, you can also set <code class="docutils literal notranslate"><span class="pre">max_repeats=N</span></code>. This allows each
+dataset its initial pass plus at most <code class="docutils literal notranslate"><span class="pre">N</span></code> additional passes. The entire WorkSource stops
+when any dataset can no longer supply its requested allocation without exceeding that
+limit. Other datasets may have completed fewer passes, or may still be on their first
+pass.</p>
+<p><code class="docutils literal notranslate"><span class="pre">stop_after_passes</span></code> waits for every dataset to reach a minimum number of passes, while
+<code class="docutils literal notranslate"><span class="pre">max_repeats</span></code> stops the source when any dataset would exceed its maximum number of
+repeats. Just like with <code class="docutils literal notranslate"><span class="pre">exhausted_policy=&quot;stop&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">stop_after_passes</span></code> can also not be
+combined with <code class="docutils literal notranslate"><span class="pre">max_repeats</span></code>.</p>
+<p>When none of these settings is supplied, Zephon defaults to <code class="docutils literal notranslate"><span class="pre">stop_after_passes=1</span></code> and
+automatically repeats datasets as needed. Specifying <code class="docutils literal notranslate"><span class="pre">exhausted_policy</span></code> or <code class="docutils literal notranslate"><span class="pre">max_repeats</span></code>
+replaces this default stopping behavior. Assuming you don’t set <code class="docutils literal notranslate"><span class="pre">max_repeats</span></code>:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>What you supply</p></th>
+<th class="head"><p>Effective <code class="docutils literal notranslate"><span class="pre">exhausted_policy</span></code></p></th>
+<th class="head"><p>Effective <code class="docutils literal notranslate"><span class="pre">stop_after_passes</span></code></p></th>
+<th class="head"><p>When the source stops</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Nothing</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;repeat&quot;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+<td><p>Once every dataset has completed at least one pass</p></td>
+</tr>
+<tr class="row-odd"><td><p>Only <code class="docutils literal notranslate"><span class="pre">exhausted_policy=&quot;repeat&quot;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;repeat&quot;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">None</span></code></p></td>
+<td><p>Never automatically; datasets repeat indefinitely</p></td>
+</tr>
+<tr class="row-even"><td><p>Only <code class="docutils literal notranslate"><span class="pre">exhausted_policy=&quot;stop&quot;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;stop&quot;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">None</span></code></p></td>
+<td><p>When any dataset cannot supply its next allocation, no repeats</p></td>
+</tr>
+<tr class="row-odd"><td><p>Only <code class="docutils literal notranslate"><span class="pre">exhausted_policy=&quot;redistribute&quot;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;redistribute&quot;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">None</span></code></p></td>
+<td><p>Once every dataset has been consumed, no repeats</p></td>
+</tr>
+<tr class="row-even"><td><p>Only <code class="docutils literal notranslate"><span class="pre">stop_after_passes=N</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;repeat&quot;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">N</span></code></p></td>
+<td><p>Once every dataset has completed at least <code class="docutils literal notranslate"><span class="pre">N</span></code> passes</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">exhausted_policy</span></code>, <code class="docutils literal notranslate"><span class="pre">max_repeats</span></code>, and <code class="docutils literal notranslate"><span class="pre">reshuffle_on_repeat</span></code> settings can each be
+configured per-<code class="docutils literal notranslate"><span class="pre">Dataset</span></code> to allow for more complex training plans:</p>
+<div class="literal-block-wrapper docutils container" id="id2">
+<div class="code-block-caption"><span class="caption-text">examples/guide/worksources/per_dataset_repeat_settings.py</span><a class="headerlink" href="#id2" title="Link to this code">¶</a></div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Give each Dataset its own repetition behaviour."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.io</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dataset</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.work</span><span class="w"> </span><span class="kn">import</span> <span class="n">MixtureSpec</span><span class="p">,</span> <span class="n">StaticMixtureWorkSource</span>
+
+<span class="n">code</span> <span class="o">=</span> <span class="n">Dataset</span><span class="o">.</span><span class="n">from_path</span><span class="p">(</span><span class="s2">"code"</span><span class="p">,</span> <span class="s2">"s3://my-bucket/corpora/code"</span><span class="p">)</span>
+<span class="n">web</span> <span class="o">=</span> <span class="n">Dataset</span><span class="o">.</span><span class="n">from_path</span><span class="p">(</span><span class="s2">"web"</span><span class="p">,</span> <span class="s2">"s3://my-bucket/corpora/web"</span><span class="p">)</span>
+
+<span class="c1"># The small code set may be seen up to three times over; the large web set is</span>
+<span class="c1"># read once and stops the source when it runs out.</span>
+<span class="n">work_source</span> <span class="o">=</span> <span class="n">StaticMixtureWorkSource</span><span class="p">(</span>
+    <span class="n">datasets</span><span class="o">=</span><span class="p">[</span><span class="n">code</span><span class="p">,</span> <span class="n">web</span><span class="p">],</span>
+    <span class="n">mixture</span><span class="o">=</span><span class="n">MixtureSpec</span><span class="p">({</span><span class="s2">"code"</span><span class="p">:</span> <span class="mf">0.25</span><span class="p">,</span> <span class="s2">"web"</span><span class="p">:</span> <span class="mf">0.75</span><span class="p">}),</span>
+    <span class="n">seed</span><span class="o">=</span><span class="mi">42</span><span class="p">,</span>
+    <span class="n">exhausted_policy</span><span class="o">=</span><span class="p">{</span><span class="s2">"code"</span><span class="p">:</span> <span class="s2">"repeat"</span><span class="p">,</span> <span class="s2">"web"</span><span class="p">:</span> <span class="s2">"stop"</span><span class="p">},</span>
+    <span class="n">max_repeats</span><span class="o">=</span><span class="p">{</span><span class="s2">"code"</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">"web"</span><span class="p">:</span> <span class="kc">None</span><span class="p">},</span>
+    <span class="n">reshuffle_on_repeat</span><span class="o">=</span><span class="p">{</span><span class="s2">"code"</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">"web"</span><span class="p">:</span> <span class="kc">False</span><span class="p">},</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<p>A redistributing dataset leaves the mix when it runs out. Other datasets retain their
+own policies: a <code class="docutils literal notranslate"><span class="pre">&quot;stop&quot;</span></code> dataset or a reached repeat cap still stops the entire source,
+while uncapped repeats can keep it running indefinitely.</p>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="../pipelines/index.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Pipelines: from a curriculum to training batches</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="mixing_datasets.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Mixing datasets</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Shuffling and repeating samples</a><ul>
+<li><a class="reference internal" href="#sample-order-is-part-of-the-curriculum">Sample order is part of the curriculum</a></li>
+<li><a class="reference internal" href="#choosing-a-shuffle-strategy">Choosing a shuffle strategy</a></li>
+<li><a class="reference internal" href="#repeating-samples">Repeating samples</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

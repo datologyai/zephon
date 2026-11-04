@@ -6,7 +6,7 @@
         <link rel="prefetch" href="../../../_static/zephon-wordmark-teal.png" as="image">
         <link rel="prefetch" href="../../../_static/zephon-wordmark-mint.png" as="image">
 
-    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
         <title>zephon._internal.pipeline - Zephon</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
@@ -85,7 +85,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../../../_versions/switcher.js" data-version="main" data-page="_modules/zephon/_internal/pipeline.html"></script>
+</style><script data-zephon-versions="1" defer src="../../../_versions/switcher.js" data-version="v0.2.0" data-page="_modules/zephon/_internal/pipeline.html"></script>
 </head>
   <body>
     
@@ -341,13 +341,11 @@
 <span class="kn">import</span><span class="w"> </span><span class="nn">importlib.util</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_importlib_util</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span>
-<span class="kn">import</span><span class="w"> </span><span class="nn">weakref</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Iterable</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">,</span> <span class="n">Sequence</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">TYPE_CHECKING</span><span class="p">,</span>
     <span class="n">Any</span><span class="p">,</span>
     <span class="n">Callable</span><span class="p">,</span>
-    <span class="n">Generator</span><span class="p">,</span>
     <span class="n">Iterator</span><span class="p">,</span>
     <span class="n">Literal</span><span class="p">,</span>
     <span class="n">Optional</span><span class="p">,</span>
@@ -359,12 +357,7 @@
     <span class="n">overload</span><span class="p">,</span>
 <span class="p">)</span>
 
-<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.checkpoint._aggregation</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
-    <span class="n">aggregate_checkpoint</span><span class="p">,</span>
-    <span class="n">requires_aggregation</span><span class="p">,</span>
-<span class="p">)</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.coordination</span><span class="w"> </span><span class="kn">import</span> <span class="n">CheckpointCoordinator</span><span class="p">,</span> <span class="n">make_coordinator</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.engine</span><span class="w"> </span><span class="kn">import</span> <span class="n">Engine</span><span class="p">,</span> <span class="n">get_torch_worker_info</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.engine</span><span class="w"> </span><span class="kn">import</span> <span class="n">Engine</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.functional_op</span><span class="w"> </span><span class="kn">import</span> <span class="n">_FunctionalOp</span><span class="p">,</span> <span class="n">_is_user_op</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.graph</span><span class="w"> </span><span class="kn">import</span> <span class="n">Graph</span><span class="p">,</span> <span class="n">Node</span><span class="p">,</span> <span class="n">Plan</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.ops.batch</span><span class="w"> </span><span class="kn">import</span> <span class="n">Batch</span>
@@ -389,7 +382,6 @@
 <span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.stream</span><span class="w"> </span><span class="kn">import</span> <span class="n">EngineSample</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">buffered_iterable</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.gc_freeze</span><span class="w"> </span><span class="kn">import</span> <span class="n">GCFreeze</span><span class="p">,</span> <span class="n">resolve_gc_freeze</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.utils.torch_compat</span><span class="w"> </span><span class="kn">import</span> <span class="n">detect_loader_kind</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon.io.options</span><span class="w"> </span><span class="kn">import</span> <span class="n">StoreOptions</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">ExecutionTrackingMode</span><span class="p">,</span> <span class="n">MetricsSinkConfig</span>
@@ -402,7 +394,6 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon.ops.accumulators</span><span class="w"> </span><span class="kn">import</span> <span class="n">Accumulator</span><span class="p">,</span> <span class="n">PassthroughAccumulator</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon.ops.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseOp</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon.ops.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
-    <span class="n">ChatSpecialTokensMode</span><span class="p">,</span>
     <span class="n">LossScope</span><span class="p">,</span>
     <span class="n">MissingFieldMode</span><span class="p">,</span>
     <span class="n">PackingAlgorithm</span><span class="p">,</span>
@@ -544,12 +535,7 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_sp</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># MTPPipeline handle (lazy import)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_pending_restore</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_last_state</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_last_local_state</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_final_mtp_coordinator</span><span class="p">:</span> <span class="n">CheckpointCoordinator</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_mtp_started</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_iterating</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
-        <span class="c1"># Track iterator wrappers (including MTP) without keeping them alive.</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_iterators</span><span class="p">:</span> <span class="n">weakref</span><span class="o">.</span><span class="n">WeakSet</span><span class="p">[</span><span class="n">Generator</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">]]</span> <span class="o">=</span> <span class="n">weakref</span><span class="o">.</span><span class="n">WeakSet</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_validated</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_options</span> <span class="o">=</span> <span class="n">RuntimeOptions</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_fetch_node</span><span class="p">:</span> <span class="n">Node</span><span class="p">[</span><span class="n">FetchOp</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_graph</span><span class="o">.</span><span class="n">add</span><span class="p">(</span>
@@ -1194,7 +1180,6 @@
         <span class="n">tokenizer</span><span class="p">:</span> <span class="n">Any</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">tokenizer_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="o">*</span><span class="p">,</span>
-        <span class="n">eos_token</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">field</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
         <span class="n">missing_field</span><span class="p">:</span> <span class="n">MissingFieldMode</span> <span class="o">=</span> <span class="s2">"error"</span><span class="p">,</span>
         <span class="n">add_attention_mask</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
@@ -1211,17 +1196,9 @@
         <span class="n">placement</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"auto"</span><span class="p">,</span>
         <span class="n">parallelism</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"Pipeline"</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">"""Tokenize a text field.</span>
-
-<span class="sd">        Array outputs preserve the dtype supplied by the tokenizer, which may be</span>
-<span class="sd">        unsigned; Python lists use the requested framework's dtype inference.</span>
-<span class="sd">        Dtype conversion for training should normally happen in ``to_training()``</span>
-<span class="sd">        or a custom map op.</span>
-<span class="sd">        """</span>
         <span class="n">op</span> <span class="o">=</span> <span class="n">TokenizeText</span><span class="p">(</span>
             <span class="n">tokenizer</span><span class="p">,</span>
             <span class="n">tokenizer_id</span><span class="p">,</span>
-            <span class="n">eos_token</span><span class="o">=</span><span class="n">eos_token</span><span class="p">,</span>
             <span class="n">field</span><span class="o">=</span><span class="n">field</span><span class="p">,</span>
             <span class="n">missing_field</span><span class="o">=</span><span class="n">missing_field</span><span class="p">,</span>
             <span class="n">add_attention_mask</span><span class="o">=</span><span class="n">add_attention_mask</span><span class="p">,</span>
@@ -1292,15 +1269,11 @@
         <span class="n">tokenizer_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="o">*</span><span class="p">,</span>
         <span class="n">eos_token</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-        <span class="n">special_tokens</span><span class="p">:</span> <span class="n">ChatSpecialTokensMode</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-        <span class="n">bos_token_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-        <span class="n">eos_token_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">field</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"messages"</span><span class="p">,</span>
         <span class="n">max_length</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">chat_template</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">apply_chat_template</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
         <span class="n">span_source</span><span class="p">:</span> <span class="n">SpanSource</span> <span class="o">=</span> <span class="s2">"auto"</span><span class="p">,</span>
-        <span class="n">supervise_assistant_header</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">loss_scope</span><span class="p">:</span> <span class="n">LossScope</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">loss_on_last_turn_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">chat_template_kwargs</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -1315,10 +1288,8 @@
 
 <span class="sd">        Reads role/content messages from ``field`` (default: ``messages``).</span>
 <span class="sd">        Provide a fast Hugging Face ``tokenizer`` or ``tokenizer_id``.</span>
-<span class="sd">        Uses the tokenizer's own chat template unless ``chat_template`` supplies</span>
-<span class="sd">        a template name, Jinja text or a file path. Without an override, a</span>
-<span class="sd">        non-None value at ``tools_field`` selects ``tool_use`` when that template</span>
-<span class="sd">        exists, otherwise ``default``. ``chat_template_kwargs`` supplies static arguments;</span>
+<span class="sd">        ``chat_template`` overrides the tokenizer's template with Jinja text or</span>
+<span class="sd">        a file path. ``chat_template_kwargs`` supplies static template arguments;</span>
 <span class="sd">        ``tools_field`` and ``enable_thinking_field`` select per-record values.</span>
 
 <span class="sd">        Output replaces the payload with aligned, unshifted NumPy arrays:</span>
@@ -1328,26 +1299,14 @@
 <span class="sd">        Samples with fewer than two tokens or no supervised tokens are dropped.</span>
 
 <span class="sd">        Targets come from ``{% generation %}`` blocks. Untagged templates infer</span>
-<span class="sd">        assistant ranges by rendering successive conversation prefixes. Set</span>
-<span class="sd">        ``supervise_assistant_header=True`` to include assistant headers in those ranges.</span>
+<span class="sd">        assistant ranges by rendering successive conversation prefixes.</span>
+<span class="sd">        ``apply_chat_template=False`` concatenates message content, appends EOS</span>
+<span class="sd">        to assistant messages and selects targets from their roles.</span>
+
 <span class="sd">        ``loss_scope`` selects all assistant spans (``all_assistant``, default),</span>
-<span class="sd">        the final contiguous supervised run (``last_span``), all assistant messages</span>
-<span class="sd">        after the final user (``after_last_user``), or every token except the first</span>
-<span class="sd">        (``all_tokens``). Untagged templates require explicit</span>
-<span class="sd">        ``span_source="prefix_diff"`` with ``after_last_user``.</span>
-
-<span class="sd">        ``special_tokens="bos"``, ``"eos"`` or ``"bos_eos"`` adds the requested</span>
-<span class="sd">        tokens around the complete conversation, reserving room under ``max_length``.</span>
-<span class="sd">        ``"none"`` adds no tokens beyond those in the input or template.</span>
-<span class="sd">        ``bos_token_id`` and ``eos_token_id`` choose IDs for explicit outer insertion.</span>
-<span class="sd">        ``eos_token`` overrides the EOS string when loading ``tokenizer_id``.</span>
-
-<span class="sd">        ``apply_chat_template=False`` concatenates message contents without role</span>
-<span class="sd">        headers. In this mode, ``special_tokens="tokenizer_default"`` uses the</span>
-<span class="sd">        tokenizer's configured special-token processing, and ``"assistant_eos"``</span>
-<span class="sd">        appends EOS after each assistant message. With ``special_tokens`` omitted,</span>
-<span class="sd">        plain conversations use per-assistant EOS; templated conversations get a</span>
-<span class="sd">        final EOS if missing and space remains.</span>
+<span class="sd">        the final contiguous supervised run (``last_span``), or all assistant</span>
+<span class="sd">        messages after the final user (``after_last_user``). Untagged templates</span>
+<span class="sd">        require explicit ``span_source="prefix_diff"`` with ``after_last_user``.</span>
 
 <span class="sd">        With generation tags, ``after_last_user`` verifies templates automatically.</span>
 <span class="sd">        Each selected assistant's generation blocks must cover its reasoning,</span>
@@ -1370,15 +1329,11 @@
             <span class="n">tokenizer</span><span class="p">,</span>
             <span class="n">tokenizer_id</span><span class="p">,</span>
             <span class="n">eos_token</span><span class="o">=</span><span class="n">eos_token</span><span class="p">,</span>
-            <span class="n">special_tokens</span><span class="o">=</span><span class="n">special_tokens</span><span class="p">,</span>
-            <span class="n">bos_token_id</span><span class="o">=</span><span class="n">bos_token_id</span><span class="p">,</span>
-            <span class="n">eos_token_id</span><span class="o">=</span><span class="n">eos_token_id</span><span class="p">,</span>
             <span class="n">field</span><span class="o">=</span><span class="n">field</span><span class="p">,</span>
             <span class="n">max_length</span><span class="o">=</span><span class="n">max_length</span><span class="p">,</span>
             <span class="n">chat_template</span><span class="o">=</span><span class="n">chat_template</span><span class="p">,</span>
             <span class="n">apply_chat_template</span><span class="o">=</span><span class="n">apply_chat_template</span><span class="p">,</span>
             <span class="n">span_source</span><span class="o">=</span><span class="n">span_source</span><span class="p">,</span>
-            <span class="n">supervise_assistant_header</span><span class="o">=</span><span class="n">supervise_assistant_header</span><span class="p">,</span>
             <span class="n">loss_scope</span><span class="o">=</span><span class="n">loss_scope</span><span class="p">,</span>
             <span class="n">chat_template_kwargs</span><span class="o">=</span><span class="n">chat_template_kwargs</span><span class="p">,</span>
             <span class="n">tools_field</span><span class="o">=</span><span class="n">tools_field</span><span class="p">,</span>
@@ -1685,10 +1640,7 @@
 <span class="sd">        (wrap/best_fit_wrap). Each list element remains a distinct segment;</span>
 <span class="sd">        buffered algorithms may reorder segments, and best_fit_wrap may emit a</span>
 <span class="sd">        suffix before its remaining prefix. ``pack_payloads`` merges that list</span>
-<span class="sd">        (default keeps it as-is). When a callback returns a merged mapping of</span>
-<span class="sd">        unshifted token/media fields, use ``SampleBatch.to_training`` to convert</span>
-<span class="sd">        the batched packs into training tensors.</span>
-<span class="sd">        For built-in concatenation/padding of token-aligned fields with</span>
+<span class="sd">        (default keeps it as-is). For flat, tensor-ready training records with</span>
 <span class="sd">        ``positions``, use :meth:`pack_flat` instead.</span>
 
 <span class="sd">        Args:</span>
@@ -1885,24 +1837,10 @@
         <span class="n">tracking</span><span class="p">:</span> <span class="n">ExecutionTrackingMode</span> <span class="o">|</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">ExecutionTrackingMode</span><span class="o">.</span><span class="n">NODES</span><span class="p">,</span>
         <span class="o">*</span><span class="p">,</span>
         <span class="n">sink</span><span class="p">:</span> <span class="n">MetricsSinkConfig</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-        <span class="n">measure_bytes</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"Pipeline"</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">"""Enable runtime metrics collection for the compiled pipeline.</span>
-
-<span class="sd">        Args:</span>
-<span class="sd">            tracking: How much execution detail to collect.</span>
-<span class="sd">            sink: Where metrics are exported; defaults to logs.</span>
-<span class="sd">            measure_bytes: Size each node's consumed/produced payloads under</span>
-<span class="sd">                ``NODES`` tracking. ``True`` or ``False`` forces it for every</span>
-<span class="sd">                stage. ``None`` (default) keeps any value already set via</span>
-<span class="sd">                :meth:`options`; if none was set, only runners that ship</span>
-<span class="sd">                payloads between processes or hosts (process and remote</span>
-<span class="sd">                stages) measure.</span>
-<span class="sd">        """</span>
+<span class="w">        </span><span class="sd">"""Enable runtime metrics collection for the compiled pipeline."""</span>
         <span class="n">mode</span> <span class="o">=</span> <span class="n">ExecutionTrackingMode</span><span class="o">.</span><span class="n">from_value</span><span class="p">(</span><span class="n">tracking</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_options</span><span class="o">.</span><span class="n">execution_tracking</span> <span class="o">=</span> <span class="n">mode</span>
-        <span class="k">if</span> <span class="n">measure_bytes</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_options</span><span class="o">.</span><span class="n">measure_bytes</span> <span class="o">=</span> <span class="n">measure_bytes</span>
         <span class="k">if</span> <span class="n">sink</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">sink</span> <span class="o">=</span> <span class="n">MetricsSinkConfig</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_options</span><span class="o">.</span><span class="n">metrics_sink_config</span> <span class="o">=</span> <span class="n">sink</span>
@@ -2251,33 +2189,9 @@
         <span class="c1"># after the first next().</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_run_auto_validation</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_prime_worksource</span><span class="p">()</span>
-        <span class="n">iterator</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_iter_body</span><span class="p">()</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_iterators</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">iterator</span><span class="p">)</span>
-        <span class="k">return</span> <span class="n">iterator</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_iter_body</span><span class="p">()</span>
 
-<div class="viewcode-block" id="Pipeline.close">
-<a class="viewcode-back" href="../../../api/pipeline.html#zephon.Pipeline.close">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">close</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">"""Close iterators and runtimes; safe to repeat.</span>
-
-<span class="sd">        Call between iteration steps from the owning thread.</span>
-<span class="sd">        MTP saves acknowledged progress locally for a later checkpoint.</span>
-<span class="sd">        Save and restore a checkpoint before resuming a closed stream.</span>
-<span class="sd">        """</span>
-        <span class="n">error</span><span class="p">:</span> <span class="ne">BaseException</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="c1"># Iterator cleanup captures MTP progress before the child shuts down.</span>
-        <span class="k">for</span> <span class="n">resource</span> <span class="ow">in</span> <span class="p">[</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">_iterators</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sp</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span><span class="p">]:</span>
-            <span class="k">if</span> <span class="n">resource</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                <span class="k">try</span><span class="p">:</span>
-                    <span class="n">resource</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
-                <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
-                    <span class="k">if</span> <span class="n">error</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-                        <span class="n">error</span> <span class="o">=</span> <span class="n">exc</span>
-        <span class="k">if</span> <span class="n">error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="k">raise</span> <span class="n">error</span></div>
-
-
-    <span class="k">def</span><span class="w"> </span><span class="nf">_iter_body</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Generator</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">]:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_iter_body</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">Any</span><span class="p">]:</span>
         <span class="k">try</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_iterating</span> <span class="o">=</span> <span class="kc">True</span>
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_options</span><span class="o">.</span><span class="n">mtp_mode</span><span class="p">:</span>
@@ -2326,36 +2240,20 @@
         <span class="k">return</span> <span class="n">engine</span><span class="p">,</span> <span class="n">iterator</span><span class="p">,</span> <span class="n">use_monotone</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_iter_inline</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">Any</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">"""Run the engine in the current process."""</span>
-        <span class="c1"># GC freezing affects the whole interpreter, so inline mode defaults off.</span>
-        <span class="c1"># This also applies to daemon workers falling back from MTP.</span>
-        <span class="n">freezer</span> <span class="o">=</span> <span class="n">GCFreeze</span><span class="p">(</span><span class="n">resolve_gc_freeze</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_options</span><span class="o">.</span><span class="n">gc_freeze</span><span class="p">,</span> <span class="n">mtp</span><span class="o">=</span><span class="kc">False</span><span class="p">))</span>
+<span class="w">        </span><span class="sd">"""Original inline iteration path — Engine runs in this process."""</span>
+        <span class="n">ckpt</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_restore</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_pending_restore</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">engine</span><span class="p">,</span> <span class="n">iterator</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_build_raw_iter</span><span class="p">(</span><span class="n">restore_ckpt</span><span class="o">=</span><span class="n">ckpt</span><span class="p">)</span>
         <span class="k">try</span><span class="p">:</span>
-            <span class="n">ckpt</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_restore</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_pending_restore</span> <span class="o">=</span> <span class="kc">None</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_last_local_state</span> <span class="o">=</span> <span class="kc">None</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_final_mtp_coordinator</span> <span class="o">=</span> <span class="kc">None</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_mtp_started</span> <span class="o">=</span> <span class="kc">False</span>
-            <span class="n">engine</span><span class="p">,</span> <span class="n">iterator</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_build_raw_iter</span><span class="p">(</span><span class="n">restore_ckpt</span><span class="o">=</span><span class="n">ckpt</span><span class="p">)</span>
-            <span class="k">try</span><span class="p">:</span>
-                <span class="k">yield from</span> <span class="bp">self</span><span class="o">.</span><span class="n">_yield_while_notifying</span><span class="p">(</span><span class="n">iterator</span><span class="p">)</span>
-            <span class="k">finally</span><span class="p">:</span>
-                <span class="n">engine</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+            <span class="k">yield from</span> <span class="bp">self</span><span class="o">.</span><span class="n">_yield_while_notifying</span><span class="p">(</span><span class="n">iterator</span><span class="p">)</span>
         <span class="k">finally</span><span class="p">:</span>
-            <span class="n">freezer</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+            <span class="n">engine</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_iter_mtp</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">Any</span><span class="p">]:</span>
 <span class="w">        </span><span class="sd">"""MTP iteration path — Engine runs in a child process."""</span>
         <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.mtp</span><span class="w"> </span><span class="kn">import</span> <span class="n">MTPPipeline</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">_last_state</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_last_local_state</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_final_mtp_coordinator</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_mtp_started</span> <span class="o">=</span> <span class="kc">False</span>
-        <span class="c1"># The child owns stream progress; release any checkpoint-only parent engine.</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="n">sp</span> <span class="o">=</span> <span class="n">MTPPipeline</span><span class="p">(</span>
             <span class="bp">self</span><span class="p">,</span>
             <span class="n">buffer_size</span><span class="o">=</span><span class="n">resolve_mtp_buffer</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_options</span><span class="p">),</span>
@@ -2365,27 +2263,26 @@
             <span class="n">restore_ckpt</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_pending_restore</span><span class="p">,</span>
         <span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_sp</span> <span class="o">=</span> <span class="n">sp</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_mtp_started</span> <span class="o">=</span> <span class="kc">True</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_pending_restore</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="n">completed</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="n">_completed</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="k">try</span><span class="p">:</span>
             <span class="k">yield from</span> <span class="n">sp</span>
-            <span class="n">completed</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="n">_completed</span> <span class="o">=</span> <span class="kc">True</span>
         <span class="k">finally</span><span class="p">:</span>
             <span class="c1"># Inner try/finally ensures sp.close() always runs even if</span>
             <span class="c1"># the checkpoint attempt raises (timeout, dead child, etc.).</span>
             <span class="k">try</span><span class="p">:</span>
                 <span class="k">if</span> <span class="ow">not</span> <span class="n">sp</span><span class="o">.</span><span class="n">_closed</span><span class="p">:</span>
-                    <span class="k">if</span> <span class="n">completed</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="n">_completed</span><span class="p">:</span>
                         <span class="c1"># Normal completion: subprocess is in _wait_for_shutdown</span>
-                        <span class="c1"># and can always handle LOCAL_CHECKPOINT.</span>
+                        <span class="c1"># and can always handle CHECKPOINT.</span>
                         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_options</span><span class="o">.</span><span class="n">mtp_auto_checkpoint</span><span class="p">:</span>
-                            <span class="bp">self</span><span class="o">.</span><span class="n">_last_local_state</span> <span class="o">=</span> <span class="n">sp</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">(</span><span class="n">local</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_last_state</span> <span class="o">=</span> <span class="n">sp</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">()</span>
                     <span class="k">else</span><span class="p">:</span>
                         <span class="c1"># Early break: subprocess may be blocked on data_q.put()</span>
                         <span class="c1"># or in next(iterator).  Best-effort capture by draining</span>
                         <span class="c1"># data_q (without ACKs) to unblock the put-retry loop,</span>
-                        <span class="c1"># which calls _drain_ctrl and sees our LOCAL_CHECKPOINT.</span>
+                        <span class="c1"># which calls _drain_ctrl and sees our CHECKPOINT.</span>
                         <span class="c1">#</span>
                         <span class="c1"># NOTE: This works when the subprocess is blocked on</span>
                         <span class="c1"># data_q.put (the common case — queue is full because</span>
@@ -2398,11 +2295,8 @@
                         <span class="c1"># TODO: To handle the stuck-in-next(iterator) case, we'd</span>
                         <span class="c1"># need a background thread in the subprocess listening on</span>
                         <span class="c1"># ctrl_conn, or a signal-based interrupt mechanism.</span>
-                        <span class="n">sp</span><span class="o">.</span><span class="n">capture_final_state</span><span class="p">(</span><span class="n">local</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-                        <span class="k">if</span> <span class="n">sp</span><span class="o">.</span><span class="n">_last_state_is_local</span><span class="p">:</span>
-                            <span class="bp">self</span><span class="o">.</span><span class="n">_last_local_state</span> <span class="o">=</span> <span class="n">sp</span><span class="o">.</span><span class="n">_last_state</span>
-                        <span class="k">else</span><span class="p">:</span>
-                            <span class="bp">self</span><span class="o">.</span><span class="n">_last_state</span> <span class="o">=</span> <span class="n">sp</span><span class="o">.</span><span class="n">_last_state</span>
+                        <span class="n">sp</span><span class="o">.</span><span class="n">capture_final_state</span><span class="p">()</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_last_state</span> <span class="o">=</span> <span class="n">sp</span><span class="o">.</span><span class="n">_last_state</span>
             <span class="k">finally</span><span class="p">:</span>
                 <span class="n">sp</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_sp</span> <span class="o">=</span> <span class="kc">None</span>
@@ -2543,36 +2437,9 @@
         <span class="k">return</span> <span class="kc">None</span></div>
 
 
-    <span class="nd">@overload</span>
-    <span class="k">def</span><span class="w"> </span><span class="nf">checkpoint</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">as_bytes</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="kc">False</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span> <span class="o">...</span>
-
-    <span class="nd">@overload</span>
-    <span class="k">def</span><span class="w"> </span><span class="nf">checkpoint</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">as_bytes</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="kc">True</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">bytes</span><span class="p">:</span> <span class="o">...</span>
-
 <div class="viewcode-block" id="Pipeline.checkpoint">
 <a class="viewcode-back" href="../../../api/pipeline.html#zephon.Pipeline.checkpoint">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">checkpoint</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">as_bytes</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="nb">bytes</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">"""Collect resumable pipeline progress, optionally as one encoded value.</span>
-
-<span class="sd">        Args:</span>
-<span class="sd">            as_bytes: Return versioned, zstd-compressed MessagePack bytes instead</span>
-<span class="sd">                of the default dictionary. This lets checkpoint systems such as</span>
-<span class="sd">                PyTorch DCP preserve dynamic replay entries as one value without</span>
-<span class="sd">                requiring integrations to pickle the state. All participating</span>
-<span class="sd">                ranks must still call checkpoint at the same training step.</span>
-<span class="sd">                Custom work-source state must use MessagePack-compatible values.</span>
-
-<span class="sd">        Returns:</span>
-<span class="sd">            The complete checkpoint dictionary, or its encoded bytes. Encoding</span>
-<span class="sd">            occurs after collection and any distributed aggregation.</span>
-<span class="sd">        """</span>
-        <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.checkpoint</span><span class="w"> </span><span class="kn">import</span> <span class="n">encode_checkpoint</span>
-
-        <span class="n">state</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_checkpoint_state</span><span class="p">()</span>
-        <span class="k">return</span> <span class="n">encode_checkpoint</span><span class="p">(</span><span class="n">state</span><span class="p">)</span> <span class="k">if</span> <span class="n">as_bytes</span> <span class="k">else</span> <span class="n">state</span></div>
-
-
-    <span class="k">def</span><span class="w"> </span><span class="nf">_checkpoint_state</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">checkpoint</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
         <span class="c1"># Live subprocess — ask it for a checkpoint.</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sp</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sp</span><span class="o">.</span><span class="n">checkpoint</span><span class="p">()</span>
@@ -2580,8 +2447,6 @@
         <span class="c1"># the pending checkpoint supersedes any stale engine / _last_state.</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_restore</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">return</span> <span class="nb">dict</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_pending_restore</span><span class="p">)</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_local_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_aggregate_final_mtp_state</span><span class="p">()</span>
         <span class="c1"># Inline engine (live or closed) — state_dict() works either way.</span>
         <span class="c1"># Checked before _last_state so a subsequent inline iteration</span>
         <span class="c1"># takes precedence over a stale cached subprocess checkpoint.</span>
@@ -2590,77 +2455,19 @@
         <span class="c1"># Cached state from a completed subprocess iteration.</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_state</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mtp_started</span><span class="p">:</span>
-            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
-                <span class="s2">"MTP iteration ended without a saved checkpoint. "</span>
-                <span class="o">+</span> <span class="s2">"Call checkpoint() before closing or exhausting the iterator, "</span>
-                <span class="o">+</span> <span class="s2">"or set mtp_auto_checkpoint=True for normal exhaustion."</span>
-            <span class="p">)</span>
         <span class="c1"># The only engine build that bypasses __iter__: prime first, or the</span>
         <span class="c1"># checkpoint serializes unprimed token lanes no restore can prime.</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_prime_worksource</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_ensure</span><span class="p">()</span>
         <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span><span class="o">.</span><span class="n">state_dict</span><span class="p">()</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine</span><span class="o">.</span><span class="n">state_dict</span><span class="p">()</span></div>
 
-    <span class="k">def</span><span class="w"> </span><span class="nf">_aggregate_final_mtp_state</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">"""Aggregate the finished child's cached progress."""</span>
-        <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_local_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
-        <span class="n">local</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_local_state</span>
-        <span class="n">world</span> <span class="o">=</span> <span class="n">local</span><span class="p">[</span><span class="s2">"world"</span><span class="p">]</span>
-        <span class="k">if</span> <span class="n">requires_aggregation</span><span class="p">(</span><span class="n">local</span><span class="p">)</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_final_mtp_coordinator</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_ensure_plan</span><span class="p">()</span>
-            <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_plan</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_final_mtp_coordinator</span> <span class="o">=</span> <span class="n">make_coordinator</span><span class="p">(</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">_options</span><span class="p">,</span>
-                <span class="n">global_rank</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span><span class="n">world</span><span class="p">[</span><span class="s2">"global_rank"</span><span class="p">]),</span>
-                <span class="n">world_size</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span><span class="n">world</span><span class="p">[</span><span class="s2">"world_size"</span><span class="p">]),</span>
-                <span class="n">plan_id</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_plan</span><span class="o">.</span><span class="n">plan_id</span><span class="p">,</span>
-                <span class="n">worker_info</span><span class="o">=</span><span class="n">get_torch_worker_info</span><span class="p">,</span>
-            <span class="p">)</span>
-        <span class="n">coordinator</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_final_mtp_coordinator</span>
-        <span class="n">worker_id</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">get_torch_worker_info</span><span class="p">()</span>
-        <span class="k">try</span><span class="p">:</span>
-            <span class="k">if</span> <span class="n">coordinator</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                <span class="n">coordinator</span><span class="o">.</span><span class="n">last_round_id</span> <span class="o">=</span> <span class="n">local</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"last_round_id"</span><span class="p">)</span>
-                <span class="n">coordinator</span><span class="o">.</span><span class="n">reload_count</span> <span class="o">=</span> <span class="n">local</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"checkpoint_reload_count"</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
-                <span class="n">coordinator</span><span class="o">.</span><span class="n">check_ready</span><span class="p">()</span>
-            <span class="n">result</span> <span class="o">=</span> <span class="n">aggregate_checkpoint</span><span class="p">(</span>
-                <span class="n">local</span><span class="p">,</span>
-                <span class="n">coordinator</span><span class="p">,</span>
-                <span class="n">worker_id</span><span class="o">=</span><span class="n">worker_id</span><span class="p">,</span>
-                <span class="n">merge</span><span class="o">=</span><span class="n">Engine</span><span class="o">.</span><span class="n">_merge_state_dicts</span><span class="p">,</span>
-            <span class="p">)</span>
-            <span class="k">if</span> <span class="n">coordinator</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                <span class="c1"># Keep closed and live ranks on the same next checkpoint round.</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">_last_local_state</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span>
-                    <span class="n">local</span><span class="p">,</span> <span class="n">last_round_id</span><span class="o">=</span><span class="n">coordinator</span><span class="o">.</span><span class="n">last_round_id</span>
-                <span class="p">)</span>
-            <span class="k">return</span> <span class="n">result</span>
-        <span class="k">finally</span><span class="p">:</span>
-            <span class="k">if</span> <span class="n">coordinator</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                <span class="k">try</span><span class="p">:</span>
-                    <span class="n">coordinator</span><span class="o">.</span><span class="n">cleanup</span><span class="p">()</span>
-                <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
-                    <span class="n">warnings</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span>
-                        <span class="sa">f</span><span class="s2">"[zephon] Failed to clean up checkpoint aggregation: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span>
-                        <span class="n">stacklevel</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
-                    <span class="p">)</span>
 
 <div class="viewcode-block" id="Pipeline.restore">
 <a class="viewcode-back" href="../../../api/pipeline.html#zephon.Pipeline.restore">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">restore</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">ckpt</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="nb">bytes</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">"""Validate saved progress and restore it lazily when iteration starts.</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">restore</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">ckpt</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.checkpoint</span><span class="w"> </span><span class="kn">import</span> <span class="n">EngineStateV2</span>
 
-<span class="sd">        Accepts a checkpoint dictionary or bytes from ``checkpoint(as_bytes=True)``.</span>
-<span class="sd">        Byte decoding precedes the same schema validation and migration used for</span>
-<span class="sd">        dictionaries. Malformed or unsupported byte formats raise ValueError</span>
-<span class="sd">        before a runtime is constructed.</span>
-<span class="sd">        """</span>
-        <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.checkpoint</span><span class="w"> </span><span class="kn">import</span> <span class="n">EngineStateV2</span><span class="p">,</span> <span class="n">decode_checkpoint</span>
-
-        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">ckpt</span><span class="p">,</span> <span class="nb">bytes</span><span class="p">):</span>
-            <span class="n">ckpt</span> <span class="o">=</span> <span class="n">decode_checkpoint</span><span class="p">(</span><span class="n">ckpt</span><span class="p">)</span>
         <span class="c1"># Fail-fast: construct the schema purely for its validation side</span>
         <span class="c1"># effects. The Engine reloads it later when iteration starts.</span>
         <span class="n">EngineStateV2</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">ckpt</span><span class="p">)</span>
@@ -2718,11 +2525,7 @@
         <span class="n">d</span><span class="p">[</span><span class="s2">"_runtime_spec"</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="n">d</span><span class="p">[</span><span class="s2">"_sp"</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="n">d</span><span class="p">[</span><span class="s2">"_iterating"</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span>
-        <span class="n">d</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">"_iterators"</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
         <span class="n">d</span><span class="p">[</span><span class="s2">"_last_state"</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="n">d</span><span class="p">[</span><span class="s2">"_last_local_state"</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="n">d</span><span class="p">[</span><span class="s2">"_final_mtp_coordinator"</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="n">d</span><span class="p">[</span><span class="s2">"_mtp_started"</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span>
         <span class="c1"># Keep _pending_restore — it's a plain dict (JSON-serializable checkpoint</span>
         <span class="c1"># data) that should survive pickle so restore() + pickle doesn't silently</span>
         <span class="c1"># lose the stashed checkpoint.</span>
@@ -2740,7 +2543,6 @@
 <span class="sd">          `pipeline.restore(...)` *inside the worker* (e.g., in `__iter__`), not here.</span>
 <span class="sd">        """</span>
         <span class="bp">self</span><span class="o">.</span><span class="vm">__dict__</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">state</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_iterators</span> <span class="o">=</span> <span class="n">weakref</span><span class="o">.</span><span class="n">WeakSet</span><span class="p">()</span>
         <span class="c1"># _engine, _plan, _runtime_spec, _sp are already None in the</span>
         <span class="c1"># pickled state (set by __getstate__).  _pending_restore is kept.</span>
 

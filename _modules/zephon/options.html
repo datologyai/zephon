@@ -6,7 +6,7 @@
         <link rel="prefetch" href="../../_static/zephon-wordmark-teal.png" as="image">
         <link rel="prefetch" href="../../_static/zephon-wordmark-mint.png" as="image">
 
-    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
         <title>zephon.options - Zephon</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo.css?v=7bdb33bb" />
@@ -85,7 +85,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="main" data-page="_modules/zephon/options.html"></script>
+</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="v0.2.0" data-page="_modules/zephon/options.html"></script>
 </head>
   <body>
     
@@ -459,12 +459,6 @@
     <span class="c1"># "off" skips the validator entirely; reserved for last-resort overrides.</span>
     <span class="n">auto_validation</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">"strict"</span><span class="p">,</span> <span class="s2">"warn"</span><span class="p">,</span> <span class="s2">"off"</span><span class="p">]</span> <span class="o">=</span> <span class="s2">"strict"</span>
 
-    <span class="c1"># Freeze GC-tracked objects for the duration of iteration.</span>
-    <span class="c1"># None = enabled in MTP, disabled inline (including daemon fallback).</span>
-    <span class="c1"># True/False override the default; inline freezing affects the whole interpreter.</span>
-    <span class="c1"># Existing application freezes are preserved.</span>
-    <span class="n">gc_freeze</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-
     <span class="c1"># === MTP Mode (GIL isolation) ===</span>
     <span class="c1"># When True, the Engine runs in a non-daemon subprocess for GIL isolation.</span>
     <span class="c1"># The main process only dequeues finished batches via IPC.</span>
@@ -482,8 +476,10 @@
     <span class="c1"># prefetches from the MTP data queue, hiding IPC recv + unpickle from</span>
     <span class="c1"># next().  None = auto (max(4, mtp_buffer // 10)); 0 disables the thread.</span>
     <span class="n">mtp_prefetch</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-    <span class="c1"># Cache acknowledged progress after normal MTP exhaustion. With False,</span>
-    <span class="c1"># checkpoint() must run before exhaustion. Ignored outside MTP mode.</span>
+    <span class="c1"># Automatically capture a checkpoint from the MTP subprocess after normal</span>
+    <span class="c1"># iteration completion.  Set to False when multi-rank aggregation is not</span>
+    <span class="c1"># available (e.g. no aggregate_dir/aggregate_store, or ranks run sequentially rather than</span>
+    <span class="c1"># in parallel).</span>
     <span class="n">mtp_auto_checkpoint</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
 
     <span class="c1"># === Global Coordination ===</span>
@@ -556,11 +552,7 @@
     <span class="n">aggregate_compressor</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"zstd"</span>
     <span class="c1"># Observability controls.</span>
     <span class="n">execution_tracking</span><span class="p">:</span> <span class="n">ExecutionTrackingMode</span> <span class="o">=</span> <span class="n">ExecutionTrackingMode</span><span class="o">.</span><span class="n">OFF</span>
-    <span class="n">metrics_sink_config</span><span class="p">:</span> <span class="n">MetricsSinkConfig</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-    <span class="c1"># Per-node produced/consumed payload bytes under NODES tracking. None lets</span>
-    <span class="c1"># each runner decide: on for runners that ship payloads across process or</span>
-    <span class="c1"># host boundaries (process, remote), off for in-process runners.</span>
-    <span class="n">measure_bytes</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+    <span class="n">metrics_sink_config</span><span class="p">:</span> <span class="n">MetricsSinkConfig</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
 
 
 

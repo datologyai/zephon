@@ -6,7 +6,7 @@
         <link rel="prefetch" href="../../../_static/zephon-wordmark-teal.png" as="image">
         <link rel="prefetch" href="../../../_static/zephon-wordmark-mint.png" as="image">
 
-    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
         <title>zephon.ops.base - Zephon</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
@@ -85,7 +85,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../../../_versions/switcher.js" data-version="main" data-page="_modules/zephon/ops/base.html"></script>
+</style><script data-zephon-versions="1" defer src="../../../_versions/switcher.js" data-version="v0.2.0" data-page="_modules/zephon/ops/base.html"></script>
 </head>
   <body>
     
@@ -350,22 +350,17 @@
 <a class="viewcode-back" href="../../../api/operators.html#zephon.ops.StageInfo">[docs]</a>
 <span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 <span class="k">class</span><span class="w"> </span><span class="nc">StageInfo</span><span class="p">:</span>
-<span class="w">    </span><span class="sd">"""Stage metadata passed through :attr:`OpContext.stage_info`.</span>
+<span class="w">    </span><span class="sd">"""Plan metadata passed through :attr:`OpContext.stage_info`.</span>
 
 <span class="sd">    Default values indicate that setup has not run. ``stage_index`` and</span>
 <span class="sd">    ``stage_name`` identify the stage, ``op_index`` identifies the operator</span>
 <span class="sd">    within it, and ``collect_stats`` enables per-operator metrics.</span>
-
-<span class="sd">    ``copies_mapped_arrays`` indicates that the runner copies file-mapped NumPy</span>
-<span class="sd">    arrays into independent storage when sending outputs. Operators can then</span>
-<span class="sd">    skip copying those arrays themselves.</span>
 <span class="sd">    """</span>
 
     <span class="n">stage_index</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
     <span class="n">stage_name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">""</span>
     <span class="n">op_index</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
-    <span class="n">collect_stats</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
-    <span class="n">copies_mapped_arrays</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span></div>
+    <span class="n">collect_stats</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span></div>
 
 
 

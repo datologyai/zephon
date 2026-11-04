@@ -1,0 +1,724 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Datasets" href="../api/datasets.html"><link rel="prev" title="Records and sample lifecycles" href="records_and_sample_lifecycles.html">
+        <link rel="prefetch" href="../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Checkpoint replay and bounded recovery - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="v0.2.0" data-page="internals/checkpoint_replay.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../pipelines/index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../api/datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/operators.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../api/tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/internals/checkpoint_replay.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="checkpoint-replay-and-bounded-recovery">
+<h1>Checkpoint replay and bounded recovery<a class="headerlink" href="#checkpoint-replay-and-bounded-recovery" title="Link to this heading">¶</a></h1>
+<p><a class="reference internal" href="../pipelines/checkpointing_and_resuming.html"><span class="std std-doc">Checkpointing and resuming pipelines</span></a> says
+that a checkpoint records which work chunks were finished and which were still in
+progress, and that a restore rebuilds operator state by re-processing a bounded number of
+recent chunks. This page is about how Zephon works out which chunks those are, which is
+the trickiest part of the whole system to get right.</p>
+<p id="why-there-is-no-sample-index"><strong>Why there is no sample index.</strong> A map-style loader checkpoints by writing down an index,
+and Zephon cannot, because a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> that splits documents, packs fragments and
+reorders records has no index to write down. Progress is spread across in-flight operator
+state, partially filled bins, and records that have been reordered relative to their
+inputs. We could replay the whole <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> from the start on every resume, which would
+be correct, but crashing at step 100,000 would then mean redoing 100,000 steps of data
+processing before you get one new batch.</p>
+<figure class="zephon-post zephon-embed">
+  <iframe src="../_static/embeds/nonindexable-packing.html" height="371" loading="lazy"
+          title="One document, three output IDs"></iframe>
+  <figcaption>
+    <strong>One document, three output IDs.</strong> Four documents are tokenized, split,
+    and first-fit packed. Document A ends up spread across three different packed outputs,
+    C overtakes B on the way through, and when the input runs out two bins are still part
+    full. There is no index into that, and no way to reconstruct it other than replaying
+    what came before.
+  </figcaption>
+</figure>
+<p>So Zephon sits in between. What we aim for is to <strong>replay only the chunks that were still
+in flight at checkpoint time</strong>, which is a handful of them regardless of how far into
+training you are.</p>
+<p id="what-a-checkpoint-holds"><strong>What a checkpoint holds.</strong> Three things, per lane:</p>
+<ul class="simple">
+<li><p>Inflight chunks, serialized in full: their sample pointers, component order, and seed.
+On restore these are deserialized directly and the <code class="docutils literal notranslate"><span class="pre">WorkSource</span></code> is never asked to
+regenerate them. They are the only chunks that get replayed through the operator
+pipeline.</p></li>
+<li><p>Epoch boundaries, for pipelines that need them: the list of sentinel chunk IDs marking
+flush points. This can include a trailing boundary just past the last inflight chunk,
+which preserves the flush point between replayed data and newly fetched data. On restore
+the sentinels are re-injected at these positions so accumulators flush where they
+flushed originally.</p></li>
+<li><p>WorkSource state, so <code class="docutils literal notranslate"><span class="pre">next_chunk()</span></code> can resume producing <em>new</em> chunks from the right
+place. The <code class="docutils literal notranslate"><span class="pre">WorkSource</span></code> is not replayed and not re-advanced, because <code class="docutils literal notranslate"><span class="pre">load_state_dict()</span></code>
+restores its position directly.</p></li>
+</ul>
+<p>What goes into that last one is up to the implementation. For <code class="docutils literal notranslate"><span class="pre">StaticMixtureWorkSource</span></code>
+the sample sequence is fully determined by the datasets, the seed, the shuffle knobs and
+the lane, so the state is a compact set of per-dataset cursor positions plus mixture
+bookkeeping, and restoring it is instantaneous no matter how far into training you are.
+<a class="reference internal" href="worksources_and_work_chunks.html"><span class="std std-doc">WorkSources and work chunks</span></a> covers what those cursors
+are and what the rest of the contract requires of a source you write yourself.</p>
+<p>Alongside these sit the replay cursor per lane, the lane progress pointers, and the
+round-robin position discussed in
+<a class="reference internal" href="elastic_determinism.html#what-actually-survives-a-topology-change"><span class="std std-ref">Elastic determinism</span></a>.</p>
+<p>One thing is deliberately absent. The per-offset completion bitmaps are runtime-only, and
+Zephon rebuilds them as the replayed chunks flow through the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> and re-trigger
+contributor tracking. That keeps your checkpoints small, at the cost of making restore
+time proportional to the number of inflight chunks.</p>
+<p id="eviction"><strong>Eviction.</strong> What keeps the inflight set small is eviction. Once every sample derived
+from a chunk has been delivered, the chunk leaves the set, and a checkpoint taken
+afterwards neither stores nor replays it.</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Lane</span> <span class="mi">0</span> <span class="n">inflight</span> <span class="n">chunks</span> <span class="n">over</span> <span class="n">time</span><span class="p">:</span>
+
+  <span class="n">step</span> <span class="mi">100</span><span class="p">:</span>  <span class="p">[</span> <span class="n">chunk</span> <span class="mi">3</span> <span class="o">|</span> <span class="n">chunk</span> <span class="mi">4</span> <span class="o">|</span> <span class="n">chunk</span> <span class="mi">5</span> <span class="p">]</span>
+  <span class="n">step</span> <span class="mi">200</span><span class="p">:</span>  <span class="p">[</span> <span class="n">chunk</span> <span class="mi">4</span> <span class="o">|</span> <span class="n">chunk</span> <span class="mi">5</span> <span class="o">|</span> <span class="n">chunk</span> <span class="mi">6</span> <span class="p">]</span>    <span class="n">chunk</span> <span class="mi">3</span> <span class="n">evicted</span>
+  <span class="n">step</span> <span class="mi">300</span><span class="p">:</span>  <span class="p">[</span> <span class="n">chunk</span> <span class="mi">5</span> <span class="o">|</span> <span class="n">chunk</span> <span class="mi">6</span> <span class="o">|</span> <span class="n">chunk</span> <span class="mi">7</span> <span class="p">]</span>    <span class="n">chunk</span> <span class="mi">4</span> <span class="n">evicted</span>
+</pre></div>
+</div>
+<p>Without eviction the inflight set grows without bound and every resume replays everything,
+so the only real difficulty is timing: evict too early and replay loses data it needed,
+evict too late and your checkpoints bloat.</p>
+<p>Zephon picks a strategy at compile time by looking at every operator’s
+<code class="docutils literal notranslate"><span class="pre">preserves_cursor_order</span></code> trait:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Pipeline compiled
+       │
+  Do all operators preserve cursor order?
+      ╱ ╲
+    yes   no  (packing, shuffling, mixture correction)
+     │     │
+  Monotone  Epoch-based
+  eviction  eviction
+</pre></div>
+</div>
+<p id="monotone-eviction"><strong>Monotone eviction.</strong> When every operator preserves cursor order, records come out in the
+same chunk order they went in. If the most recently delivered record belongs to chunk <em>N</em>,
+then everything from chunks below <em>N</em> has already gone out and those chunks evict
+immediately, so a simple watermark is all we need. Most pipelines without shuffling or
+packing take this path.</p>
+<p id="epoch-based-eviction"><strong>Epoch-based eviction.</strong> Packing, shuffling and mixture correction break that watermark
+in two ways, and the second is much worse than the first.</p>
+<p>The obvious problem is reordering. A packed record can combine fragments from chunks 5 and
+7, and chunk 5’s last sample can be delivered after something from chunk 7, so a rule of
+“evict everything below the most recent chunk” would drop chunk 5 while part of it is
+still in flight. Per-offset tracking fixes that one.</p>
+<p>The deeper problem is <strong>accumulator history dependence</strong>. The packer’s bin state, meaning
+which bins exist and how full they are, depends on the entire history of what it has seen
+rather than just on what is currently in the bins. After a chunk’s samples have all left
+the bins, their influence on where subsequent samples land persists. Two packers starting
+from different states and fed identical input may <em>never</em> converge. With two bins of
+capacity 10 and an input stream of <code class="docutils literal notranslate"><span class="pre">[3,</span> <span class="pre">3,</span> <span class="pre">3,</span> <span class="pre">…]</span></code>, starting from <code class="docutils literal notranslate"><span class="pre">(10,</span> <span class="pre">10)</span></code> versus
+<code class="docutils literal notranslate"><span class="pre">(10,</span> <span class="pre">5)</span></code> gives the same periodic emission cycle, permanently phase-shifted.</p>
+<p>That leaves us with a direct conflict. Eviction wants to discard consumed chunks to free
+memory, while deterministic replay wants to reconstruct the accumulator state the original
+run had, and that state was shaped by inputs from exactly the chunks eviction wants to
+discard. Replaying from a checkpoint would start the packer empty instead of mid-stream
+and produce different packed records, and the replay filter’s target cursor might never
+appear at all. The same argument applies to mixture correction, whose deficit state
+depends on emission history, and to shuffling, whose buffers span chunk boundaries.</p>
+<p>Our resolution is the <strong>flush sentinel</strong>. Every <code class="docutils literal notranslate"><span class="pre">flush_every_k_chunks</span></code> chunks per lane,
+Zephon injects one that forces the history-dependent accumulators to emit everything and
+reset to a clean state, as described in
+<a class="reference internal" href="operators_and_runners.html#flush-sentinels-and-stalling"><span class="std std-ref">Operators and runners</span></a>. Sentinels divide the stream
+into <strong>epochs</strong>, and each epoch starts from a state that replay can reproduce without any
+of the preceding chunks:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Epoch 0          Epoch 1          Epoch 2
+[chunk 0, 1]  →  [chunk 2, 3]  →  [chunk 4, 5]  → ...
+             ↑                ↑
+          sentinel         sentinel
+           (flush)          (flush)
+</pre></div>
+</div>
+<p><a class="reference internal" href="../pipelines/how_pipelines_run.html"><span class="std std-doc">How pipelines run</span></a> covers the trade that
+<code class="docutils literal notranslate"><span class="pre">flush_every_k_chunks</span></code> controls. What that page leaves implicit is what a flush costs at
+the operator level, since each one interrupts an accumulator mid-stride: the packer emits
+partially filled bins and pays for them in padding, the shuffle buffer emits a smaller
+window and randomizes less, and the mixture corrector drains mid-rebalance.</p>
+<p>On a non-monotonic <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>, setting <code class="docutils literal notranslate"><span class="pre">flush_every_k_chunks=0</span></code> is an error, because
+without sentinels the accumulator state depends on unbounded history and we cannot evict
+anything safely. On a monotone one, setting a positive value gets you a warning and Zephon
+forces the value back to 0, since sentinels buy you nothing there and would perturb your
+batch boundaries for free.</p>
+<p id="per-offset-tracking"><strong>Per-offset tracking.</strong> Within an epoch, Zephon tracks completion per offset. Each sample
+occupies a position in its chunk, and operators may split it into several children or
+merge children from different offsets into one packed record, so an offset only closes
+once all of its children have been delivered. Zephon learns that from the <code class="docutils literal notranslate"><span class="pre">is_last_child</span></code>
+flags on contributor metadata, and from tombstones when a filter drops the last child
+standing (see <a class="reference internal" href="records_and_sample_lifecycles.html#contributors-and-tombstones"><span class="std std-ref">Records and sample lifecycles</span></a>). A
+bitmap per chunk records which offsets are closed, with a popcount alongside so that “is
+this chunk complete?” stays O(1).</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Chunk 5 (4 offsets):  [x] [x] [ ] [x]    3 of 4 closed
+Chunk 6 (4 offsets):  [x] [x] [x] [x]    all closed, but not evicted
+Chunk 7 (4 offsets):  [ ] [ ] [ ] [ ]    none closed
+
+→ Nothing is evicted: 5 and 6 are in the same epoch, and 5 is incomplete.
+</pre></div>
+</div>
+<p id="atomic-per-epoch-eviction"><strong>Atomic per-epoch eviction.</strong> Chunks within an epoch share accumulator history, since
+where chunk 1’s samples landed in the bins depends on what chunk 0 put there, so evicting
+chunk 0 while chunk 1 is still inflight would break replay for exactly the reason above.
+An epoch therefore evicts <strong>atomically</strong>: all of its chunks, or none of them.</p>
+<p>Zephon walks a lane’s recorded boundaries in ascending order and evicts contiguously from
+the bottom, stopping at the first epoch that is incomplete. The epoch boundaries are what
+make this safe across epochs, because evicting epoch 0 while epoch 1 is still running is
+fine precisely when epoch 1’s accumulators started empty after the sentinel flush.</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Epoch 0 (chunks 0–1):  all offsets closed   → evict together
+Epoch 1 (chunks 2–3):  still in progress    → keep
+Epoch 2 (chunks 4–5):  not started          → keep
+</pre></div>
+</div>
+<p>Only a lane’s own recorded boundaries authorize eviction for that lane. The restriction
+matters because sentinels are per-lane, so a boundary established when a different lane
+flushed says nothing about this lane’s accumulator history. Until a lane has recorded a
+boundary of its own, Zephon retains its entire open epoch even when every offset in it is
+closed, which means your early chunks stay inflight until the first sentinel arrives. We
+consider that a fair trade of a little memory for an eviction rule with no special cases,
+and the full <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> drain at end of stream handles whatever is left.</p>
+<p>Cursor pinning adds the last constraint. The replay cursor is the identity of the last
+delivered record, and it has to point into a chunk that is still inflight or the replay
+filter cannot find its target on resume. If the cursor sits in an epoch that is otherwise
+eligible, Zephon stops there and leaves it alone, which resolves on its own within a few
+deliveries, as soon as a post-sentinel record goes out.</p>
+<p id="replay-on-resume"><strong>Replay on resume.</strong> When you restore and then iterate, Zephon runs the saved state back
+through the full <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Checkpoint
+  │  inflight chunks + replay cursor + WorkSource state + epoch boundaries, per lane
+  v
+┌──────────────────────────────────────────────────────┐
+│ Engine source stream                                  │
+│   Phase 1: yield restored inflight chunks, by chunk ID│
+│   Phase 2: fetch new chunks from the restored source  │
+└────────────────────────┬─────────────────────────────┘
+                         v  sample pointers
+┌─── Operator pipeline (deterministic replay) ─────────┐
+│  fetch → tokenize → pack → ensure_mixture → ...       │
+└────────────────────────┬─────────────────────────────┘
+                         v  records
+┌─── Replay filter ────────────────────────────────────┐
+│  Per lane: drop until cursor == target, then emit     │
+└────────────────────────┬─────────────────────────────┘
+                         v  new records only
+                   Training loop
+</pre></div>
+</div>
+<p>First the inflight chunks are deserialized back into the inflight set and each lane’s
+<code class="docutils literal notranslate"><span class="pre">WorkSource</span></code> state is restored. Zephon then yields those chunks before fetching anything
+new, re-injecting flush sentinels at the stored boundary positions so that the
+accumulators flush exactly where they did before. Those chunks flow through the whole
+<code class="docutils literal notranslate"><span class="pre">Pipeline</span></code>, through fetch, tokenize, pack and batch, just as they originally did, and
+because the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> is deterministic they produce the same records and rebuild the same
+accumulator state as a side effect. Finally the replay filter drops the prefix your
+training loop has already consumed.</p>
+<p id="the-replay-filter"><strong>The replay filter.</strong> Zephon inserts a replay filter into every <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> for you, so
+this is never something you add yourself. If the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> has a <code class="docutils literal notranslate"><span class="pre">batch</span></code> operator the
+filter goes immediately before it, otherwise it is appended at the tail, and it takes its
+name from the operator it sits next to. You can see it in <code class="docutils literal notranslate"><span class="pre">Pipeline.explain()</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Stage</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="n">place</span><span class="o">=</span><span class="n">local</span> <span class="n">runner</span><span class="o">=</span><span class="n">threads</span> <span class="n">cap</span><span class="o">=</span><span class="mi">8</span> <span class="n">mode</span><span class="o">=</span><span class="n">microbatches</span>
+  <span class="n">fetch</span><span class="nd">@p4</span> <span class="o">-</span><span class="p">[</span><span class="n">in_q</span><span class="o">=</span><span class="mi">16</span><span class="p">]</span><span class="o">-&gt;</span> <span class="n">tokenize</span><span class="nd">@p4</span>
+  <span class="o">--</span><span class="p">[</span><span class="n">stage_out</span><span class="o">=</span><span class="mi">16</span><span class="p">]</span><span class="o">--&gt;</span>
+<span class="n">Stage</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="n">place</span><span class="o">=</span><span class="n">local</span> <span class="n">runner</span><span class="o">=</span><span class="n">inline</span> <span class="n">cap</span><span class="o">=</span><span class="mi">1</span> <span class="n">mode</span><span class="o">=</span><span class="n">stream_items</span>
+  <span class="n">ensure_mixture</span><span class="nd">@p1</span> <span class="o">-&gt;</span> <span class="n">batch_replay_filter</span><span class="nd">@p1</span> <span class="o">-&gt;</span> <span class="n">batch</span><span class="nd">@p1</span>
+  <span class="o">==</span><span class="p">[</span><span class="n">final_prefetch</span><span class="o">=</span><span class="mi">3</span><span class="p">]</span><span class="o">==&gt;</span> <span class="n">pipeline_end</span>
+</pre></div>
+</div>
+<p>On a fresh run it is a no-op that passes everything through. It only does anything on
+resume.</p>
+<p>Putting it before <code class="docutils literal notranslate"><span class="pre">batch</span></code> is what makes <code class="docutils literal notranslate"><span class="pre">batch(drop_last=True)</span></code> the one operator allowed
+to stall at an epoch boundary. Because batching only emits complete batches, the
+consumer-visible checkpoint cut falls between whole batches, so on resume the prefix is
+dropped before batching and batching rebuilds the suffix from an empty buffer at the same
+boundary. No extra batch state has to be checkpointed, and that holds even when the pump
+thread has run far ahead of the consumer, because the cut is defined by delivered batches
+rather than by how much work the pump had done.</p>
+<p>When the filter drops a record during the prefix it emits <strong>tombstones</strong> for it, which is
+not optional: without them, per-offset tracking would never close the offsets belonging to
+replayed records and their chunks could never be evicted.</p>
+<p>The match is on equality, not on a threshold. At checkpoint time Zephon records, per lane,
+the <code class="docutils literal notranslate"><span class="pre">SampleCursor</span></code> of the most recently delivered record, and on resume the filter drops
+records until it sees a cursor <strong>equal</strong> to that target, drops the target too, and then
+forwards everything after it.</p>
+<p>We use equality rather than <code class="docutils literal notranslate"><span class="pre">&lt;=</span></code> because the tail of a <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> with shuffling does not
+arrive in cursor order:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Original run:   C2  C1  C3  C4  C5  ...
+                        ↑ checkpoint here, saved target = C3
+</pre></div>
+</div>
+<p>A threshold rule would drop C1, C2 and C3, which is correct, but it would also drop any
+later record whose cursor happens to fall below C3, and you never consumed those. The
+equality rule waits for C3 to reappear in the deterministic replay and forwards everything
+after it, which is correct whatever the output ordering looks like, because a cursor is a
+unique identity rather than an ordinal position.</p>
+<p id="what-a-custom-operator-owes-replay"><strong>What a custom operator owes replay.</strong> If your operator buffers across chunk boundaries
+it has to cooperate with all of the above, or Zephon will evict a chunk whose data your
+operator is still holding. The obligations are spelled out on the two pages before this
+one; gathered together, they are:</p>
+<ul class="simple">
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">preserves_cursor_order=False</span></code> in <code class="docutils literal notranslate"><span class="pre">OpTraits</span></code> if your operator reorders anything.</p></li>
+<li><p>Propagate contributor metadata, and set <code class="docutils literal notranslate"><span class="pre">is_last_child</span></code> correctly.</p></li>
+<li><p>Emit tombstones for dropped final fragments.</p></li>
+<li><p>Implement <code class="docutils literal notranslate"><span class="pre">flush(reset=True,</span> <span class="pre">lane_id=...)</span></code> so that it fully resets that lane’s state.
+After a mid-stream flush your accumulator has to report no pending data for that lane,
+and the runner treats anything else as a contract violation and raises.</p></li>
+<li><p>Do not plan on stalling. We support it for <code class="docutils literal notranslate"><span class="pre">batch(drop_last=True)</span></code> and nothing else.</p></li>
+</ul>
+<p id="multi-rank-aggregation"><strong>Multi-rank aggregation.</strong> Each rank owns a subset of lanes, but a complete checkpoint
+has to cover all of them, so the ranks merge their states through shared coordination
+storage using a leader-follower protocol. That storage is either a shared directory
+(<code class="docutils literal notranslate"><span class="pre">aggregate_dir</span></code>, a local or shared filesystem or object storage) or a key-value store
+(<code class="docutils literal notranslate"><span class="pre">aggregate_store</span></code>, where <code class="docutils literal notranslate"><span class="pre">&quot;torch://&quot;</span></code> uses the TCPStore that torchrun already runs). The
+protocol is the same over both. The leader is global rank 0, DataLoader worker 0.</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Leader                     shared storage                  Followers
+  │                            │                               │
+  │── announce round id ──────&gt;│                               │
+  │                            │&lt;────── read round id ─────────│
+  │── write own state ────────&gt;│                               │
+  │                            │&lt;────── write states ──────────│
+  │── wait: every rank covers  │                               │
+  │   all its lanes? ─────────&gt;│                               │
+  │── close round              │                               │
+  │   (delete announcement) ──&gt;│                               │
+  │── merge, publish merged ──&gt;│                               │
+  │── delete own state ───────&gt;│                               │
+  │                            │&lt;────── wait for merged ───────│
+  │                            │─────── read merged ──────────&gt;│
+  │                            │&lt;── delete own state, ack ─────│
+  │── wait for every ack ─────&gt;│                               │
+  │── delete acks, previous    │                               │
+  │   round's merged ─────────&gt;│                               │
+</pre></div>
+</div>
+<p>The leader’s wait condition is stricter than it might look. It is not enough for the
+lanes reported across all ranks to add up to every one of the <code class="docutils literal notranslate"><span class="pre">canonical_replicas</span></code>: each
+rank has to report every lane its DP group owns, so that a model-parallel peer in the same
+DP group can’t stand in for a DataLoader worker that is running late. The leader also
+checks that every state it receives agrees with its own lane mapping, and raises on a
+mismatch rather than waiting for it to resolve itself.</p>
+<p><code class="docutils literal notranslate"><span class="pre">aggregate_timeout_s</span></code> is one budget for the whole round, not a limit per wait. If it runs
+out while the leader is still collecting states, the error tells you which ranks and lanes
+are missing, which is usually enough to find the rank that forgot to call <code class="docutils literal notranslate"><span class="pre">checkpoint()</span></code>.
+If the leader fails before publishing the merged result, it publishes a failure notice
+instead, so the followers fail straight away rather than waiting out the timeout.</p>
+<p>Because the leader waits for every ack, nobody is still reading the merged result when
+the leader’s <code class="docutils literal notranslate"><span class="pre">checkpoint()</span></code> call returns. We keep it around anyway as a marker that the
+round is closed, and delete it once the next round has been fully acknowledged or the
+<code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> shuts down; if the acks time out, it stays for the followers that haven’t read
+it yet. States are written with msgpack and zstd by default. Against object storage the
+polling backs off exponentially, capped at five seconds, while the TCPStore uses its own
+blocking waits.</p>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="../api/datasets.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Datasets</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="records_and_sample_lifecycles.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Records and sample lifecycles</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Checkpoint replay and bounded recovery</a><ul>
+<li><a class="reference internal" href="#why-there-is-no-sample-index">Why there is no sample index</a></li>
+<li><a class="reference internal" href="#what-a-checkpoint-holds">What a checkpoint holds</a></li>
+<li><a class="reference internal" href="#eviction">Eviction</a></li>
+<li><a class="reference internal" href="#monotone-eviction">Monotone eviction</a></li>
+<li><a class="reference internal" href="#epoch-based-eviction">Epoch-based eviction</a></li>
+<li><a class="reference internal" href="#per-offset-tracking">Per-offset tracking</a></li>
+<li><a class="reference internal" href="#atomic-per-epoch-eviction">Atomic per-epoch eviction</a></li>
+<li><a class="reference internal" href="#replay-on-resume">Replay on resume</a></li>
+<li><a class="reference internal" href="#the-replay-filter">The replay filter</a></li>
+<li><a class="reference internal" href="#what-a-custom-operator-owes-replay">What a custom operator owes replay</a></li>
+<li><a class="reference internal" href="#multi-rank-aggregation">Multi-rank aggregation</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

@@ -1,0 +1,1127 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Runtime and tuning" href="runtime.html"><link rel="prev" title="Operators" href="operators.html">
+        <link rel="prefetch" href="../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Records and batches - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="v0.2.0" data-page="api/records.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../pipelines/index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../internals/index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../internals/checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="operators.html">Operators</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/api/records.rst.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="records-and-batches">
+<h1>Records and batches<a class="headerlink" href="#records-and-batches" title="Link to this heading">¶</a></h1>
+<p>What travels between operators, and what a batch hands the training loop. The
+guide covers these in <a class="reference internal" href="../pipelines/building_training_batches.html"><span class="doc">Building training batches</span></a>.</p>
+<p id="module-zephon.types">Canonical data model shared across the core data-loading pipeline.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.ChunkId">
+<span class="sig-name descname"><span class="pre">ChunkId</span></span><a class="headerlink" href="#zephon.types.ChunkId" title="Link to this definition">¶</a></dt>
+<dd><p>alias of <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.ChunkOffset">
+<span class="sig-name descname"><span class="pre">ChunkOffset</span></span><a class="headerlink" href="#zephon.types.ChunkOffset" title="Link to this definition">¶</a></dt>
+<dd><p>alias of <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.ComponentId">
+<span class="sig-name descname"><span class="pre">ComponentId</span></span><a class="headerlink" href="#zephon.types.ComponentId" title="Link to this definition">¶</a></dt>
+<dd><p>alias of <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.types.ContributorRef">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ContributorRef</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">cursor</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_last_child</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#ContributorRef"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.ContributorRef" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>Reference to a contributing child derived from a base sample.</p>
+<p><code class="docutils literal notranslate"><span class="pre">cursor</span></code> pinpoints the base offset and lineage; <code class="docutils literal notranslate"><span class="pre">is_last_child=True</span></code>
+denotes the sole contributor (or tombstone) that closes that base offset for
+eviction purposes.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.ContributorRef.cursor">
+<span class="sig-name descname"><span class="pre">cursor</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SampleCursor" title="zephon.types.SampleCursor"><span class="pre">SampleCursor</span></a></span><a class="headerlink" href="#zephon.types.ContributorRef.cursor" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.ContributorRef.is_last_child">
+<span class="sig-name descname"><span class="pre">is_last_child</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><a class="headerlink" href="#zephon.types.ContributorRef.is_last_child" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.DatasetId">
+<span class="sig-name descname"><span class="pre">DatasetId</span></span><a class="headerlink" href="#zephon.types.DatasetId" title="Link to this definition">¶</a></dt>
+<dd><p>alias of <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.LaneId">
+<span class="sig-name descname"><span class="pre">LaneId</span></span><a class="headerlink" href="#zephon.types.LaneId" title="Link to this definition">¶</a></dt>
+<dd><p>alias of <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.LineageIndex">
+<span class="sig-name descname"><span class="pre">LineageIndex</span></span><a class="headerlink" href="#zephon.types.LineageIndex" title="Link to this definition">¶</a></dt>
+<dd><p>alias of <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.LocalSampleId">
+<span class="sig-name descname"><span class="pre">LocalSampleId</span></span><a class="headerlink" href="#zephon.types.LocalSampleId" title="Link to this definition">¶</a></dt>
+<dd><p>alias of <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.types.SampleBatch">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SampleBatch</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">records</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleBatch"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleBatch" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>A batch of SampleRecord.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleBatch.records">
+<span class="sig-name descname"><span class="pre">records</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#zephon.types.SampleRecord" title="zephon.types.SampleRecord"><span class="pre">SampleRecord</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleBatch.records" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleBatch.lane_ids">
+<span class="sig-name descname"><span class="pre">lane_ids</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleBatch.lane_ids" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleBatch.chunk_ids">
+<span class="sig-name descname"><span class="pre">chunk_ids</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleBatch.chunk_ids" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.types.SampleBatch.ids">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ids</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleBatch.ids" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.types.SampleBatch.lineage_paths">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">lineage_paths</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleBatch.lineage_paths" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleBatch.to_training">
+<span class="sig-name descname"><span class="pre">to_training</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">tokens_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'auto'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_labels</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'auto'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">extra_fields</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ignore_index</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">-100</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rename_fields</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">flatten</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exclude_fields</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_num_valid_tokens</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_loss_mask</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_cu_seqlens</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_padding_mask</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">eos_mask_loss</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">eos_token_id</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">position_mode</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'preserve'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleBatch.to_training"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleBatch.to_training" title="Link to this definition">¶</a></dt>
+<dd><p>Convert batch to training-ready format with optional LM label generation.</p>
+<p>A <code class="docutils literal notranslate"><span class="pre">&quot;loss_mask&quot;</span></code> payload field (a per-token supervised-vs-not mask,
+e.g. from chat-template tokenization) is recognized automatically, like
+<code class="docutils literal notranslate"><span class="pre">&quot;positions&quot;</span></code>. With <code class="docutils literal notranslate"><span class="pre">return_labels=True</span></code> it is consumed: labels
+whose mask entry (shifted into label alignment, <code class="docutils literal notranslate"><span class="pre">mask[:,</span> <span class="pre">1:]</span></code>) is 0
+are set to <code class="docutils literal notranslate"><span class="pre">ignore_index</span></code>. Set <code class="docutils literal notranslate"><span class="pre">return_loss_mask=True</span></code> to emit the
+final label-aligned mask, derived as <code class="docutils literal notranslate"><span class="pre">labels</span> <span class="pre">!=</span> <span class="pre">ignore_index</span></code> after
+supervision, padding, and optional EOS masking. Listing <code class="docutils literal notranslate"><span class="pre">&quot;loss_mask&quot;</span></code> in
+<code class="docutils literal notranslate"><span class="pre">extra_fields</span></code> together with <code class="docutils literal notranslate"><span class="pre">return_labels</span></code> is an error: extra
+fields are sliced input-aligned (<code class="docutils literal notranslate"><span class="pre">[:,</span> <span class="pre">:-1]</span></code>), the wrong alignment for
+a label mask. Without <code class="docutils literal notranslate"><span class="pre">return_labels</span></code> it is surfaced stacked and
+unshifted, like any data field.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>tokens_field</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a>) – Field name containing token IDs. “auto” detects
+common names (input_ids, tokens, token_ids, ids), in that order.
+An explicit field takes precedence. Independent of EOS masking;
+output uses “input_ids” before rename_fields.</p></li>
+<li><p><strong>return_labels</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – If True, generates next-token prediction labels by
+shifting tokens. input_ids becomes tokens[:, :-1] and labels
+becomes tokens[:, 1:]. Extra fields are sliced like input_ids
+(drop the last token), so they stay aligned with it.</p></li>
+<li><p><strong>dtype</strong> (<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><em>Any</em></a>) – Tensor dtype for stacking. Use “auto” to detect (prefers
+torch.long if available, else np.int64, else returns lists).
+Use None to explicitly return lists instead of tensors.
+A requested loss mask always uses float32 (Python floats for
+lists), independently of this dtype. Requested cumulative
+sequence lengths and per-row maxima use int32 (Python ints for
+lists). With flatten=True, the maximum is always a Python int.</p></li>
+<li><p><strong>extra_fields</strong> (<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Sequence" title="(in Python v3.15)"><em>Sequence</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a><em>]</em>) – Additional fields to include and stack (e.g.,
+[“attention_mask”]). When return_labels=True they are sliced like
+input_ids (drop the last token) to stay aligned with it. A
+<code class="docutils literal notranslate"><span class="pre">&quot;positions&quot;</span></code> field (emitted by <code class="docutils literal notranslate"><span class="pre">pack_flat</span></code>) is surfaced
+automatically and need not be listed here. Extra fields cannot
+overwrite generated output fields, such as input_ids or labels.</p></li>
+<li><p><strong>ignore_index</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>) – Loss-ignore sentinel (default <code class="docutils literal notranslate"><span class="pre">-100</span></code>). With
+<code class="docutils literal notranslate"><span class="pre">return_labels</span></code>, each record’s trailing pad labels
+(<code class="docutils literal notranslate"><span class="pre">meta.padding_length</span></code>) are set to this value.</p></li>
+<li><p><strong>rename_fields</strong> (<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Mapping" title="(in Python v3.15)"><em>Mapping</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a><em>] </em><em>| </em><em>None</em>) – Optional <code class="docutils literal notranslate"><span class="pre">{emitted_key:</span> <span class="pre">new_key}</span></code> mapping applied to
+the output dict before exclusion (e.g. <code class="docutils literal notranslate"><span class="pre">{&quot;input_ids&quot;:</span>
+<span class="pre">&quot;input&quot;}</span></code>). Source keys must be present in the output, except
+for empty batches, where missing sources are ignored. All
+emitted fields are renamed, including for empty batches, and
+their final names must be unique. Swaps are allowed.</p></li>
+<li><p><strong>flatten</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – Flatten stacked scalar token fields from <code class="docutils literal notranslate"><span class="pre">[B,</span> <span class="pre">S]</span></code> to
+<code class="docutils literal notranslate"><span class="pre">[B</span> <span class="pre">*</span> <span class="pre">S]</span></code> after per-sequence shifting and masking. The ids/texts
+fields remain per-record lists.</p></li>
+<li><p><strong>exclude_fields</strong> (<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Sequence" title="(in Python v3.15)"><em>Sequence</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><em>str</em></a><em>]</em>) – Output names to omit after renaming, e.g.
+<code class="docutils literal notranslate"><span class="pre">(&quot;ids&quot;,</span> <span class="pre">&quot;texts&quot;)</span></code>. Absent names are ignored.</p></li>
+<li><p><strong>return_num_valid_tokens</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – Include a Python int counting labels unequal
+to ignore_index after masking (zero for empty batches). Requires
+return_labels=True.</p></li>
+<li><p><strong>return_loss_mask</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – Include a label-aligned “loss_mask” with 1.0 for
+non-ignored labels and 0.0 otherwise. Requires return_labels=True.
+Uses float32 for tensors/arrays, Python floats for lists, and
+an empty list for empty batches. Follows flatten, rename_fields,
+and exclude_fields like other sequence fields.</p></li>
+<li><p><strong>return_padding_mask</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – Include a boolean input-aligned “padding_mask”,
+True only for trailing padding described by each record’s
+<code class="docutils literal notranslate"><span class="pre">meta.padding_length</span></code> (missing metadata means no padding).
+Uses bool tensors/arrays or Python bools for lists. With labels,
+drops the last token like input_ids; then follows flatten,
+rename_fields, and exclude_fields. Independent of loss_mask:
+real unsupervised tokens are not padding. Requires 2-D scalar
+token rows for tensor/array output. Empty batches return [].
+Does not infer padding from token IDs or ignore_index.</p></li>
+<li><p><strong>return_cu_seqlens</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – Include “cu_seqlens” and “max_seqlen” derived
+from zeros in input-aligned “positions”. Requires a positions
+sequence matching the tokens in every payload, starting at zero
+in every nonempty input row. With flatten=False, boundaries
+have shape [B, K], where K is the largest boundary count in the
+batch, padded with each row’s input length. Maxima have shape [B].
+With flatten=True, boundaries are one compact cumulative sequence
+across the batch, ending at the total input length, and the
+maximum is a Python int. Boundaries and per-row maxima use int32
+for tensors/arrays, Python ints for lists. Empty batches return
+[]/[] for boundaries/maxima, or [0]/0 when flattened. Renaming
+and exclusion apply normally. Padding segments are preserved;
+this metadata does not itself enable attention masking or
+change labels. Always uses the payload positions, independently
+of position_mode. Works with or without return_labels.</p></li>
+<li><p><strong>eos_mask_loss</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a>) – <p>If True, set labels to ignore_index wherever the
+corresponding input token equals eos_token_id. Requires
+return_labels=True and a known EOS ID (see eos_token_id). For packed
+<code class="docutils literal notranslate"><span class="pre">[BOS,</span> <span class="pre">A,</span> <span class="pre">EOS,</span> <span class="pre">BOS,</span> <span class="pre">B,</span> <span class="pre">EOS]</span></code>, this masks the EOS -&gt; BOS
+prediction, not the A -&gt; EOS or B -&gt; EOS predictions. Requested
+loss masks and valid-token counts reflect this masking, together
+with padding and supervision masks.</p>
+<p>Defaults to False to preserve existing label generation. For
+documents bracketed with BOS and EOS, this keeps EOS -&gt; BOS
+transitions supervised. Enable it when the training recipe
+excludes predictions made from EOS tokens.</p>
+<p>CAREFUL: matching is by token ID, not document boundaries. If
+BOS and EOS share an ID, this also masks predictions after BOS,
+including the first content token.</p>
+</p></li>
+<li><p><strong>eos_token_id</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a><em> | </em><em>None</em>) – Nonnegative EOS ID, required when eos_mask_loss=True.
+Supplying an ID alone does not enable masking and warns when
+eos_mask_loss=False.
+Automatic EOS propagation is in progress; for now, account for
+Zephon EOS overrides and tokenizer defaults when choosing the ID.</p></li>
+<li><p><strong>position_mode</strong> (<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Literal" title="(in Python v3.15)"><em>Literal</em></a><em>[</em><em>'preserve'</em><em>, </em><em>'sequence'</em><em>]</em>) – <p>How to emit model positions. “preserve” (default)
+forwards payload positions, sliced like input_ids, and omits
+them when absent. With pack_flat(emit_positions=True), these
+restart at zero for each packed segment: two three-token
+documents have positions <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1,</span> <span class="pre">2,</span> <span class="pre">0,</span> <span class="pre">1,</span> <span class="pre">2]</span></code>. Preserving them
+keeps the packer’s document structure and existing caller
+behavior, and is a natural default for independent packed
+examples. It does not itself prevent attention across documents.</p>
+<p>”sequence” generates <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1,</span> <span class="pre">...,</span> <span class="pre">S-1]</span></code> in every input row,
+including when payload positions are absent. The same example
+becomes <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">1,</span> <span class="pre">2,</span> <span class="pre">3,</span> <span class="pre">4,</span> <span class="pre">5]</span></code>. Use it for recipes that number a
+packed row continuously. Numbering restarts per row even with
+flatten=True. Generated positions use the input dtype/device;
+empty batches return an empty list.</p>
+<p>For reference, TorchTitan’s packed-text loaders preserve
+segment-reset positions by default, whereas Megatron gives the
+user control via –reset-position-ids and defaults to continuous
+positions.</p>
+<p>Resetting is not required for standard RoPE correctness: with
+fixed rotary frequencies and isolated documents, a common
+position offset cancels from within-document attention scores.
+These choices can change training with cross-document attention
+or absolute position embeddings. They never change loss masking.
+Requested cu_seqlens/max_seqlen still use the original payload
+positions, so document boundaries survive continuous numbering;
+those original positions are still required for this metadata.</p>
+</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><ul class="simple">
+<li><p>“ids”: List of sample IDs (always list, not stacked)</p></li>
+<li><p>”texts”: List of text strings (always list, not stacked)</p></li>
+<li><p>”input_ids”: Stacked token tensor (shifted if return_labels=True)</p></li>
+<li><p>”labels”: Shifted labels tensor (only if return_labels=True), with
+each record’s trailing pad labels and loss-masked positions set to
+ignore_index</p></li>
+<li><p>”positions”: Payload positions sliced to match input_ids, or
+generated per-row positions when position_mode=”sequence”</p></li>
+<li><p>Any extra_fields as stacked tensors (shifted if return_labels=True)</p></li>
+<li><p>”num_valid_tokens”: Number of non-ignored labels (only if
+return_num_valid_tokens=True)</p></li>
+<li><p>”loss_mask”: Float mask of non-ignored labels if
+return_loss_mask=True; otherwise the raw payload mask if present
+and return_labels=False</p></li>
+<li><p>”cu_seqlens”, “max_seqlen”: Cumulative segment boundaries and
+maximum segment lengths (only if return_cu_seqlens=True)</p></li>
+<li><p>”padding_mask”: Boolean input padding mask (only if
+return_padding_mask=True)</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dictionary with</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><a class="reference external" href="https://docs.python.org/3/builtins/exceptions.html#TypeError" title="(in Python v3.15)"><strong>TypeError</strong></a> – If payloads are neither dicts nor arrays, or exclude_fields
+    is a string instead of a sequence of field names.</p></li>
+<li><p><a class="reference external" href="https://docs.python.org/3/builtins/exceptions.html#ValueError" title="(in Python v3.15)"><strong>ValueError</strong></a> – If tokens_field cannot be auto-detected or is missing,
+    if a loss_mask is present in only some payloads or misaligned
+    with the token field, if “loss_mask” is listed in extra_fields
+    with return_labels=True, or if rename_fields references a
+    missing source key in a nonempty batch or produces a key collision.
+    Also if return_num_valid_tokens or return_loss_mask is used without
+    return_labels, or an extra field would overwrite a generated
+    output field. Also if requested padding lengths fall outside their
+    token rows or tokens are not 2-D for a tensor/array padding mask.
+    Also if requested boundaries cannot be derived from aligned,
+    zero-start positions or represented as int32, position_mode is
+    unknown, eos_token_id is not a nonnegative integer, or
+    eos_mask_loss is used without
+    return_labels=True or a known EOS ID.</p></li>
+</ul>
+</dd>
+<dt class="field-odd">Warns<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>UserWarning</strong> – If eos_token_id is supplied with eos_mask_loss=False.</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.types.SampleCursor">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SampleCursor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">chunk_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">chunk_offset</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sample_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lineage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleCursor"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleCursor" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>Stable ordering key that survives fan-out across the pipeline.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleCursor.chunk_id">
+<span class="sig-name descname"><span class="pre">chunk_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.types.SampleCursor.chunk_id" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleCursor.chunk_offset">
+<span class="sig-name descname"><span class="pre">chunk_offset</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.types.SampleCursor.chunk_offset" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleCursor.sample_id">
+<span class="sig-name descname"><span class="pre">sample_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleCursor.sample_id" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleCursor.lineage">
+<span class="sig-name descname"><span class="pre">lineage</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleCursor.lineage" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleCursor.from_key">
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">from_key</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">key</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleCursor.from_key"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleCursor.from_key" title="Link to this definition">¶</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#zephon.types.SampleCursor" title="zephon.types.SampleCursor"><em>SampleCursor</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleCursor.child">
+<span class="sig-name descname"><span class="pre">child</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleCursor.child"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleCursor.child" title="Link to this definition">¶</a></dt>
+<dd><p>Return the cursor for the <code class="docutils literal notranslate"><span class="pre">index</span></code>-th child of this element.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#zephon.types.SampleCursor" title="zephon.types.SampleCursor"><em>SampleCursor</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleCursor.as_key">
+<span class="sig-name descname"><span class="pre">as_key</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleCursor.as_key"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleCursor.as_key" title="Link to this definition">¶</a></dt>
+<dd><p>Return the canonical tuple key used in checkpoints and comparisons.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>, <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>, <a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>, …], <a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>, <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>, <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.types.SampleCursor.base_offset">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">base_offset</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleCursor.base_offset" title="Link to this definition">¶</a></dt>
+<dd><p>Return <code class="docutils literal notranslate"><span class="pre">(chunk_id,</span> <span class="pre">chunk_offset)</span></code> for eviction/base-offset accounting.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SampleMeta</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">sample_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lane_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">chunk_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">chunk_offset</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">component_sample_counts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">component_token_counts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lineage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tags</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleMeta"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleMeta" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>Lightweight metadata that uniquely identifies a sample in a shard.</p>
+<p><code class="docutils literal notranslate"><span class="pre">lineage</span></code> tracks the deterministic position of this record after any fan-out.
+Operators that split inputs must call <a class="reference internal" href="#zephon.types.SampleMeta.child" title="zephon.types.SampleMeta.child"><code class="xref py py-meth docutils literal notranslate"><span class="pre">child()</span></code></a> in the order elements are
+emitted so downstream consumers observe an ordering identical to the
+single-threaded execution semantics enforced by the runner.</p>
+<p>Contributor and tombstone flags are stored inside <code class="docutils literal notranslate"><span class="pre">tags</span></code> under
+<code class="docutils literal notranslate"><span class="pre">&quot;_contributors&quot;</span></code> and <code class="docutils literal notranslate"><span class="pre">&quot;_tombstone&quot;</span></code> because in simple pipelines
+(notify_monotone path) that increases the IPC overhead since the
+public schema grows.</p>
+<section id="component-contribution-tracking">
+<h2>Component Contribution Tracking<a class="headerlink" href="#component-contribution-tracking" title="Link to this heading">¶</a></h2>
+<p>Samples track which mixture components they contain via two fields:</p>
+<p><code class="docutils literal notranslate"><span class="pre">component_sample_counts</span></code>: Maps component_id -&gt; number of original samples
+from that component. For a regular sample this is <code class="docutils literal notranslate"><span class="pre">{cid:</span> <span class="pre">1}</span></code>. For a packed
+sample combining 3 from component 0 and 2 from component 1: <code class="docutils literal notranslate"><span class="pre">{0:</span> <span class="pre">3,</span> <span class="pre">1:</span> <span class="pre">2}</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">component_token_counts</span></code>: Maps component_id -&gt; token count from that component.
+None until packing occurs after tokenization. When packing tokenized samples,
+captures tokens per component, e.g., <code class="docutils literal notranslate"><span class="pre">{0:</span> <span class="pre">300,</span> <span class="pre">1:</span> <span class="pre">200}</span></code>.</p>
+<p>This design supports ensure_mixture tracking per-component contributions:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">weight=&quot;samples&quot;</span></code>: use <code class="docutils literal notranslate"><span class="pre">component_sample_counts</span></code> directly</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">weight=&quot;tokens&quot;</span></code>: use <code class="docutils literal notranslate"><span class="pre">component_token_counts</span></code> if set, else distribute
+total token count proportionally by <code class="docutils literal notranslate"><span class="pre">component_sample_counts</span></code></p></li>
+</ul>
+<p>The separation allows packing before or after tokenization:</p>
+<ul class="simple">
+<li><p>Pack before tokenize: only sample counts known at pack time</p></li>
+<li><p>Pack after tokenize: both sample and token counts computed at pack time</p></li>
+</ul>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.sample_id">
+<span class="sig-name descname"><span class="pre">sample_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleMeta.sample_id" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.lane_id">
+<span class="sig-name descname"><span class="pre">lane_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.types.SampleMeta.lane_id" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.chunk_id">
+<span class="sig-name descname"><span class="pre">chunk_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.types.SampleMeta.chunk_id" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.chunk_offset">
+<span class="sig-name descname"><span class="pre">chunk_offset</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a></span><a class="headerlink" href="#zephon.types.SampleMeta.chunk_offset" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.component_sample_counts">
+<span class="sig-name descname"><span class="pre">component_sample_counts</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)"><span class="pre">dict</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleMeta.component_sample_counts" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.component_token_counts">
+<span class="sig-name descname"><span class="pre">component_token_counts</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)"><span class="pre">dict</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/constants.html#None" title="(in Python v3.15)"><span class="pre">None</span></a></span><a class="headerlink" href="#zephon.types.SampleMeta.component_token_counts" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.lineage">
+<span class="sig-name descname"><span class="pre">lineage</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleMeta.lineage" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.tags">
+<span class="sig-name descname"><span class="pre">tags</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)"><span class="pre">dict</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><span class="pre">Any</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleMeta.tags" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.with_lineage">
+<span class="sig-name descname"><span class="pre">with_lineage</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleMeta.with_lineage"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleMeta.with_lineage" title="Link to this definition">¶</a></dt>
+<dd><p>Return a new <code class="docutils literal notranslate"><span class="pre">SampleMeta</span></code> where the lineage is replaced by <code class="docutils literal notranslate"><span class="pre">path</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#zephon.types.SampleMeta" title="zephon.types.SampleMeta"><em>SampleMeta</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.child">
+<span class="sig-name descname"><span class="pre">child</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleMeta.child"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleMeta.child" title="Link to this definition">¶</a></dt>
+<dd><p>Return metadata for the <code class="docutils literal notranslate"><span class="pre">index</span></code>-th child emitted from this sample.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#zephon.types.SampleMeta" title="zephon.types.SampleMeta"><em>SampleMeta</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.cursor">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">cursor</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SampleCursor" title="zephon.types.SampleCursor"><span class="pre">SampleCursor</span></a></span><a class="headerlink" href="#zephon.types.SampleMeta.cursor" title="Link to this definition">¶</a></dt>
+<dd><p>Return a <code class="docutils literal notranslate"><span class="pre">SampleCursor</span></code> ordering key for this metadata.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.as_cursor_key">
+<span class="sig-name descname"><span class="pre">as_cursor_key</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleMeta.as_cursor_key"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleMeta.as_cursor_key" title="Link to this definition">¶</a></dt>
+<dd><p>Convenience helper returning the tuple form used for persistence.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>, <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>, <a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>, …], <a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>, <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>, <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><em>int</em></a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.contribution_refs">
+<span class="sig-name descname"><span class="pre">contribution_refs</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleMeta.contribution_refs"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleMeta.contribution_refs" title="Link to this definition">¶</a></dt>
+<dd><p>Return contributor references used for eviction/progress.</p>
+<p>Operators that don’t set <code class="docutils literal notranslate"><span class="pre">contributors</span></code> (1:1 outputs) are treated as emitting
+a single contributor with <code class="docutils literal notranslate"><span class="pre">is_last_child=True</span></code> using their own cursor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference internal" href="#zephon.types.ContributorRef" title="zephon.types.ContributorRef"><em>ContributorRef</em></a>, …]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.contribution_cursors">
+<span class="sig-name descname"><span class="pre">contribution_cursors</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleMeta.contribution_cursors"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleMeta.contribution_cursors" title="Link to this definition">¶</a></dt>
+<dd><p>Return the cursors for all contributors.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><em>tuple</em></a>[<a class="reference internal" href="#zephon.types.SampleCursor" title="zephon.types.SampleCursor"><em>SampleCursor</em></a>, …]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.contributors">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">contributors</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#zephon.types.ContributorRef" title="zephon.types.ContributorRef"><span class="pre">ContributorRef</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleMeta.contributors" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.tombstone">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">tombstone</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><a class="headerlink" href="#zephon.types.SampleMeta.tombstone" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.is_sentinel">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">is_sentinel</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><a class="headerlink" href="#zephon.types.SampleMeta.is_sentinel" title="Link to this definition">¶</a></dt>
+<dd><p>True for tombstones, flush sentinels, and end-of-data (EOD) sentinels.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.is_flush_sentinel">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">is_flush_sentinel</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><span class="pre">bool</span></a></span><a class="headerlink" href="#zephon.types.SampleMeta.is_flush_sentinel" title="Link to this definition">¶</a></dt>
+<dd><p>True if this record is a flush sentinel (triggers accumulator flush).</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.padding_length">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">padding_length</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/constants.html#None" title="(in Python v3.15)"><span class="pre">None</span></a></span><a class="headerlink" href="#zephon.types.SampleMeta.padding_length" title="Link to this definition">¶</a></dt>
+<dd><p>Trailing pad-token count of a flat <code class="docutils literal notranslate"><span class="pre">pack_flat</span></code> record, else <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.with_contributors">
+<span class="sig-name descname"><span class="pre">with_contributors</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleMeta.with_contributors"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleMeta.with_contributors" title="Link to this definition">¶</a></dt>
+<dd><p>Return a new <code class="docutils literal notranslate"><span class="pre">SampleMeta</span></code> with contributors set/cleared in tags.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#zephon.types.SampleMeta" title="zephon.types.SampleMeta"><em>SampleMeta</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zephon.types.SampleMeta.with_tombstone">
+<span class="sig-name descname"><span class="pre">with_tombstone</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleMeta.with_tombstone"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleMeta.with_tombstone" title="Link to this definition">¶</a></dt>
+<dd><p>Return a new <code class="docutils literal notranslate"><span class="pre">SampleMeta</span></code> with tombstone marker set/cleared in tags.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#zephon.types.SampleMeta" title="zephon.types.SampleMeta"><em>SampleMeta</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SamplePayloadArray">
+<span class="sig-name descname"><span class="pre">SamplePayloadArray</span></span><a class="headerlink" href="#zephon.types.SamplePayloadArray" title="Link to this definition">¶</a></dt>
+<dd><p>alias of <a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">Any</span></code></a></p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zephon.types.SampleRecord">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SampleRecord</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">meta</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">payload</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/types.html#SampleRecord"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.types.SampleRecord" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>Sample payload bundled with its metadata for transport through stages.</p>
+<dl class="field-list simple">
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleRecord.meta">
+<span class="sig-name descname"><span class="pre">meta</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SampleMeta" title="zephon.types.SampleMeta"><span class="pre">SampleMeta</span></a></span><a class="headerlink" href="#zephon.types.SampleRecord.meta" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.SampleRecord.payload">
+<span class="sig-name descname"><span class="pre">payload</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#bytes" title="(in Python v3.15)"><span class="pre">bytes</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#memoryview" title="(in Python v3.15)"><span class="pre">memoryview</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.15)"><span class="pre">float</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#complex" title="(in Python v3.15)"><span class="pre">complex</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><span class="pre">Any</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/constants.html#None" title="(in Python v3.15)"><span class="pre">None</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><span class="pre">list</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#zephon.types.SamplePayload" title="zephon.types.SamplePayload"><span class="pre">SamplePayload</span></a><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)"><span class="pre">dict</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.15)"><span class="pre">Any</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SamplePayload" title="zephon.types.SamplePayload"><span class="pre">SamplePayload</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleRecord.payload" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zephon.types.ShardId">
+<span class="sig-name descname"><span class="pre">ShardId</span></span><a class="headerlink" href="#zephon.types.ShardId" title="Link to this definition">¶</a></dt>
+<dd><p>alias of <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></p>
+</dd></dl>
+
+<section id="type-aliases">
+<h2>Type aliases<a class="headerlink" href="#type-aliases" title="Link to this heading">¶</a></h2>
+<p>These are type aliases, not classes; they name the shapes that appear in
+operator and payload signatures.</p>
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.types.SampleId">
+<span class="sig-name descname"><span class="pre">SampleId</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#zephon.types.DatasetId" title="zephon.types.DatasetId"><span class="pre">DatasetId</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.ShardId" title="zephon.types.ShardId"><span class="pre">ShardId</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.LocalSampleId" title="zephon.types.LocalSampleId"><span class="pre">LocalSampleId</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleId" title="Link to this definition">¶</a></dt>
+<dd><p>Where a sample sits in the data: which dataset, which shard, which row.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.types.LineagePath">
+<span class="sig-name descname"><span class="pre">LineagePath</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#zephon.types.LineageIndex" title="zephon.types.LineageIndex"><span class="pre">LineageIndex</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.LineagePath" title="Link to this definition">¶</a></dt>
+<dd><p>One index per fan-out step, recording how a record descends from a sample.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.types.SampleCursorKey">
+<span class="sig-name descname"><span class="pre">SampleCursorKey</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#tuple" title="(in Python v3.15)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#zephon.types.ChunkId" title="zephon.types.ChunkId"><span class="pre">ChunkId</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.ChunkOffset" title="zephon.types.ChunkOffset"><span class="pre">ChunkOffset</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.LineagePath" title="zephon.types.LineagePath"><span class="pre">LineagePath</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SampleId" title="zephon.types.SampleId"><span class="pre">SampleId</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SampleCursorKey" title="Link to this definition">¶</a></dt>
+<dd><p>Cursor order: chunk, then offset, then lineage, with the sample id last so it
+only breaks ties.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.types.SampleNumeric">
+<span class="sig-name descname"><span class="pre">SampleNumeric</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#int" title="(in Python v3.15)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#float" title="(in Python v3.15)"><span class="pre">float</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/functions.html#complex" title="(in Python v3.15)"><span class="pre">complex</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">_NumpyNumber</span></span><a class="headerlink" href="#zephon.types.SampleNumeric" title="Link to this definition">¶</a></dt>
+<dd><p>The numeric types a payload may hold, including NumPy scalars.
+<code class="docutils literal notranslate"><span class="pre">_NumpyNumber</span></code> denotes <code class="docutils literal notranslate"><span class="pre">numpy.number[Any]</span></code>.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.types.SamplePayloadAtom">
+<span class="sig-name descname"><span class="pre">SamplePayloadAtom</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#bytes" title="(in Python v3.15)"><span class="pre">bytes</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#memoryview" title="(in Python v3.15)"><span class="pre">memoryview</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SampleNumeric" title="zephon.types.SampleNumeric"><span class="pre">SampleNumeric</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">_NumpyTemporal</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SamplePayloadArray" title="zephon.types.SamplePayloadArray"><span class="pre">SamplePayloadArray</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/constants.html#None" title="(in Python v3.15)"><span class="pre">None</span></a></span><a class="headerlink" href="#zephon.types.SamplePayloadAtom" title="Link to this definition">¶</a></dt>
+<dd><p>A payload leaf: anything that is not a list or a dict of further payloads.
+<code class="docutils literal notranslate"><span class="pre">_NumpyTemporal</span></code> denotes <code class="docutils literal notranslate"><span class="pre">numpy.datetime64</span> <span class="pre">|</span> <span class="pre">numpy.timedelta64</span></code>;
+<code class="docutils literal notranslate"><span class="pre">None</span></code> represents a null value.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.types.SamplePayload">
+<span class="sig-name descname"><span class="pre">SamplePayload</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SamplePayloadAtom" title="zephon.types.SamplePayloadAtom"><span class="pre">SamplePayloadAtom</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#list" title="(in Python v3.15)"><span class="pre">list</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#zephon.types.SamplePayload" title="zephon.types.SamplePayload"><span class="pre">SamplePayload</span></a><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)"><span class="pre">dict</span></a><span class="p"><span class="pre">[</span></span><span class="pre">Any</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SamplePayload" title="zephon.types.SamplePayload"><span class="pre">SamplePayload</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SamplePayload" title="Link to this definition">¶</a></dt>
+<dd><p>A payload of any shape: a leaf, or lists and dicts nesting further payloads.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.types.SamplePayloadDict">
+<span class="sig-name descname"><span class="pre">SamplePayloadDict</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#dict" title="(in Python v3.15)"><span class="pre">dict</span></a><span class="p"><span class="pre">[</span></span><span class="pre">Any</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SamplePayload" title="zephon.types.SamplePayload"><span class="pre">SamplePayload</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#zephon.types.SamplePayloadDict" title="Link to this definition">¶</a></dt>
+<dd><p>The mapping form of a payload, which is what most operators receive.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zephon.types.StreamItem">
+<span class="sig-name descname"><span class="pre">StreamItem</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SampleRecord" title="zephon.types.SampleRecord"><span class="pre">SampleRecord</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference internal" href="#zephon.types.SampleBatch" title="zephon.types.SampleBatch"><span class="pre">SampleBatch</span></a></span><a class="headerlink" href="#zephon.types.StreamItem" title="Link to this definition">¶</a></dt>
+<dd><p>What travels between operators: records before <code class="docutils literal notranslate"><span class="pre">batch</span></code>, batches after it.</p>
+</dd></dl>
+
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="runtime.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Runtime and tuning</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="operators.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Operators</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Records and batches</a><ul>
+<li><a class="reference internal" href="#zephon.types.ChunkId"><code class="docutils literal notranslate"><span class="pre">ChunkId</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.ChunkOffset"><code class="docutils literal notranslate"><span class="pre">ChunkOffset</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.ComponentId"><code class="docutils literal notranslate"><span class="pre">ComponentId</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.ContributorRef"><code class="docutils literal notranslate"><span class="pre">ContributorRef</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.types.ContributorRef.cursor"><code class="docutils literal notranslate"><span class="pre">cursor</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.ContributorRef.is_last_child"><code class="docutils literal notranslate"><span class="pre">is_last_child</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.types.DatasetId"><code class="docutils literal notranslate"><span class="pre">DatasetId</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.LaneId"><code class="docutils literal notranslate"><span class="pre">LaneId</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.LineageIndex"><code class="docutils literal notranslate"><span class="pre">LineageIndex</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.LocalSampleId"><code class="docutils literal notranslate"><span class="pre">LocalSampleId</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleBatch"><code class="docutils literal notranslate"><span class="pre">SampleBatch</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.types.SampleBatch.records"><code class="docutils literal notranslate"><span class="pre">records</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleBatch.lane_ids"><code class="docutils literal notranslate"><span class="pre">lane_ids</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleBatch.chunk_ids"><code class="docutils literal notranslate"><span class="pre">chunk_ids</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleBatch.ids"><code class="docutils literal notranslate"><span class="pre">ids</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleBatch.lineage_paths"><code class="docutils literal notranslate"><span class="pre">lineage_paths</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleBatch.to_training"><code class="docutils literal notranslate"><span class="pre">to_training()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.types.SampleCursor"><code class="docutils literal notranslate"><span class="pre">SampleCursor</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.types.SampleCursor.chunk_id"><code class="docutils literal notranslate"><span class="pre">chunk_id</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleCursor.chunk_offset"><code class="docutils literal notranslate"><span class="pre">chunk_offset</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleCursor.sample_id"><code class="docutils literal notranslate"><span class="pre">sample_id</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleCursor.lineage"><code class="docutils literal notranslate"><span class="pre">lineage</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleCursor.from_key"><code class="docutils literal notranslate"><span class="pre">from_key()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleCursor.child"><code class="docutils literal notranslate"><span class="pre">child()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleCursor.as_key"><code class="docutils literal notranslate"><span class="pre">as_key()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleCursor.base_offset"><code class="docutils literal notranslate"><span class="pre">base_offset</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta"><code class="docutils literal notranslate"><span class="pre">SampleMeta</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.sample_id"><code class="docutils literal notranslate"><span class="pre">sample_id</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.lane_id"><code class="docutils literal notranslate"><span class="pre">lane_id</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.chunk_id"><code class="docutils literal notranslate"><span class="pre">chunk_id</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.chunk_offset"><code class="docutils literal notranslate"><span class="pre">chunk_offset</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.component_sample_counts"><code class="docutils literal notranslate"><span class="pre">component_sample_counts</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.component_token_counts"><code class="docutils literal notranslate"><span class="pre">component_token_counts</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.lineage"><code class="docutils literal notranslate"><span class="pre">lineage</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.tags"><code class="docutils literal notranslate"><span class="pre">tags</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.with_lineage"><code class="docutils literal notranslate"><span class="pre">with_lineage()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.child"><code class="docutils literal notranslate"><span class="pre">child()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.cursor"><code class="docutils literal notranslate"><span class="pre">cursor</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.as_cursor_key"><code class="docutils literal notranslate"><span class="pre">as_cursor_key()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.contribution_refs"><code class="docutils literal notranslate"><span class="pre">contribution_refs()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.contribution_cursors"><code class="docutils literal notranslate"><span class="pre">contribution_cursors()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.contributors"><code class="docutils literal notranslate"><span class="pre">contributors</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.tombstone"><code class="docutils literal notranslate"><span class="pre">tombstone</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.is_sentinel"><code class="docutils literal notranslate"><span class="pre">is_sentinel</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.is_flush_sentinel"><code class="docutils literal notranslate"><span class="pre">is_flush_sentinel</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.padding_length"><code class="docutils literal notranslate"><span class="pre">padding_length</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.with_contributors"><code class="docutils literal notranslate"><span class="pre">with_contributors()</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleMeta.with_tombstone"><code class="docutils literal notranslate"><span class="pre">with_tombstone()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.types.SamplePayloadArray"><code class="docutils literal notranslate"><span class="pre">SamplePayloadArray</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleRecord"><code class="docutils literal notranslate"><span class="pre">SampleRecord</span></code></a><ul>
+<li><a class="reference internal" href="#zephon.types.SampleRecord.meta"><code class="docutils literal notranslate"><span class="pre">meta</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleRecord.payload"><code class="docutils literal notranslate"><span class="pre">payload</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#zephon.types.ShardId"><code class="docutils literal notranslate"><span class="pre">ShardId</span></code></a></li>
+<li><a class="reference internal" href="#type-aliases">Type aliases</a><ul>
+<li><a class="reference internal" href="#zephon.types.SampleId"><code class="docutils literal notranslate"><span class="pre">SampleId</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.LineagePath"><code class="docutils literal notranslate"><span class="pre">LineagePath</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleCursorKey"><code class="docutils literal notranslate"><span class="pre">SampleCursorKey</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SampleNumeric"><code class="docutils literal notranslate"><span class="pre">SampleNumeric</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SamplePayloadAtom"><code class="docutils literal notranslate"><span class="pre">SamplePayloadAtom</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SamplePayload"><code class="docutils literal notranslate"><span class="pre">SamplePayload</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.SamplePayloadDict"><code class="docutils literal notranslate"><span class="pre">SamplePayloadDict</span></code></a></li>
+<li><a class="reference internal" href="#zephon.types.StreamItem"><code class="docutils literal notranslate"><span class="pre">StreamItem</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

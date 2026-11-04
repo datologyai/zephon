@@ -7,7 +7,7 @@
         <link rel="prefetch" href="../_static/zephon-wordmark-teal.png" as="image">
         <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
 
-    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
         <title>Inspecting and tuning pipelines - Zephon</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
@@ -86,7 +86,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="main" data-page="pipelines/inspecting_and_tuning_pipelines.html"></script>
+</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="v0.2.0" data-page="pipelines/inspecting_and_tuning_pipelines.html"></script>
 </head>
   <body>
     
@@ -392,11 +392,6 @@ for datasets stored in remote storage locations, the <code class="docutils liter
 provides similar metrics about the prefetch operations. Keep in mind that tracking these
 metrics introduces a fair amount of overhead (especially when using the <code class="docutils literal notranslate"><span class="pre">process</span></code> runner),
 so leave observability off for production runs.</p>
-<p>Per-node metrics can also include the payload bytes each operator consumes and produces.
-Sizing payloads costs extra time on every batch, so by default it only happens for
-<code class="docutils literal notranslate"><span class="pre">process</span></code> and <code class="docutils literal notranslate"><span class="pre">remote</span></code> stages, where payloads cross process or host boundaries. Pass
-<code class="docutils literal notranslate"><span class="pre">measure_bytes=True</span></code> to <code class="docutils literal notranslate"><span class="pre">enable_observability()</span></code> to size payloads on every stage, or
-<code class="docutils literal notranslate"><span class="pre">measure_bytes=False</span></code> to turn it off everywhere.</p>
 <p>The purpose of these measurements is to identify which part of the <code class="docutils literal notranslate"><span class="pre">Pipeline</span></code> run is
 limiting the throughput. High fetch times suggest that we need to look at the time spent
 downloading shards, opening files, and reading records, while large amounts of time spent

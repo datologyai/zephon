@@ -1,0 +1,734 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
+        <link rel="prefetch" href="../../../_static/zephon-wordmark-teal.png" as="image">
+        <link rel="prefetch" href="../../../_static/zephon-wordmark-mint.png" as="image">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>zephon.io.dataset - Zephon</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/theme.css?v=52d7d2fd" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/figures.css?v=88debe3c" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #096361;
+  --color-brand-content: #096361;
+  --color-brand-visited: #526e6b;
+  --color-foreground-primary: #112a2b;
+  --color-foreground-secondary: #526e6b;
+  --color-background-secondary: #f0f9f6;
+  --color-background-border: #cee2dd;
+  --color-background-hover: #e6f4f0;
+  --color-table-border: #cee2dd;
+  --color-table-header-background: #f0f9f6;
+  --color-inline-code-background: #f0f9f6;
+  --color-highlight-on-target: #d8f8f3;
+  --color-api-name: #096361;
+  --color-api-pre-name: #526e6b;
+  --color-code-background: #f0f9f6;
+  --color-admonition-title--note: #096361;
+  --color-admonition-title-background--note: #d8f8f3;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #00efb5;
+  --color-brand-content: #00efb5;
+  --color-brand-visited: #7e9b98;
+  --color-background-secondary: #15302f;
+  --color-background-border: #456260;
+  --color-background-hover: #1b3a38;
+  --color-table-border: #456260;
+  --color-table-header-background: #22403e;
+  --color-inline-code-background: #22403e;
+  --color-highlight-on-target: #1b3a38;
+  --color-api-name: #00efb5;
+  --color-api-pre-name: #7e9b98;
+  --color-code-background: #15302f;
+  --color-admonition-title--note: #00efb5;
+  --color-admonition-title-background--note: #1b3a38;
+  
+      }
+    }
+  }
+</style><script data-zephon-versions="1" defer src="../../../../_versions/switcher.js" data-version="v0.2.0" data-page="_modules/zephon/io/dataset.html"></script>
+</head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../index.html"><div class="brand">Zephon</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo only-light" src="../../../_static/zephon-wordmark-teal.png" alt="Light Logo"/>
+    <img class="sidebar-logo only-dark" src="../../../_static/zephon-wordmark-mint.png" alt="Dark Logo"/>
+  </div>
+  
+  
+</a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../basic_concepts.html">Basic concepts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../why_zephon.html">Why Zephon?</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../datasets/index.html">Working with datasets</a><input aria-label="Toggle navigation of Working with datasets" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../datasets/jsonl.html">JSONL</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../datasets/parquet.html">Parquet</a></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../datasets/binary_shard_formats/index.html">Binary shard formats</a><input aria-label="Toggle navigation of Binary shard formats" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/litdata.html">litData</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/lance.html">Lance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../../datasets/storage_backends_and_shard_cache.html">Storage backends and shard cache</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../worksources/index.html">WorkSources: the training curriculum</a><input aria-label="Toggle navigation of WorkSources: the training curriculum" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../worksources/mixing_datasets.html">Mixing datasets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../worksources/shuffling_and_repeating_samples.html">Shuffling and repeating samples</a></li>
+</ul>
+</li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../pipelines/index.html">Pipelines: from a curriculum to training batches</a><input aria-label="Toggle navigation of Pipelines: from a curriculum to training batches" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/how_pipelines_run.html">How pipelines run</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/preparing_samples.html">Preparing samples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/shuffling_and_maintaining_mixtures.html">Shuffling and maintaining mixtures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/packing.html">Packing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/building_training_batches.html">Building training batches</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/inspecting_and_tuning_pipelines.html">Inspecting and tuning pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/distributed_training.html">Distributed training</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/checkpointing_and_resuming.html">Checkpointing and resuming pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../pipelines/user_defined_operators.html">User-defined operators</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../training_integrations.html">Training integrations</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internals</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/index.html">Internals overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/worksources_and_work_chunks.html">WorkSources and work chunks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/elastic_determinism.html">Elastic determinism</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/operators_and_runners.html">Operators and runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/records_and_sample_lifecycles.html">Records and sample lifecycles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../internals/checkpoint_replay.html">Checkpoint replay and bounded recovery</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/datasets.html">Datasets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/worksources.html">WorkSources</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/pipeline.html">Pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/operators.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/records.html">Records and batches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/runtime.html">Runtime and tuning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/tools.html">Tools</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for zephon.io.dataset</h1><div class="highlight"><pre>
+<span></span><span class="sd">"""User-facing dataset descriptors and detectors."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">urllib.parse</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Mapping</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.catalog</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">DatasetHeader</span> <span class="k">as</span> <span class="n">_DatasetHeader</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.catalog</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">ShardCatalogHandle</span> <span class="k">as</span> <span class="n">_ShardCatalogHandle</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.formats</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">ensure_builtin_formats</span> <span class="k">as</span> <span class="n">_ensure_builtin_formats</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.formats.base</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">FormatHandler</span> <span class="k">as</span> <span class="n">_FormatHandler</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.formats.base</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">get_format</span> <span class="k">as</span> <span class="n">_get_format</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.formats.lance_support.manifest</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">is_lance_dataset</span> <span class="k">as</span> <span class="n">_is_lance_dataset</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.formats.lance_support.manifest</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">is_manifest_path</span> <span class="k">as</span> <span class="n">_is_lance_manifest</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.index</span><span class="w"> </span><span class="kn">import</span> <span class="n">find_and_load_index</span> <span class="k">as</span> <span class="n">_find_and_load_index</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.index.index_types</span><span class="w"> </span><span class="kn">import</span> <span class="n">IndexData</span> <span class="k">as</span> <span class="n">_IndexData</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.protocols</span><span class="w"> </span><span class="kn">import</span> <span class="n">RandomAccessShard</span> <span class="k">as</span> <span class="n">_RandomAccessShard</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.storage</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">RouterStorageBackend</span> <span class="k">as</span> <span class="n">_RouterStorageBackend</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.storage</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">StorageBackend</span> <span class="k">as</span> <span class="n">_StorageBackend</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.suffixes</span><span class="w"> </span><span class="kn">import</span> <span class="n">JSONL_SUFFIXES</span> <span class="k">as</span> <span class="n">_JSONL_SUFFIXES</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.suffixes</span><span class="w"> </span><span class="kn">import</span> <span class="n">detect_format</span> <span class="k">as</span> <span class="n">_detect_format</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon.io.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">InMemoryShard</span>
+
+
+<div class="viewcode-block" id="Dataset">
+<a class="viewcode-back" href="../../../api/datasets.html#zephon.io.Dataset">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Dataset</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Descriptor for a dataset with index and backend info.</span>
+
+<span class="sd">    Instances are created via ``from_path`` (file-backed) or ``from_dict``</span>
+<span class="sd">    (in-memory/testing). They always provide:</span>
+
+<span class="sd">    - ``name``: a user-facing identifier used in mixtures</span>
+<span class="sd">    - ``backend``: opaque metadata that lets FetchOp build a reader later</span>
+<span class="sd">    - ``path``: original filesystem path if file-backed, otherwise ``None``</span>
+
+<span class="sd">    File-backed datasets also carry a few-KB handle to the node-local shard</span>
+<span class="sd">    catalog (set by ``from_path``); this is what travels in ctx, not</span>
+<span class="sd">    ``shard_meta``.</span>
+
+<span class="sd">    Shard counts are not stored as a mapping; read them via :meth:`ids` /</span>
+<span class="sd">    :meth:`counts` / :meth:`total` / :meth:`max_count` / :meth:`shard_count`.</span>
+
+<span class="sd">    Backend kinds used by the internal store builder:</span>
+
+<span class="sd">    - ``litdata``/``mds``/``jsonl``/``parquet``/``vortex``/``lance``: ``kind`` and</span>
+<span class="sd">      ``path`` (no per-shard ``shards`` graph — that lives in the catalog now)</span>
+<span class="sd">    - ``inmem``: ``kind`` and ``shards`` (``dict[int, InMemoryShard]``)</span>
+
+<span class="sd">    Note: this class does not expose any method to fetch rows; IO is delegated</span>
+<span class="sd">    to an internal shard store owned by the FetchOp.</span>
+<span class="sd">    """</span>
+
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">backend</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span>
+    <span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="c1"># Node-local shard-catalog handle (file-backed datasets only); set by</span>
+    <span class="c1"># from_path(), not a constructor argument.</span>
+    <span class="n">_catalog_handle</span><span class="p">:</span> <span class="n">_ShardCatalogHandle</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">compare</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">init</span><span class="o">=</span><span class="kc">False</span>
+    <span class="p">)</span>
+    <span class="c1"># _ids/_counts are constructor-seeded discovery output, not a cache: at</span>
+    <span class="c1"># planning time the catalog doesn't exist yet (preflight builds it once per</span>
+    <span class="c1"># node, later), so they are the only copy the driver can read. Pickling</span>
+    <span class="c1"># drops them: by spawn time the catalog exists, and attach() maps pages</span>
+    <span class="c1"># shared node-wide where pickled arrays would be a private copy per worker</span>
+    <span class="c1"># (in-memory datasets re-derive from the shipped shards). Reads stay uncached.</span>
+    <span class="n">_ids</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">compare</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="n">_counts</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">compare</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_inmem_shards</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="n">InMemoryShard</span><span class="p">]:</span>
+        <span class="n">shards</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"shards"</span><span class="p">)</span>
+        <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"kind"</span><span class="p">)</span> <span class="o">==</span> <span class="s2">"inmem"</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">shards</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">shards</span>
+
+<div class="viewcode-block" id="Dataset.ids">
+<a class="viewcode-back" href="../../../api/datasets.html#zephon.io.Dataset.ids">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">ids</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the sorted shard ids as an ``int64`` array."""</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ids</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ids</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_catalog_handle</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_catalog_handle</span><span class="o">.</span><span class="n">attach</span><span class="p">()</span><span class="o">.</span><span class="n">ids</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">_inmem_ids_counts</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_inmem_shards</span><span class="p">())[</span><span class="mi">0</span><span class="p">]</span></div>
+
+
+<div class="viewcode-block" id="Dataset.counts">
+<a class="viewcode-back" href="../../../api/datasets.html#zephon.io.Dataset.counts">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">counts</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return per-shard sample counts (``int64``), aligned with :meth:`ids`."""</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_counts</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_counts</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_catalog_handle</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_catalog_handle</span><span class="o">.</span><span class="n">attach</span><span class="p">()</span><span class="o">.</span><span class="n">num_rows</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">_inmem_ids_counts</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_inmem_shards</span><span class="p">())[</span><span class="mi">1</span><span class="p">]</span></div>
+
+
+<div class="viewcode-block" id="Dataset.raw_bytes">
+<a class="viewcode-back" href="../../../api/datasets.html#zephon.io.Dataset.raw_bytes">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">raw_bytes</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return per-shard byte sizes (``int64``), aligned with :meth:`ids`.</span>
+
+<span class="sd">        File-backed datasets read the catalog's on-disk shard sizes; in-memory</span>
+<span class="sd">        shards size their resident payloads lazily (:attr:`InMemoryShard.raw_bytes`).</span>
+<span class="sd">        """</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_catalog_handle</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_catalog_handle</span><span class="o">.</span><span class="n">ensure_attached</span><span class="p">()</span><span class="o">.</span><span class="n">raw_bytes</span><span class="p">()</span>
+        <span class="n">shards</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_inmem_shards</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">shards</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">raw_bytes</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">shards</span><span class="p">)],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Dataset.total">
+<a class="viewcode-back" href="../../../api/datasets.html#zephon.io.Dataset.total">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">total</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Total sample count across all shards."""</span>
+        <span class="k">return</span> <span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">counts</span><span class="p">()</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span></div>
+
+
+<div class="viewcode-block" id="Dataset.max_count">
+<a class="viewcode-back" href="../../../api/datasets.html#zephon.io.Dataset.max_count">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">max_count</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Largest single-shard sample count (0 when empty)."""</span>
+        <span class="k">return</span> <span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">counts</span><span class="p">()</span><span class="o">.</span><span class="n">max</span><span class="p">(</span><span class="n">initial</span><span class="o">=</span><span class="mi">0</span><span class="p">))</span></div>
+
+
+<div class="viewcode-block" id="Dataset.shard_count">
+<a class="viewcode-back" href="../../../api/datasets.html#zephon.io.Dataset.shard_count">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">shard_count</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Number of shards."""</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">ids</span><span class="p">()</span><span class="o">.</span><span class="n">size</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">total</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">__getstate__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+        <span class="c1"># Counts never travel — see the _ids/_counts field comment.</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">"name"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+            <span class="s2">"backend"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">backend</span><span class="p">,</span>
+            <span class="s2">"path"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">path</span><span class="p">,</span>
+            <span class="s2">"_catalog_handle"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_catalog_handle</span><span class="p">,</span>
+        <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">__deepcopy__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">memo</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="s2">"Dataset"</span><span class="p">:</span>
+        <span class="c1"># Share, don't copy: a base-WorkSource deepcopy-clone must not duplicate</span>
+        <span class="c1"># the (immutable) handle and count arrays.</span>
+        <span class="n">memo</span><span class="p">[</span><span class="nb">id</span><span class="p">(</span><span class="bp">self</span><span class="p">)]</span> <span class="o">=</span> <span class="bp">self</span>
+        <span class="k">return</span> <span class="bp">self</span>
+
+<div class="viewcode-block" id="Dataset.from_path">
+<a class="viewcode-back" href="../../../api/datasets.html#zephon.io.Dataset.from_path">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_path</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">fmt</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"Dataset"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Construct a file-backed dataset descriptor.</span>
+
+<span class="sd">        Performs a *count-only* discovery: it obtains ``shard_id`` + ``num_rows``</span>
+<span class="sd">        as small numpy arrays (the work source's input) without materializing the</span>
+<span class="sd">        per-shard ``shard_meta`` graph. The full columnar catalog is built once</span>
+<span class="sd">        per node later, by the Engine's ``finalize()`` (or lazily by the store</span>
+<span class="sd">        builder for Engine-less use).</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            name: Logical dataset name used in mixtures and debugging.</span>
+<span class="sd">            path: Filesystem directory containing the dataset.</span>
+<span class="sd">            fmt: Optional explicit format. When ``None``, auto-detects.</span>
+
+<span class="sd">        Supported formats:</span>
+
+<span class="sd">        - ``litdata`` directories containing ``index.json`` structured with</span>
+<span class="sd">          ``config`` and ``chunks``</span>
+<span class="sd">        - ``mds`` directories containing ``index.json`` structured with</span>
+<span class="sd">          ``shards``</span>
+<span class="sd">        - ``jsonl`` directories where ``*.jsonl`` files act as shards, with an</span>
+<span class="sd">          optional Zephon ``index.json`` for fast discovery</span>
+<span class="sd">        - ``lance`` dataset directories, one shard per fragment. Discovery pins</span>
+<span class="sd">          the dataset to its latest version and ``path`` becomes that version's</span>
+<span class="sd">          manifest; pass a ``_versions/*.manifest`` path to pin an earlier one.</span>
+
+<span class="sd">        Special URI schemes:</span>
+
+<span class="sd">        - ``hf://org/name[@rev]/[config/]split`` is served through the</span>
+<span class="sd">          HuggingFace backend: the split's uploaded files when their format is</span>
+<span class="sd">          readable, else HuggingFace's Parquet conversion when it is complete</span>
+<span class="sd">          and built from the requested commit. ``fmt`` picks the source in that</span>
+<span class="sd">          format; appending ``~original`` or ``~parquet`` to the revision</span>
+<span class="sd">          (``hf://org/name@~parquet/split``) forces one. A partial conversion is</span>
+<span class="sd">          used only with ``ZEPHON_HF_ALLOW_PARTIAL=1``. Uploaded files are read</span>
+<span class="sd">          as stored: the dataset card's reader options and ``features`` casting</span>
+<span class="sd">          are not applied. The dataset's ``path`` becomes a URI pinned to the</span>
+<span class="sd">          resolved commit, source and config.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Dataset: a descriptor populated with shard counts and a catalog</span>
+<span class="sd">            handle for later IO.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            FileNotFoundError: if ``path`` does not exist.</span>
+<span class="sd">            ValueError: if ``path`` is not a directory or format unsupported.</span>
+<span class="sd">        """</span>
+        <span class="n">url</span> <span class="o">=</span> <span class="n">urllib</span><span class="o">.</span><span class="n">parse</span><span class="o">.</span><span class="n">urlparse</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+        <span class="n">is_remote</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">url</span><span class="o">.</span><span class="n">scheme</span><span class="p">)</span>
+
+        <span class="n">root_path</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">is_remote</span><span class="p">:</span>
+            <span class="n">root_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">root_path</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+                <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Dataset path does not exist: </span><span class="si">{</span><span class="n">root_path</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+            <span class="c1"># A Lance manifest is the one file that names a dataset root: it</span>
+            <span class="c1"># pins a version.</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">root_path</span><span class="o">.</span><span class="n">is_dir</span><span class="p">()</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">_is_lance_manifest</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">root_path</span><span class="p">)):</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Dataset path must be a directory: </span><span class="si">{</span><span class="n">root_path</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+            <span class="n">root_path</span> <span class="o">=</span> <span class="n">root_path</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+            <span class="n">root_str</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">root_path</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">root_str</span> <span class="o">=</span> <span class="n">path</span><span class="o">.</span><span class="n">rstrip</span><span class="p">(</span><span class="s2">"/"</span><span class="p">)</span> <span class="ow">or</span> <span class="n">path</span>
+
+        <span class="n">storage</span> <span class="o">=</span> <span class="n">_RouterStorageBackend</span><span class="p">()</span>
+        <span class="n">root_str</span> <span class="o">=</span> <span class="n">storage</span><span class="o">.</span><span class="n">canonical_root</span><span class="p">(</span><span class="n">root_str</span><span class="p">,</span> <span class="n">fmt</span><span class="o">=</span><span class="n">fmt</span><span class="p">)</span>
+        <span class="n">kind</span> <span class="o">=</span> <span class="n">fmt</span>
+        <span class="k">if</span> <span class="n">kind</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">kind</span> <span class="o">=</span> <span class="n">_auto_detect_format</span><span class="p">(</span><span class="n">storage</span><span class="p">,</span> <span class="n">root_str</span><span class="p">,</span> <span class="n">root_path</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">kind</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Unsupported dataset format at path: </span><span class="si">{</span><span class="n">root_str</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+        <span class="n">_ensure_builtin_formats</span><span class="p">(</span><span class="n">required</span><span class="o">=</span><span class="p">{</span><span class="n">kind</span><span class="p">})</span>
+        <span class="n">handler</span> <span class="o">=</span> <span class="n">_get_format</span><span class="p">(</span><span class="n">kind</span><span class="p">)</span>
+        <span class="n">root_str</span> <span class="o">=</span> <span class="n">handler</span><span class="o">.</span><span class="n">resolve_root</span><span class="p">(</span><span class="n">root_str</span><span class="p">,</span> <span class="n">storage</span><span class="p">)</span>
+        <span class="n">ids</span><span class="p">,</span> <span class="n">counts</span> <span class="o">=</span> <span class="n">_discover_counts</span><span class="p">(</span><span class="n">handler</span><span class="p">,</span> <span class="n">root_str</span><span class="p">,</span> <span class="n">storage</span><span class="p">)</span>
+        <span class="c1"># ids()/counts() hand these arrays out shared (the work-source cursor</span>
+        <span class="c1"># gathers from them in place); freeze them so an in-place edit fails loud.</span>
+        <span class="n">ids</span><span class="o">.</span><span class="n">setflags</span><span class="p">(</span><span class="n">write</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="n">counts</span><span class="o">.</span><span class="n">setflags</span><span class="p">(</span><span class="n">write</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+
+        <span class="n">backend</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"kind"</span><span class="p">:</span> <span class="n">kind</span><span class="p">,</span> <span class="s2">"path"</span><span class="p">:</span> <span class="n">root_str</span><span class="p">}</span>
+        <span class="n">header</span> <span class="o">=</span> <span class="n">_DatasetHeader</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span> <span class="n">root</span><span class="o">=</span><span class="n">root_str</span><span class="p">,</span> <span class="nb">format</span><span class="o">=</span><span class="n">kind</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="n">root_str</span><span class="p">)</span>
+        <span class="n">handle</span> <span class="o">=</span> <span class="n">_ShardCatalogHandle</span><span class="p">(</span><span class="n">dataset</span><span class="o">=</span><span class="n">header</span><span class="p">)</span>
+        <span class="n">dataset</span> <span class="o">=</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span>
+            <span class="n">backend</span><span class="o">=</span><span class="n">backend</span><span class="p">,</span>
+            <span class="n">path</span><span class="o">=</span><span class="n">root_str</span><span class="p">,</span>
+            <span class="n">_ids</span><span class="o">=</span><span class="n">ids</span><span class="p">,</span>
+            <span class="n">_counts</span><span class="o">=</span><span class="n">counts</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="c1"># Non-init private field: set on the frozen instance post-construction.</span>
+        <span class="nb">object</span><span class="o">.</span><span class="fm">__setattr__</span><span class="p">(</span><span class="n">dataset</span><span class="p">,</span> <span class="s2">"_catalog_handle"</span><span class="p">,</span> <span class="n">handle</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">dataset</span></div>
+
+
+<div class="viewcode-block" id="Dataset.from_dict">
+<a class="viewcode-back" href="../../../api/datasets.html#zephon.io.Dataset.from_dict">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_dict</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">shards</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="n">InMemoryShard</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="s2">"Dataset"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Construct an in-memory dataset descriptor."""</span>
+        <span class="n">norm</span> <span class="o">=</span> <span class="p">{</span><span class="nb">int</span><span class="p">(</span><span class="n">sid</span><span class="p">):</span> <span class="n">shard</span> <span class="k">for</span> <span class="n">sid</span><span class="p">,</span> <span class="n">shard</span> <span class="ow">in</span> <span class="n">shards</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+        <span class="n">backend</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"kind"</span><span class="p">:</span> <span class="s2">"inmem"</span><span class="p">,</span> <span class="s2">"shards"</span><span class="p">:</span> <span class="n">norm</span><span class="p">}</span>
+        <span class="n">ids</span><span class="p">,</span> <span class="n">counts</span> <span class="o">=</span> <span class="n">_inmem_ids_counts</span><span class="p">(</span><span class="n">norm</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span> <span class="n">backend</span><span class="o">=</span><span class="n">backend</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">_ids</span><span class="o">=</span><span class="n">ids</span><span class="p">,</span> <span class="n">_counts</span><span class="o">=</span><span class="n">counts</span><span class="p">)</span></div>
+</div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_inmem_ids_counts</span><span class="p">(</span>
+    <span class="n">shards</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="n">_RandomAccessShard</span><span class="p">],</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Derive aligned ``(ids, counts)`` from resident in-memory shards."""</span>
+    <span class="n">ids</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">k</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">shards</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>
+    <span class="n">counts</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="nb">len</span><span class="p">(</span><span class="n">shards</span><span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="n">i</span><span class="p">)])</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">ids</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>
+    <span class="c1"># Handed out shared (same contract as the from_path arrays): freeze them.</span>
+    <span class="n">ids</span><span class="o">.</span><span class="n">setflags</span><span class="p">(</span><span class="n">write</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="n">counts</span><span class="o">.</span><span class="n">setflags</span><span class="p">(</span><span class="n">write</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">ids</span><span class="p">,</span> <span class="n">counts</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_discover_counts</span><span class="p">(</span>
+    <span class="n">handler</span><span class="p">:</span> <span class="n">_FormatHandler</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">storage</span><span class="p">:</span> <span class="n">_StorageBackend</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Obtain ``(ids, counts)`` without materializing per-shard ``shard_meta``.</span>
+
+<span class="sd">    ``FormatHandler.discover_counts`` gives index formats a metadata-only fast</span>
+<span class="sd">    path; the protocol default runs the full ``discover()`` and keeps only the</span>
+<span class="sd">    counts, so the heavy graph is at most transiently built, never retained.</span>
+<span class="sd">    Results are normalized to ``int64`` arrays.</span>
+<span class="sd">    """</span>
+    <span class="n">ids</span><span class="p">,</span> <span class="n">counts</span> <span class="o">=</span> <span class="n">handler</span><span class="o">.</span><span class="n">discover_counts</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">storage</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">ids</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">),</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">counts</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>
+
+
+<span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"Dataset"</span><span class="p">]</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_auto_detect_format</span><span class="p">(</span>
+    <span class="n">storage</span><span class="p">:</span> <span class="n">_RouterStorageBackend</span><span class="p">,</span> <span class="n">root_str</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">root_path</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">_is_lance_manifest</span><span class="p">(</span><span class="n">root_str</span><span class="p">):</span>
+        <span class="k">return</span> <span class="s2">"lance"</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">_find_and_load_index</span><span class="p">(</span><span class="n">root_str</span><span class="p">,</span> <span class="n">storage</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">result</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">_classify_index_payload</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">root_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">entries</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">root_path</span><span class="o">.</span><span class="n">iterdir</span><span class="p">()</span> <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">is_file</span><span class="p">()]</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">entries</span> <span class="o">=</span> <span class="n">storage</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">root_str</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="n">entries</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="n">detected</span> <span class="o">=</span> <span class="n">_detect_format</span><span class="p">(</span><span class="n">entries</span><span class="p">)</span>
+    <span class="c1"># A Lance dataset directory holds only subdirectories, so nothing above it</span>
+    <span class="c1"># matches; probe for its version directory last.</span>
+    <span class="k">if</span> <span class="n">detected</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">_is_lance_dataset</span><span class="p">(</span><span class="n">storage</span><span class="p">,</span> <span class="n">root_str</span><span class="p">):</span>
+        <span class="k">return</span> <span class="s2">"lance"</span>
+    <span class="k">return</span> <span class="n">detected</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_classify_index_payload</span><span class="p">(</span><span class="n">data</span><span class="p">:</span> <span class="n">_IndexData</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="k">if</span> <span class="s2">"chunks"</span> <span class="ow">in</span> <span class="n">data</span> <span class="ow">and</span> <span class="s2">"config"</span> <span class="ow">in</span> <span class="n">data</span><span class="p">:</span>
+            <span class="k">return</span> <span class="s2">"litdata"</span>
+        <span class="k">if</span> <span class="s2">"shards"</span> <span class="ow">in</span> <span class="n">data</span><span class="p">:</span>
+            <span class="c1"># Could be MDS, JSONL, Parquet, or Vortex index.</span>
+            <span class="c1"># Check if shards have Parquet-specific fields in extra</span>
+            <span class="n">shards</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"shards"</span><span class="p">,</span> <span class="p">[])</span>
+            <span class="k">if</span> <span class="n">shards</span><span class="p">:</span>
+                <span class="n">first_shard</span> <span class="o">=</span> <span class="n">shards</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">shards</span><span class="p">,</span> <span class="nb">list</span><span class="p">)</span> <span class="k">else</span> <span class="n">shards</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+                <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">first_shard</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+                    <span class="n">extra</span> <span class="o">=</span> <span class="n">first_shard</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extra"</span><span class="p">,</span> <span class="p">{})</span>
+                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">extra</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">and</span> <span class="s2">"row_groups"</span> <span class="ow">in</span> <span class="n">extra</span><span class="p">:</span>
+                        <span class="k">return</span> <span class="s2">"parquet"</span>
+                    <span class="n">basename</span> <span class="o">=</span> <span class="n">first_shard</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"basename"</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">basename</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">and</span> <span class="n">basename</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="n">_JSONL_SUFFIXES</span><span class="p">):</span>
+                        <span class="k">return</span> <span class="s2">"jsonl"</span>
+            <span class="k">return</span> <span class="s2">"mds"</span>
+    <span class="k">return</span> <span class="s2">"mds"</span>
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, DatologyAI
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../_static/copybutton.js?v=f281be69"></script>
+    <script src="../../../_static/embeds.js?v=7adf7591"></script>
+    </body>
+</html>

@@ -7,7 +7,7 @@
         <link rel="prefetch" href="../_static/zephon-wordmark-teal.png" as="image">
         <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
 
-    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
         <title>Storage backends and shard cache - Zephon</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
@@ -86,7 +86,7 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="main" data-page="datasets/storage_backends_and_shard_cache.html"></script>
+</style><script data-zephon-versions="1" defer src="../_versions/switcher.js" data-version="v0.2.0" data-page="datasets/storage_backends_and_shard_cache.html"></script>
 </head>
   <body>
     
@@ -408,12 +408,6 @@ Zephon detects cache thrashing, we still recommend configuring your cache delibe
 <p>Each rank releases its cache ownership when it closes; the last owner also frees the
 shared bookkeeping memory. Zephon checks for dead owners on close and startup, so if
 every rank is killed, recorded SHM can stick around until the next run uses that cache.</p>
-<p id="keeping-shards-between-runs"><strong>Keeping shards between runs.</strong> By default, the first process to open the cache after
-every earlier process has exited wipes it. If you run jobs one after another on the same
-node over the same datasets, set <code class="docutils literal notranslate"><span class="pre">persist_state=True</span></code> in <code class="docutils literal notranslate"><span class="pre">CacheOptions</span></code> so the next job
-reuses the shards already on disk. The next job reuses them only if it reads exactly the
-same shards; any difference, such as an added dataset, wipes the cache as before. Reused
-shards count toward <code class="docutils literal notranslate"><span class="pre">limit_bytes</span></code> and are evicted like any other shard.</p>
 <div class="literal-block-wrapper docutils container" id="id1">
 <div class="code-block-caption"><span class="caption-text">examples/guide/datasets/storage_configuration.py</span><a class="headerlink" href="#id1" title="Link to this code">¶</a></div>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Give the shard cache a fast local directory and a size limit."""</span>
@@ -503,7 +497,6 @@ downloading all of the shards to the local node.</p>
             <ul>
 <li><a class="reference internal" href="#">Storage backends and shard cache</a><ul>
 <li><a class="reference internal" href="#reading-from-object-storage">Reading from object storage</a></li>
-<li><a class="reference internal" href="#keeping-shards-between-runs">Keeping shards between runs</a></li>
 </ul>
 </li>
 </ul>
