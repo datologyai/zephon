@@ -1,5 +1,10 @@
 name: Documentation
 
+# Docs are published from main's copy of this workflow. A release event runs
+# the workflow file of the tagged commit, so this branch keeps only the hook
+# that hands a published release to main; keep dispatch-release in step with
+# main's docs.yaml.
+
 on:
   push:
     branches:
@@ -9,20 +14,32 @@ on:
     branches:
     - main
     - release/*
+  release:
+    types: [published]
   workflow_dispatch: {}
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
 
 jobs:
+  dispatch-release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+    - name: Publish the release's docs from main
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ github.event.release.tag_name }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: gh workflow run docs.yaml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH" -f tag="$TAG"
+
+  # Build only, as a check: nothing on a release branch deploys. No concurrency
+  # group, so these runs never cancel a publish waiting in main's pages queue.
   build:
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -39,20 +56,3 @@ jobs:
     - name: Build documentation
       run: |
         uv run sphinx-build -b html -W --keep-going docs/source docs/build/html
-    - name: Upload artifact
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: docs/build/html
-
-  deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-    - name: Deploy to GitHub Pages
-      id: deployment
-      uses: actions/deploy-pages@v4
