@@ -1,5 +1,17 @@
 name: Documentation
 
+# The published site is versioned: main/ tracks main, vX.Y.Z/ holds each
+# release, and the site root is the newest final release. The site is kept on
+# the gh-pages branch (see .github/scripts/publish_docs.py), so each version is
+# built once, from its own source and lockfile, and the whole branch is deployed.
+#
+# Only main may deploy to the github-pages environment, so a published release
+# doesn't build here: it dispatches this workflow on main with the release's tag.
+# The same dispatch (re)publishes any release by hand, e.g. to backfill one.
+#
+# A release event runs the workflow file of the tagged commit, so every
+# release/* branch needs the dispatch-release job too; keep it in step there.
+
 on:
   push:
     branches:
@@ -9,24 +21,72 @@ on:
     branches:
     - main
     - release/*
-  workflow_dispatch: {}
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (e.g. v0.2.1); leave empty to publish main
+        type: string
+        default: ""
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
 
 jobs:
+  dispatch-release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+    - name: Publish the release's docs from main
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ github.event.release.tag_name }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: gh workflow run docs.yaml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH" -f tag="$TAG"
+
   build:
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      version: ${{ steps.target.outputs.version }}
+      sha: ${{ steps.source.outputs.sha }}
     steps:
+    # version is the site directory to publish into; empty means build only.
+    - name: Choose what to build
+      id: target
+      env:
+        TAG: ${{ inputs.tag }}
+        PUBLISH: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+      run: |
+        if [ -n "$TAG" ]; then
+          if [ "$PUBLISH" != true ]; then
+            echo "::error::Publish a tag by running this workflow on main"
+            exit 1
+          fi
+          # The grammar publish_docs.py accepts: v0.2.1, v0.3.0rc1, v0.0.1b5.
+          if ! [[ "$TAG" =~ ^v[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?$ ]]; then
+            echo "::error::$TAG is not a release tag"
+            exit 1
+          fi
+          echo "ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+        else
+          echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISH" = true ]; then
+            echo "version=main" >> "$GITHUB_OUTPUT"
+          fi
+        fi
     - uses: actions/checkout@v4
+      with:
+        ref: ${{ steps.target.outputs.ref }}
+    - name: Record the source commit
+      id: source
+      run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
     - uses: actions/setup-python@v5
       with:
         python-version: "3.12"
@@ -39,20 +99,103 @@ jobs:
     - name: Build documentation
       run: |
         uv run sphinx-build -b html -W --keep-going docs/source docs/build/html
-    - name: Upload artifact
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      uses: actions/upload-pages-artifact@v3
+    - name: Upload build
+      if: steps.target.outputs.version != ''
+      uses: actions/upload-artifact@v4
       with:
+        name: docs-html
         path: docs/build/html
+        retention-days: 1
 
-  deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  # Writing gh-pages and deploying it are one job in one queue, so deployments
+  # happen in the order the site was written and no publish is ever dropped.
+  publish:
+    if: needs.build.outputs.version != ''
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    # queue: max keeps every pending publish (a new one would otherwise cancel
+    # the one waiting). Shared with the preview workflow.
+    concurrency:
+      group: pages
+      queue: max
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+    # The publish script comes from main even when the build is an older tag.
+    - uses: actions/checkout@v4
+      with:
+        path: tools
+    # Builds aren't serialized, so a slow main build can reach this queue after
+    # a newer one has published; it must not overwrite main/ with older docs.
+    - name: Check the build is still current
+      id: current
+      working-directory: tools
+      env:
+        VERSION: ${{ needs.build.outputs.version }}
+        SOURCE_SHA: ${{ needs.build.outputs.sha }}
+      run: |
+        if [ "$VERSION" = main ]; then
+          head=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$head" != "$SOURCE_SHA" ]; then
+            echo "::notice::Skipping: main is now at $head, past this build's $SOURCE_SHA"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+        echo "stale=false" >> "$GITHUB_OUTPUT"
+    - name: Create gh-pages if missing
+      if: steps.current.outputs.stale == 'false'
+      working-directory: tools
+      run: |
+        if ! git ls-remote --exit-code --heads origin gh-pages > /dev/null; then
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          commit=$(git commit-tree "$(git mktree < /dev/null)" -m "Initialize docs site")
+          git push origin "$commit:refs/heads/gh-pages"
+        fi
+    - if: steps.current.outputs.stale == 'false'
+      uses: actions/checkout@v4
+      with:
+        ref: gh-pages
+        path: site
+    - if: steps.current.outputs.stale == 'false'
+      uses: actions/download-artifact@v4
+      with:
+        name: docs-html
+        path: build
+    - name: Publish into the site
+      if: steps.current.outputs.stale == 'false'
+      env:
+        VERSION: ${{ needs.build.outputs.version }}
+      run: python3 tools/.github/scripts/publish_docs.py --site site --build build --version "$VERSION"
+    - name: Push gh-pages
+      if: steps.current.outputs.stale == 'false'
+      working-directory: site
+      env:
+        VERSION: ${{ needs.build.outputs.version }}
+        SOURCE_SHA: ${{ needs.build.outputs.sha }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add -A
+        if git diff --cached --quiet; then
+          echo "No changes to publish."
+        else
+          git commit -q -m "Publish $VERSION docs from $SOURCE_SHA"
+          git push origin gh-pages
+        fi
+    - name: Upload site
+      if: steps.current.outputs.stale == 'false'
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: site
     - name: Deploy to GitHub Pages
+      if: steps.current.outputs.stale == 'false'
       id: deployment
       uses: actions/deploy-pages@v4
