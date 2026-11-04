@@ -9,8 +9,6 @@ from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 
-from sphinx.util.inventory import InventoryFile
-
 # The public module list lives in the test suite; make it importable when run
 # as ``python .github/scripts/check_docs_coverage.py`` from anywhere.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +43,9 @@ def find_undocumented(documented: set[str], module_names: Iterable[str]) -> list
 
 def main() -> int:
     """Report public names missing from the built docs' ``objects.inv``."""
+    # Imported here so the tests can load this module without the docs extras.
+    from sphinx.util.inventory import InventoryFile
+
     build_dir = Path(sys.argv[1])
     with open(build_dir / "objects.inv", "rb") as f:
         inventory = InventoryFile.load(f, "", lambda base, uri: uri)
