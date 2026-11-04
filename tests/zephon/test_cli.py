@@ -135,7 +135,9 @@ def test_plugin_handler_returning_none_exits_zero(
     assert cli.main(["noop"]) == 0
 
 
-def test_broken_plugin_is_skipped(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_broken_plugin_is_left_out_of_help(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
     def broken(parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--half")
         raise RuntimeError("boom")
@@ -143,11 +145,120 @@ def test_broken_plugin_is_skipped(monkeypatch: pytest.MonkeyPatch, capsys) -> No
     _use_plugins(monkeypatch, _FakeEntryPoint("broken", broken))
 
     with pytest.raises(SystemExit):
-        cli.main(["broken"])
+        cli.main(["--help"])
+    captured = capsys.readouterr()
+    assert "failed to load plugin command 'broken'" in captured.err
+    assert "boom" in captured.err
+    assert "broken" not in captured.out
+    assert "index" in captured.out
+
+
+def test_invoking_broken_plugin_reports_error(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    def broken(parser: argparse.ArgumentParser) -> None:
+        raise RuntimeError("boom")
+
+    _use_plugins(monkeypatch, _FakeEntryPoint("broken", broken))
+
+    assert cli.main(["broken", "--flag"]) == 1
     err = capsys.readouterr().err
-    assert "failed to load plugin command 'broken'" in err
+    assert "zephon: error: failed to load plugin command 'broken'" in err
     assert "boom" in err
-    assert "invalid choice" in err
+
+
+def _redefines_help(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-h", "--help", action="help")
+
+
+def _calls_parser_error(parser: argparse.ArgumentParser) -> None:
+    parser.error("not configured")
+
+
+def _exits(parser: argparse.ArgumentParser) -> None:
+    sys.exit(3)
+
+
+@pytest.mark.parametrize("register", [_redefines_help, _calls_parser_error, _exits])
+def test_plugin_failing_registration_cannot_break_builtins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+    register: Callable[[argparse.ArgumentParser], None],
+) -> None:
+    _use_plugins(monkeypatch, _FakeEntryPoint("bad", register))
+    (tmp_path / "a.jsonl").write_text('{"i": 0}\n', encoding="utf-8")
+
+    assert cli.main(["index", "jsonl", str(tmp_path), "-q"]) == 0
+    assert (tmp_path / "index.json").exists()
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--help"])
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "failed to load plugin command 'bad'" in captured.err
+    assert "index" in captured.out
+
+    assert cli.main(["bad"]) == 1
+
+
+def test_plugin_description_with_percent_in_help(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    def register(parser: argparse.ArgumentParser) -> None:
+        parser.description = "Read 100% of the dataset."
+        parser.set_defaults(func=lambda args: 0)
+
+    _use_plugins(monkeypatch, _FakeEntryPoint("scan", register))
+
+    assert cli.main([]) == 2
+    assert "Read 100% of the dataset." in capsys.readouterr().out
+
+    with pytest.raises(SystemExit):
+        cli.main(["scan", "--help"])
+    assert "Read 100% of the dataset." in capsys.readouterr().out
+
+
+def test_plugin_parser_configuration_is_preserved(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    def register(parser: argparse.ArgumentParser) -> None:
+        parser.allow_abbrev = False
+        parser.usage = "zephon hex VALUE [--target T]"
+        parser.register("type", "hex", lambda value: int(value, 16))
+        parser.add_argument("value", type="hex")
+        parser.add_argument("--target")
+        parser.set_defaults(func=lambda args: print(args.value, args.target))
+
+    _use_plugins(monkeypatch, _FakeEntryPoint("hex", register))
+
+    assert cli.main(["hex", "ff", "--target", "t"]) == 0
+    assert capsys.readouterr().out == "255 t\n"
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["hex", "ff", "--tar", "t"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage: zephon hex VALUE [--target T]" in err
+    assert "unrecognized arguments: --tar" in err
+
+
+def test_only_invoked_plugin_is_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    loaded: list[str] = []
+
+    def make(tag: str) -> Callable[[argparse.ArgumentParser], None]:
+        def register(parser: argparse.ArgumentParser) -> None:
+            loaded.append(tag)
+            parser.set_defaults(func=lambda args: 0)
+
+        return register
+
+    _use_plugins(
+        monkeypatch, _FakeEntryPoint("a", make("a")), _FakeEntryPoint("b", make("b"))
+    )
+
+    assert cli.main(["b"]) == 0
+    assert loaded == ["b"]
 
 
 def test_plugin_cannot_shadow_builtin_or_earlier_plugin(
