@@ -5,17 +5,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import threading
 import time
 import types
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 import pytest
 from tenacity.wait import wait_none
 
+from tests.helpers.tokenizers import write_wordlevel_tokenizer
 from zephon._internal.utils.tokenizer import fallback_tokenizer, load_hf_tokenizer
 from zephon._internal.utils.tokenizer_cloud import (
     TransientCloudTokenizerError,
@@ -330,6 +333,99 @@ def test_load_raises_other_type_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_transformers(monkeypatch, from_pretrained)
     with pytest.raises(TypeError, match="Something else completely broken"):
         load_hf_tokenizer("broken-model")
+
+
+def _write_digit_split_gpt2_folder(folder: Path) -> Path:
+    """Write a GPT2Tokenizer-tagged folder whose tokenizer.json splits digits singly.
+
+    Merges are learned without the digit split, so a loader that rebuilds the
+    GPT-2 pre-tokenizer from vocab and merges joins digit runs that
+    tokenizer.json keeps apart. OLMo 3's dolma2 folder has the same shape.
+    """
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+
+    tokenizer = Tokenizer(models.BPE())
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tokenizer.decoder = decoders.ByteLevel()
+    trainer = trainers.BpeTrainer(
+        vocab_size=300,
+        special_tokens=["<|endoftext|>"],
+        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+    )
+    tokenizer.train_from_iterator(["year 2024 had 12345 items " * 50], trainer=trainer)
+    tokenizer.pre_tokenizer = pre_tokenizers.Sequence(
+        [
+            pre_tokenizers.Digits(individual_digits=True),
+            pre_tokenizers.ByteLevel(add_prefix_space=False),
+        ]
+    )
+    tokenizer.save(str(folder / "tokenizer.json"))
+    tokenizer.model.save(str(folder))
+    config = {"tokenizer_class": "GPT2Tokenizer", "eos_token": "<|endoftext|>"}
+    (folder / "tokenizer_config.json").write_text(json.dumps(config))
+    return folder
+
+
+def test_load_encodes_like_tokenizer_json(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    transformers = pytest.importorskip("transformers")
+    from tokenizers import Tokenizer
+
+    folder = _write_digit_split_gpt2_folder(tmp_path)
+    text = "year 2024 had 12345 items"
+    expected = Tokenizer.from_file(str(folder / "tokenizer.json")).encode(text).ids
+
+    with caplog.at_level(logging.WARNING):
+        tok = load_hf_tokenizer(str(folder))
+
+    assert tok(text, add_special_tokens=False)["input_ids"] == expected
+    assert tok.eos_token == "<|endoftext|>"
+    # Transformers 4 honours tokenizer.json, so only 5 needs the reload.
+    if int(transformers.__version__.split(".")[0]) >= 5:
+        assert "ignores the pre-tokenizer" in caplog.text
+
+
+def test_load_keeps_tokenizer_that_already_matches(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pytest.importorskip("transformers")
+    folder = write_wordlevel_tokenizer(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        tok = load_hf_tokenizer(str(folder))
+
+    assert tok("hello world")["input_ids"] == [0, 4, 5, 1]
+    assert "ignores the pre-tokenizer" not in caplog.text
+
+
+def test_load_ignores_saved_padding_and_truncation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pytest.importorskip("transformers")
+    folder = write_wordlevel_tokenizer(tmp_path)
+    saved = json.loads((folder / "tokenizer.json").read_text())
+    saved["padding"] = {
+        "strategy": {"Fixed": 8},
+        "direction": "Right",
+        "pad_to_multiple_of": None,
+        "pad_id": 2,
+        "pad_type_id": 0,
+        "pad_token": "<pad>",
+    }
+    saved["truncation"] = {
+        "direction": "Right",
+        "max_length": 8,
+        "strategy": "LongestFirst",
+        "stride": 0,
+    }
+    (folder / "tokenizer.json").write_text(json.dumps(saved))
+
+    with caplog.at_level(logging.WARNING):
+        tok = load_hf_tokenizer(str(folder))
+
+    assert tok("hello world", add_special_tokens=False)["input_ids"] == [4, 5]
+    assert "ignores the pre-tokenizer" not in caplog.text
 
 
 def test_load_retries_transient_failure_then_succeeds(
