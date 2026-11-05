@@ -21,6 +21,7 @@ import sys
 import threading
 import traceback
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -284,7 +285,9 @@ def load_hf_tokenizer(
     if the tokenizer class rejects the kwarg. ``eos_token`` is forwarded to
     ``from_pretrained``; HF derives ``eos_token_id`` from that string. Direct
     tokenizers v1 support is selected when Transformers cannot import, including
-    when its dependency check rejects the installed tokenizers version.
+    when its dependency check rejects the installed tokenizers version. A local
+    folder whose Transformers class ignores its ``tokenizer.json`` is reloaded so
+    tokens match that file.
     """
     # Before importing hf tokenizers we tell it we handle the parallelism and
     # not hf tokenizers. This avoids unforeseen effects when running multiple
@@ -303,6 +306,7 @@ def load_hf_tokenizer(
     from zephon._internal.utils.tokenizer_cloud import resolve_tokenizer_id_with_retry
 
     factory: Callable[..., Any]
+    uses_transformers = True
     with _IMPORT_LOCK:
         try:
             from transformers import AutoTokenizer
@@ -314,6 +318,7 @@ def load_hf_tokenizer(
             from zephon._internal.utils.tokenizer_v1 import load_v1_tokenizer
 
             factory = load_v1_tokenizer
+            uses_transformers = False
             logging.getLogger(__name__).warning(
                 "Using the tokenizers v1 workaround because Transformers cannot import; "
                 "saved tokenizer configuration replaces Transformers class defaults: %s",
@@ -347,7 +352,7 @@ def load_hf_tokenizer(
     if eos_token is not None:
         kwargs["eos_token"] = eos_token
     try:
-        return cast(TokenizerLike, _load_with_retry(load_id, **kwargs))
+        tokenizer = _load_with_retry(load_id, **kwargs)
     except TypeError as exc:
         # Some tokenizers may not accept the `use_fast` kwarg; retry without
         # it so we surface the original failure instead of a signature
@@ -355,8 +360,84 @@ def load_hf_tokenizer(
         if "use_fast" in kwargs and "use_fast" in str(exc):
             kwargs = dict(kwargs)
             kwargs.pop("use_fast", None)
-            return cast(TokenizerLike, _load_with_retry(load_id, **kwargs))
-        raise
+            tokenizer = _load_with_retry(load_id, **kwargs)
+        else:
+            raise
+    if uses_transformers:
+        tokenizer = _honor_tokenizer_json(tokenizer, load_id, eos_token=eos_token)
+    return cast(TokenizerLike, tokenizer)
+
+
+# Covers the pieces pre-tokenizers disagree on: blank lines, domains, digit runs,
+# repeated spaces, tabs and non-Latin scripts.
+_PIPELINE_PROBE = "Hello, world.\n\nSee example.org: 12345 items  café\t中文!\n"
+
+
+def _honor_tokenizer_json(
+    tokenizer: Any, load_id: str | None, *, eos_token: str | None
+) -> Any:
+    """Reload from ``tokenizer.json`` when Transformers rebuilt a different pipeline.
+
+    Transformers 5 maps ``tokenizer_class`` names such as ``GPT2Tokenizer`` to
+    classes that rebuild the pre-tokenizer from vocab and merges. Without a model
+    ``config.json`` to pick a better class, a saved ``tokenizer.json`` with a
+    different pre-tokenizer (OLMo 3's dolma2 among them) is ignored, silently.
+    """
+    folder = Path(load_id) if load_id is not None else None
+    if folder is None or not (folder / "tokenizer.json").is_file():
+        return tokenizer
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None:
+        return tokenizer
+
+    from tokenizers import Tokenizer
+    from transformers import PreTrainedTokenizerFast
+
+    saved = Tokenizer.from_file(str(folder / "tokenizer.json"))
+    expected = saved.encode(_PIPELINE_PROBE, add_special_tokens=False).ids
+    if backend.encode(_PIPELINE_PROBE, add_special_tokens=False).ids == expected:
+        return tokenizer
+
+    # Keep the special tokens Transformers chose (class defaults included) so only
+    # the pre-tokenizer changes.
+    special = {
+        role: getattr(tokenizer, role, None)
+        for role in ("bos_token", "eos_token", "pad_token", "unk_token")
+    }
+    if eos_token is not None:
+        special["eos_token"] = eos_token
+    reloaded = PreTrainedTokenizerFast.from_pretrained(
+        str(folder), **{role: token for role, token in special.items() if token}
+    )
+    actual = reloaded.backend_tokenizer.encode(
+        _PIPELINE_PROBE, add_special_tokens=False
+    ).ids
+    wrapping = _special_wrapping(tokenizer), _special_wrapping(reloaded)
+    if actual != expected or wrapping[0] != wrapping[1]:
+        raise ValueError(
+            f"{type(tokenizer).__name__} loaded from {folder} does not encode like "
+            f"its tokenizer.json, and reloading it as PreTrainedTokenizerFast "
+            f"changes its encoding or added special tokens {wrapping}; add the "
+            f"model's config.json to the tokenizer folder"
+        )
+    logging.getLogger(__name__).warning(
+        "%s loaded from %s ignores the pre-tokenizer in its tokenizer.json; "
+        "using PreTrainedTokenizerFast so tokens match tokenizer.json. Add the "
+        "model's config.json to the folder to silence this.",
+        type(tokenizer).__name__,
+        folder,
+    )
+    return reloaded
+
+
+def _special_wrapping(tokenizer: Any) -> tuple[list[int], list[int]]:
+    """Return the special-token ids ``tokenizer`` adds before and after content."""
+    content = tokenizer(_PIPELINE_PROBE, add_special_tokens=False)["input_ids"]
+    full = list(tokenizer(_PIPELINE_PROBE)["input_ids"])
+    for start in range(len(full) - len(content) + 1):
+        if full[start : start + len(content)] == list(content):
+            return full[:start], full[start + len(content) :]
+    raise ValueError(f"{type(tokenizer).__name__} splits content around special tokens")
 
 
 def _tokenizers_v1_installed() -> bool:
