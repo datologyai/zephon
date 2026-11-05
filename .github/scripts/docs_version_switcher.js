@@ -44,13 +44,28 @@
       .zephon-versions { margin: 0 var(--sidebar-item-spacing-horizontal, 1rem) 0.75rem; }
       .zephon-versions label { display: block; font-size: var(--font-size--small, 0.875rem);
         color: var(--color-foreground-secondary); margin-bottom: 0.25rem; }
-      .zephon-versions select { width: 100%; padding: 0.3rem 0.4rem; border-radius: 0.25rem;
-        font: inherit; font-size: var(--font-size--small, 0.875rem);
-        color: var(--color-foreground-primary); background: var(--color-background-primary);
-        border: 1px solid var(--color-background-border); }
-      /* flow-root: sit beside Furo's floated page icons, not under them. */
-      .zephon-version-banner { display: flow-root; margin: 0 0 1.5rem; padding: 0.6rem 0.9rem; border-radius: 0.25rem;
-        font-size: var(--font-size--small, 0.875rem);
+      /* Match Furo's sidebar search box rather than the darker content area. */
+      .zephon-versions select { width: 100%; padding: 0.3rem 2rem 0.3rem 0.5rem; border-radius: 0.25rem;
+        font: inherit; font-size: var(--font-size--small, 0.875rem); cursor: pointer;
+        appearance: none; -webkit-appearance: none;
+        color: var(--color-sidebar-search-foreground, var(--color-foreground-primary));
+        background: var(--color-sidebar-search-background, var(--color-sidebar-background));
+        border: 1px solid var(--color-sidebar-search-border, var(--color-background-border)); }
+      /* A border chevron stays visible in forced colors, unlike a background mask. */
+      .zephon-versions-control { position: relative; display: block; }
+      .zephon-versions-control::after { content: ""; position: absolute; top: 50%; right: 0.8rem;
+        width: 0.3rem; height: 0.3rem; transform: translateY(-75%) rotate(45deg); pointer-events: none;
+        color: var(--color-foreground-secondary); border: solid currentColor; border-width: 0 1.5px 1.5px 0; }
+      /* Furo themes with CSS variables only, so tell the browser when the
+       * native dropdown list should be dark too. */
+      body[data-theme="dark"] .zephon-versions select { color-scheme: dark; }
+      @media (prefers-color-scheme: dark) {
+        body:not([data-theme="light"]) .zephon-versions select { color-scheme: dark; }
+      }
+      /* Above Furo's floated page icons, at full width, with the same top
+       * spacing the icons have. */
+      .zephon-version-banner { margin: 1.5rem 0 0; padding: 0.6rem 0.9rem; border-radius: 0.25rem;
+        font-size: var(--font-size--small, 0.875rem); line-height: 1.5;
         background: var(--color-admonition-title-background--note, var(--color-background-secondary));
         border-left: 0.25rem solid var(--color-brand-primary); }
     `;
@@ -73,7 +88,10 @@
       select.append(option);
     }
     select.addEventListener("change", () => go(select.value, index.latest));
-    wrapper.append(label, select);
+    const control = document.createElement("span");
+    control.className = "zephon-versions-control";
+    control.append(select);
+    wrapper.append(label, control);
     brand.after(wrapper);
   }
 
@@ -95,6 +113,10 @@
       go(index.latest, index.latest);
     });
     banner.append(`You're reading the docs for ${current}, ${kind}. See `, link, ".");
+    /* Keep the warning inside main and its skip-link target. Put Furo's floated
+     * page icons after it so they cannot narrow the banner. */
+    const icons = article.previousElementSibling;
+    if (icons && icons.classList.contains("content-icon-container")) article.prepend(icons);
     article.prepend(banner);
   }
 
