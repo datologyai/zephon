@@ -637,7 +637,7 @@ def test_v5_to_v6_keeps_skipping_pass_tails():
         migrate("static_mixture", _v5_static_mixture_raw())
     )
     assert sm.version == 6
-    assert sm.drain_pass_tail is False
+    assert sm._legacy_repeat_skip_tail is True
 
 
 @pytest.mark.parametrize("version", [1, 2])

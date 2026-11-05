@@ -797,13 +797,10 @@ class StaticMixtureStateV5(StaticMixtureStateV4):
 
 @dataclass(frozen=True, kw_only=True)
 class StaticMixtureStateV6(StaticMixtureStateV5):
-    """StaticMixture checkpoint schema that records how repeats wrap.
+    """StaticMixture checkpoint schema that marks streams resumed from v5 checkpoints."""
 
-    ``drain_pass_tail`` is True when a repeating dataset finishes its pass
-    before wrapping; v5 checkpoints migrate with it off.
-    """
-
-    drain_pass_tail: bool
+    # Compatibility state, not a user knob: only the v5 -> v6 migration sets it.
+    _legacy_repeat_skip_tail: bool
     version: int = 6
 
 

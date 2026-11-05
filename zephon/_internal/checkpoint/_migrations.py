@@ -179,7 +179,7 @@ def _static_mixture_v4_to_v5(v4: StaticMixtureStateV4) -> dict[str, Any]:
 def _static_mixture_v5_to_v6(v5: StaticMixtureStateV5) -> dict[str, Any]:
     """Keep skipping pass tails: pre-v6 streams were produced that way."""
     d = v5.to_dict()
-    d["drain_pass_tail"] = False
+    d["_legacy_repeat_skip_tail"] = True
     return d
 
 

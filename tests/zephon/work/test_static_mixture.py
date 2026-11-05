@@ -1,4 +1,5 @@
 import copy
+import dataclasses
 import json
 import math
 import pickle
@@ -14,6 +15,7 @@ import pytest
 from tests.zephon.work.test_token_estimation import make_inmem_dataset
 from zephon._internal.token_counting import TextTokenCountingSpec
 from zephon.io import Dataset, InMemoryShard
+from zephon.types import SampleId
 from zephon.work import (
     MixtureSpec,
     StaticMixtureWorkSource,
@@ -4827,29 +4829,45 @@ def test_token_ws_with_lambda_measure_survives_std_pickle() -> None:
     assert restored.requires_token_priming
 
 
-def test_token_mode_futile_chunk_raises_instead_of_hanging(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A chunk demanding more than a full pass of a repeat dataset must error."""
-    # The liveness guard keeps valid configs within the wrap limit, so lower it:
-    # a chunk drawn entirely from 'small' (25 samples, chunk 50) must wrap.
-    monkeypatch.setattr(TokenAwareStrategy, "_MAX_CHUNK_RESETS", 0)
-    small = make_token_dataset("small", 5, docs_per_shard=25, n_shards=1)
-    big = make_token_dataset("big", 5, docs_per_shard=100, n_shards=1)
+def _high_deficit_token_ws(**kwargs) -> StaticMixtureWorkSource:
+    small = make_token_dataset("small", 5, docs_per_shard=5, n_shards=1)
+    big = make_token_dataset("big", 5, docs_per_shard=500, n_shards=1)
     ws = make_token_ws(
         [small, big],
-        {"small": 0.2, "big": 0.8},
-        chunk_size=50,
-        exhausted_policy={"small": "repeat", "big": "repeat"},
+        {"small": 0.02, "big": 0.98},
+        chunk_size=100,
+        exhausted_policy="repeat",
         stop_after_passes=None,
+        shuffle_shards=False,
+        **kwargs,
     )
     strategy = ws._strategy
     assert isinstance(strategy, TokenAwareStrategy)
     # A monster document elsewhere left 'small' owed far more tokens than one
-    # chunk repays.
+    # pass repays.
     strategy._deficits["small"] = 1e6
     strategy._deficits["big"] = -1e6
-    with pytest.raises(RuntimeError, match="wrapped"):
+    return ws
+
+
+def test_token_mode_high_deficit_wraps_until_the_chunk_is_full() -> None:
+    ws = _high_deficit_token_ws()
+    components = ws._strategy.produce(ws._cursors)
+    assert components == {"small": [(0, 0, i) for i in range(5)] * 20}
+
+
+def test_token_mode_legacy_stream_bounds_retries_on_high_deficit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A legacy retry restarts the whole chunk; a deficit above one pass of
+    # 'small' can never be repaid in one attempt.
+    monkeypatch.setattr(TokenAwareStrategy, "_MAX_CHUNK_RESETS", 0)
+    ws = _high_deficit_token_ws()
+    strategy = ws._strategy
+    strategy._config = dataclasses.replace(
+        strategy._config, _legacy_repeat_skip_tail=True
+    )
+    with pytest.raises(RuntimeError, match=r"deficit reached \d+"):
         strategy.produce(ws._cursors)
 
 
@@ -5508,6 +5526,7 @@ def test_repeat_drains_pass_tail_before_wrapping(shuffle: bool) -> None:
 
 def test_capped_repeat_drains_final_tail_and_stops_without_side_effects() -> None:
     work = _repeat_lane(6, 1, False)
+    assert len(work) == 12
     drawn = [sample for _ in range(3) for sample in work.next_chunk().components["a"]]
     assert drawn == [(0, 0, i) for i in range(6)] * 2
 
@@ -5520,6 +5539,38 @@ def test_repeat_exact_exhaustion_wraps_before_next_draw() -> None:
     work = _repeat_lane(4, 1, False)
     assert work.next_chunk().components == work.next_chunk().components
     assert work.next_chunk() is None
+
+
+@pytest.mark.parametrize("token_mode", [False, True])
+def test_simultaneous_pass_ends_stop_before_any_dataset_wraps(token_mode: bool) -> None:
+    # Both datasets have two records left when the third chunk asks each for
+    # four, so the floor is met before either would wrap.
+    if token_mode:
+        datasets = [
+            make_token_dataset(name, 5, docs_per_shard=10, n_shards=1) for name in "ab"
+        ]
+        ws = make_token_ws(
+            datasets, {"a": 0.5, "b": 0.5}, chunk_size=8, stop_after_passes=1
+        )
+    else:
+        datasets = [make_dataset(name, 10) for name in "ab"]
+        ws = StaticMixtureWorkSource(
+            datasets, {"a": 0.5, "b": 0.5}, chunk_size=8, stop_after_passes=1
+        )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    assert len(lane) == 16
+    drawn: dict[str, list[SampleId]] = {"a": [], "b": []}
+    for _ in range(2):
+        for name, samples in lane.next_chunk().components.items():
+            drawn[name].extend(samples)
+    assert {name: len(set(samples)) for name, samples in drawn.items()} == {
+        "a": 8,
+        "b": 8,
+    }
+
+    state = copy.deepcopy(lane.state_dict())
+    assert lane.next_chunk() is None
+    assert lane.state_dict() == state
 
 
 @pytest.mark.parametrize("shuffle", [False, True])
@@ -5640,4 +5691,4 @@ def test_pre_v6_checkpoint_resumes_onto_its_original_stream(mode: str) -> None:
     ]
 
     assert resumed == golden["next"]
-    assert restored.state_dict()["drain_pass_tail"] is False
+    assert restored.state_dict()["_legacy_repeat_skip_tail"] is True
