@@ -29,7 +29,11 @@ from zephon._internal.stream import (
 from zephon._internal.utils.cleanup import cleanup_budget
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
-from zephon.ops.accumulators import Accumulator, SourceExhaustion
+from zephon.ops.accumulators import (
+    Accumulator,
+    CountingAccumulator,
+    SourceExhaustion,
+)
 from zephon.ops.base import BaseOp, OpContext, StageInfo
 from zephon.types import SampleBatch, SampleRecord, StreamItem
 
@@ -43,6 +47,22 @@ def teardown_operator(instance: BaseOp) -> None:
         instance.teardown()
     except Exception:
         logger.exception("Failed to tear down operator %s", type(instance).__name__)
+
+
+def build_accumulator(
+    op: BaseOp, *, deterministic: bool, ctx: dict[str, Any]
+) -> Accumulator[Any]:
+    """Build ``op``'s accumulator, enforcing count-only flushing if deterministic.
+
+    Time-based flushing makes batch boundaries depend on wall-clock timing, so
+    in deterministic mode the latency bound is dropped from any
+    `CountingAccumulator` the operator returns. Custom `Accumulator`
+    implementations are returned unchanged.
+    """
+    acc = op.accumulator(deterministic=deterministic, ctx=ctx)
+    if deterministic and isinstance(acc, CountingAccumulator):
+        acc._disable_latency_flush()
+    return acc
 
 
 @dataclass
@@ -139,9 +159,8 @@ class BaseOperatorState:
         ctx = dict(self.ctx_proto)
         ctx.setdefault("deterministic", self.deterministic)
         ctx["get_source_exhaustion"] = self._get_source_exhaustion
-        self.accumulator_impl = self.node.op.accumulator(
-            deterministic=self.deterministic,
-            ctx=ctx,
+        self.accumulator_impl = build_accumulator(
+            self.node.op, deterministic=self.deterministic, ctx=ctx
         )
 
     def _update_epoch_floor(self, elems: Sequence[RunnerStreamIn]) -> None:

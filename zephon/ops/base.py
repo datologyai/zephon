@@ -193,6 +193,9 @@ class BaseOp(ABC):
 
         Args:
             deterministic: Whether to disable behavior such as timed flushing.
+                The runner already drops ``max_latency_ms`` from a returned
+                `CountingAccumulator` when this is True; custom accumulators
+                that flush on time must check it themselves.
             ctx: Runtime services available to the accumulator.
 
         Returns:
