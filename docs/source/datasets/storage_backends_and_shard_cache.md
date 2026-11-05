@@ -29,30 +29,23 @@ available. The path must identify the split you want to read such as `train` or
 `validation`. If you also need to select a particular dataset configuration, include its
 name before the split: for example, `hf://org/name/config/train`.
 
-Reading shards directly from object storage or Hugging Face requires Zephon's *shard
-cache*. Zephon downloads whole shards into this node-local storage before reading samples
-from them. For datasets exposed as filesystem paths, including distributed filesystems
-and FUSE mounts, the cache is optional and can help avoid repeated reads from remote
+When you train on datasets stored in object storage or on Hugging Face, Zephon needs to
+download the shards to a local *shard cache* before it can read them. The cache keeps
+these files close to the training workers, so samples from the same shard do not require
+repeated downloads. If you access your data through a filesystem path, such as a DFS or
+FUSE mount, the cache is optional, but can also help avoid repeated reads from remote
 storage.
 
-Caching is disabled by default. A remote dataset URI does not enable it automatically:
-choose where downloaded shards should live and how much disk space they may use. Setting
-`CacheOptions(root=...)` with a nonempty path enables caching when `enabled` is omitted.
-An explicit `enabled=False` takes precedence, including across option merges. Setting only a size
-limit does not enable caching.
+The cache is off by default. You can turn it on with `enabled=True`, or by choosing a
+cache directory with `root`. Before starting the run, choose a directory and size limit
+that fit each training node:
 
-This requires there to be a local filesystem directory on each of the training nodes that
-is used for storing copies of the shards that the workers on that node are currently
-processing samples from. You need to configure this local cache directory and its size
-limit before starting the run. The example below shows all three settings together:
-
-1. Enablement: `enabled=True` makes the choice explicit. You can omit it when supplying a
-   cache root; `enabled=False` disables the cache even when a root is configured.
-2. Placement: set `root` to a local filesystem directory backed by fast storage such as
-   NVMe. Enabling the cache without a root uses `~/.cache/zephon`.
-3. Budget: set `limit_bytes` to bound the shard cache. Before preparing another shard,
-   Zephon will evict the least recently used shards as needed to make room within this
-   limit. The size limit must be high enough to accommodate the shard being prepared, including
+1. The local filesystem directory to use for downloaded shards, set with `root`. We
+   recommend fast local storage like NVMe. If you enable the cache without choosing a
+   directory, Zephon uses `~/.cache/zephon`.
+2. A size limit for the shard cache, set with `limit_bytes`: before preparing another
+   shard, Zephon will evict the least recently used shards as needed to make room within
+   this limit. The size limit must be high enough to accommodate the shard being prepared, including
    compressed and decompressed copies if the upstream format is compressed. Although this
    limit is disabled by default, we strongly recommend setting a limit that is safely
    below the disk capacity available to the workers.
@@ -61,6 +54,9 @@ limit before starting the run. The example below shows all three settings togeth
 :language: python
 :caption: examples/guide/datasets/storage_configuration.py
 ```
+
+If you have a cache directory configured but want to read directly from a filesystem
+instead, set `enabled=False`.
 
 Note that this cache is another reason we have introduced the shard abstraction above
 samples. Having one file per sample would, especially for cases with smaller samples such
