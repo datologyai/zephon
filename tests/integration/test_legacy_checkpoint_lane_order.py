@@ -20,7 +20,7 @@ from zephon import (
 pytestmark = pytest.mark.integration
 
 
-def _pipeline() -> Pipeline:
+def _pipeline(prefetch: int) -> Pipeline:
     ds = Dataset.from_dict(
         name="compat",
         shards={
@@ -55,7 +55,7 @@ def _pipeline() -> Pipeline:
             canonical_replicas=4,
             deterministic=True,
             runner="inline",
-            prefetch_batches=0,
+            prefetch_batches=prefetch,
         )
     )
 
@@ -69,10 +69,14 @@ def _signature(batch: SampleBatch) -> tuple:
     return tuple(batch.lane_ids), tuple(tokens)
 
 
-@pytest.mark.parametrize("cut", [8, 9, 10, 11])
-def test_resume_b23_packed_checkpoint_preserves_batch_order(cut: int) -> None:
-    baseline = [_signature(batch) for batch in _pipeline()]
-    pipe = _pipeline()
+@pytest.mark.parametrize("prefetch", [0, 8])
+# Cuts from 65 on fall after lanes 2 and 3 have finished.
+@pytest.mark.parametrize("cut", [8, 9, 10, 11, 65, 69, 71, 73])
+def test_resume_b23_packed_checkpoint_preserves_batch_order(
+    cut: int, prefetch: int
+) -> None:
+    baseline = [_signature(batch) for batch in _pipeline(prefetch)]
+    pipe = _pipeline(prefetch)
     iterator = cast(Generator[SampleBatch, None, None], iter(pipe))
     try:
         prefix = [_signature(next(iterator)) for _ in range(cut)]
@@ -103,6 +107,6 @@ def test_resume_b23_packed_checkpoint_preserves_batch_order(cut: int) -> None:
         assert legacy["lane_emitted"] == {0: 2, 1: 2, 2: 2, 3: 2}
         assert next_lane == 1  # Next output must be lane 0, despite its progress.
 
-    restored = _pipeline()
+    restored = _pipeline(prefetch)
     restored.restore(legacy)
     assert prefix + [_signature(batch) for batch in restored] == baseline

@@ -709,6 +709,12 @@ def test_engine_v2_rejects_rank_prefixed_rr_key():
         ([3, 3, 2, 2], 2),
         ([3, 3, 3, 2], 3),
         ([1, 0, 0, 0], 1),
+        # Exhausted lanes stop delivering once upstream has ended.
+        ([17, 17, 16, 15], 2),
+        ([21, 21, 16, 15], 2),
+        ([9, 12, 12, 11], 3),
+        ([5, 0, 0, 0], 1),
+        ([4, 6, 6, 6], 0),
     ],
 )
 def test_engine_v1_recovers_next_lane_from_delivery_counts(
@@ -737,8 +743,6 @@ def test_engine_v1_recovers_next_lane_from_delivery_counts(
         ({0: 2}, 0),
         ({0: 0, 1: 0}, 0),
         ({0: 2, 1: 2}, 1),
-        ({0: 2, 1: 3}, 0),
-        ({0: 5, 1: 2}, 0),
         ({0: True, 1: 1}, 0),
         ({0: 2.0, 1: 2}, 0),
         ({0: -1, 1: -1}, 0),

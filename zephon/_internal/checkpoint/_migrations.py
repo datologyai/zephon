@@ -190,16 +190,18 @@ def _work_chunk_v2_to_v3(v2: WorkChunkStateV2) -> dict[str, Any]:
 
 
 def _legacy_rr_from_deliveries(v1: EngineStateV1, key: str, saved: int) -> int:
-    """Recover a first-run RR prefix; retain the saved pointer when ambiguous.
+    """Recover a first-run RR turn; retain the saved pointer when unknown.
 
     b23 replaced the next output lane with the least-advanced source lane.
     Packing makes source offsets unsuitable for recovering output order.
-    Before any restore, complete delivery counts for a worker's lanes can
-    identify a prefix of the initial round-robin sequence: some leading lanes
-    have delivered one more batch than the remaining lanes.
+    Before any restore, RR starts at index 0 and skips a lane only once
+    upstream has ended and that lane's buffer is empty, so it never emits
+    again. Each lane still active in a pass therefore emits in index order:
+    the last-delivered lane has the largest count, ties going to the later
+    index, and the drain loop skips any exhausted lanes after it.
 
-    After a restore, the initial turn may have changed, and exhausted lanes
-    can leave counts outside that prefix pattern. Do not guess in either case.
+    After a restore, the initial turn may have changed, and cumulative counts
+    no longer establish the ordering. Do not guess.
     """
     # The legacy subtree is unvalidated and can carry integer or string keys.
     lane_emitted: Any = v1.lane_emitted
@@ -217,12 +219,10 @@ def _legacy_rr_from_deliveries(v1: EngineStateV1, key: str, saved: int) -> int:
         if type(count) is not int or count < 0:
             return saved
         counts.append(count)
-    rounds, next_idx = divmod(sum(counts), len(lanes))
-    if not any(counts) or any(
-        count != rounds + (idx < next_idx) for idx, count in enumerate(counts)
-    ):
+    if not any(counts):
         return saved
-    return next_idx
+    _, last_idx = max((count, idx) for idx, count in enumerate(counts))
+    return (last_idx + 1) % len(lanes)
 
 
 def _engine_v1_to_v2(v1: EngineStateV1) -> dict[str, Any]:
