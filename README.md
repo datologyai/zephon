@@ -103,11 +103,9 @@ for batch in pipeline:
 ```
 
 Mixing datasets is a matter of adding them to the `WorkSource` with the proportions you
-want. For remote datasets, you also need a local shard cache:
+want:
 
 ```python
-from zephon.io import CacheOptions, StoreOptions
-
 ws = StaticMixtureWorkSource(
     datasets=[
         Dataset.from_path("fineweb", "s3://my-bucket/fineweb/"),
@@ -116,23 +114,10 @@ ws = StaticMixtureWorkSource(
     mixture=MixtureSpec({"fineweb": 0.7, "dclm": 0.3}),
     seed=42,
 )
-
-pipeline = (
-    Pipeline(ws)
-    .options(
-        io_options=StoreOptions(
-            cache=CacheOptions(
-                enabled=True,
-                root="/mnt/nvme/zephon-cache",
-                limit_bytes=512 << 30,
-            )
-        )
-    )
-    .decode_text()
-    .tokenize(tokenizer_id="gpt2", field="text", padding=True)
-    .batch(microbatch_size=2)
-)
 ```
+
+Note that running a pipeline with a cloud storage backend requires enabling the
+[shard cache](https://datologyai.github.io/zephon/datasets/storage_backends_and_shard_cache.html).
 
 A `Pipeline` is a plain Python iterable, so it works with whatever training loop you
 have. It will also run inside a PyTorch `DataLoader` or torchdata `StatefulDataLoader` if
