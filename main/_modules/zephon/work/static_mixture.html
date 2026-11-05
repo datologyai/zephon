@@ -645,15 +645,57 @@
     <span class="k">return</span> <span class="nb">int</span><span class="p">(</span><span class="n">chunks_possible</span><span class="p">)</span> <span class="o">*</span> <span class="n">cfg</span><span class="o">.</span><span class="n">chunk_size</span>
 
 
+<span class="k">def</span><span class="w"> </span><span class="nf">_repeat_liveness_error</span><span class="p">(</span>
+    <span class="n">cfg</span><span class="p">:</span> <span class="n">_AllocationConfig</span><span class="p">,</span>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">available</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+    <span class="n">required</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Explain an undersized repeat dataset and suggest valid configuration fixes."""</span>
+    <span class="n">parts</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="sa">f</span><span class="s2">"Dataset '</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">' has </span><span class="si">{</span><span class="n">available</span><span class="si">}</span><span class="s2"> samples but repeat policy requires "</span>
+        <span class="sa">f</span><span class="s2">"at least </span><span class="si">{</span><span class="n">required</span><span class="si">}</span><span class="s2"> for its per-chunk allocation "</span>
+        <span class="sa">f</span><span class="s2">"(chunk_size=</span><span class="si">{</span><span class="n">cfg</span><span class="o">.</span><span class="n">chunk_size</span><span class="si">}</span><span class="s2">, mixture weight=</span><span class="si">{</span><span class="n">cfg</span><span class="o">.</span><span class="n">weights</span><span class="p">[</span><span class="n">name</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">100</span><span class="si">:</span><span class="s2">.4g</span><span class="si">}</span><span class="s2">%)."</span><span class="p">,</span>
+        <span class="s2">"Each allocation must fit within a single dataset pass."</span><span class="p">,</span>
+    <span class="p">]</span>
+    <span class="k">if</span> <span class="n">cfg</span><span class="o">.</span><span class="n">stop_after_passes</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">default</span> <span class="o">=</span> <span class="s2">" (the default)"</span> <span class="k">if</span> <span class="n">cfg</span><span class="o">.</span><span class="n">stop_after_passes</span> <span class="o">==</span> <span class="mi">1</span> <span class="k">else</span> <span class="s2">""</span>
+        <span class="n">parts</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"stop_after_passes=</span><span class="si">{</span><span class="n">cfg</span><span class="o">.</span><span class="n">stop_after_passes</span><span class="si">}{</span><span class="n">default</span><span class="si">}</span><span class="s2"> uses "</span>
+            <span class="s2">"exhausted_policy='repeat'."</span>
+        <span class="p">)</span>
+    <span class="k">if</span> <span class="n">available</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">parts</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">"Provide a non-empty dataset."</span><span class="p">)</span>
+        <span class="k">return</span> <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">parts</span><span class="p">)</span>
+
+    <span class="n">single_dataset</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">cfg</span><span class="o">.</span><span class="n">component_order</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span>
+    <span class="n">parts</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">"Reduce chunk_size to </span><span class="si">{</span><span class="n">available</span><span class="si">}</span><span class="s2"> or smaller."</span>
+        <span class="k">if</span> <span class="n">single_dataset</span>
+        <span class="k">else</span> <span class="s2">"Reduce chunk_size."</span>
+    <span class="p">)</span>
+    <span class="n">redistribution</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="s2">"To read each dataset once and allow short chunks, "</span>
+        <span class="s2">"set exhausted_policy='redistribute'"</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="n">cfg</span><span class="o">.</span><span class="n">stop_after_passes</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">redistribution</span> <span class="o">+=</span> <span class="s2">" and leave stop_after_passes unset"</span>
+    <span class="n">parts</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">redistribution</span> <span class="o">+</span> <span class="s2">"."</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">single_dataset</span><span class="p">:</span>
+        <span class="n">parts</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+            <span class="s2">"With redistribution, mixture proportions change as datasets finish."</span>
+        <span class="p">)</span>
+    <span class="k">return</span> <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">parts</span><span class="p">)</span>
+
+
 <span class="k">def</span><span class="w"> </span><span class="nf">_validate_repeat_liveness</span><span class="p">(</span>
     <span class="n">cfg</span><span class="p">:</span> <span class="n">_AllocationConfig</span><span class="p">,</span>
     <span class="n">cursors</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="s2">"_DatasetCursor"</span><span class="p">],</span>
     <span class="n">min_required</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="nb">str</span><span class="p">],</span> <span class="nb">int</span><span class="p">],</span>
-    <span class="n">formula</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="nb">str</span><span class="p">],</span> <span class="nb">str</span><span class="p">],</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">"""Reject repeat datasets smaller than their per-chunk demand bound.</span>
 
-<span class="sd">    ``min_required`` is the mode's bound; ``formula`` renders it for the error.</span>
+<span class="sd">    ``min_required`` is the mode's bound.</span>
 <span class="sd">    """</span>
     <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">cfg</span><span class="o">.</span><span class="n">component_order</span><span class="p">:</span>
         <span class="k">if</span> <span class="n">cfg</span><span class="o">.</span><span class="n">exhausted_policy</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">!=</span> <span class="s2">"repeat"</span><span class="p">:</span>
@@ -662,10 +704,7 @@
         <span class="n">cursor</span> <span class="o">=</span> <span class="n">cursors</span><span class="p">[</span><span class="n">name</span><span class="p">]</span>
         <span class="k">if</span> <span class="n">cursor</span><span class="o">.</span><span class="n">_total_samples</span> <span class="o">&lt;</span> <span class="n">required</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
-                <span class="sa">f</span><span class="s2">"Dataset '</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">' has </span><span class="si">{</span><span class="n">cursor</span><span class="o">.</span><span class="n">_total_samples</span><span class="si">}</span><span class="s2"> samples "</span>
-                <span class="sa">f</span><span class="s2">"but repeat policy requires at least </span><span class="si">{</span><span class="n">required</span><span class="si">}</span><span class="s2"> "</span>
-                <span class="sa">f</span><span class="s2">"(</span><span class="si">{</span><span class="n">formula</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="si">}</span><span class="s2">). "</span>
-                <span class="sa">f</span><span class="s2">"Increase dataset size or decrease chunk_size."</span>
+                <span class="n">_repeat_liveness_error</span><span class="p">(</span><span class="n">cfg</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">cursor</span><span class="o">.</span><span class="n">_total_samples</span><span class="p">,</span> <span class="n">required</span><span class="p">)</span>
             <span class="p">)</span>
 
 
@@ -1570,13 +1609,7 @@
                 <span class="k">return</span> <span class="nb">int</span><span class="p">(</span><span class="n">share</span><span class="p">)</span>
             <span class="k">return</span> <span class="nb">min</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">share</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">cfg</span><span class="o">.</span><span class="n">chunk_size</span><span class="p">)</span>
 
-        <span class="k">def</span><span class="w"> </span><span class="nf">formula</span><span class="p">(</span><span class="n">n</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-            <span class="n">share</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">"max_weight=</span><span class="si">{</span><span class="n">shares</span><span class="p">[</span><span class="n">n</span><span class="p">]</span><span class="si">:</span><span class="s2">.4g</span><span class="si">}</span><span class="s2"> * chunk_size=</span><span class="si">{</span><span class="n">cfg</span><span class="o">.</span><span class="n">chunk_size</span><span class="si">}</span><span class="s2">"</span>
-            <span class="k">if</span> <span class="p">(</span><span class="n">shares</span><span class="p">[</span><span class="n">n</span><span class="p">]</span> <span class="o">*</span> <span class="n">cfg</span><span class="o">.</span><span class="n">chunk_size</span><span class="p">)</span><span class="o">.</span><span class="n">is_integer</span><span class="p">():</span>
-                <span class="k">return</span> <span class="n">share</span>
-            <span class="k">return</span> <span class="sa">f</span><span class="s2">"min(ceil(</span><span class="si">{</span><span class="n">share</span><span class="si">}</span><span class="s2">) + 1, chunk_size)"</span>
-
-        <span class="n">_validate_repeat_liveness</span><span class="p">(</span><span class="n">cfg</span><span class="p">,</span> <span class="n">cursors</span><span class="p">,</span> <span class="n">required</span><span class="p">,</span> <span class="n">formula</span><span class="p">)</span>
+        <span class="n">_validate_repeat_liveness</span><span class="p">(</span><span class="n">cfg</span><span class="p">,</span> <span class="n">cursors</span><span class="p">,</span> <span class="n">required</span><span class="p">)</span>
 
     <span class="c1"># -- quota computation ------------------------------------------------</span>
 
@@ -2213,19 +2246,7 @@
             <span class="c1"># No component can supply more than the entire chunk.</span>
             <span class="k">return</span> <span class="nb">min</span><span class="p">(</span><span class="n">cfg</span><span class="o">.</span><span class="n">chunk_size</span><span class="p">,</span> <span class="n">bound</span><span class="p">)</span>
 
-        <span class="k">def</span><span class="w"> </span><span class="nf">formula</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-            <span class="n">bound</span> <span class="o">=</span> <span class="p">(</span>
-                <span class="sa">f</span><span class="s2">"ceil(effective_share=</span><span class="si">{</span><span class="n">shares</span><span class="p">[</span><span class="n">name</span><span class="p">]</span><span class="si">:</span><span class="s2">.4g</span><span class="si">}</span><span class="s2"> * "</span>
-                <span class="sa">f</span><span class="s2">"chunk_size=</span><span class="si">{</span><span class="n">cfg</span><span class="o">.</span><span class="n">chunk_size</span><span class="si">}</span><span class="s2"> * safety=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_TOKEN_LIVENESS_SAFETY</span><span class="si">}</span><span class="s2">)"</span>
-            <span class="p">)</span>
-            <span class="k">return</span> <span class="sa">f</span><span class="s2">"min(chunk_size, </span><span class="si">{</span><span class="n">bound</span><span class="si">}</span><span class="s2">)"</span>
-
-        <span class="n">_validate_repeat_liveness</span><span class="p">(</span>
-            <span class="n">cfg</span><span class="p">,</span>
-            <span class="n">cursors</span><span class="p">,</span>
-            <span class="n">required</span><span class="p">,</span>
-            <span class="n">formula</span><span class="p">,</span>
-        <span class="p">)</span>
+        <span class="n">_validate_repeat_liveness</span><span class="p">(</span><span class="n">cfg</span><span class="p">,</span> <span class="n">cursors</span><span class="p">,</span> <span class="n">required</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">estimate_remaining_samples</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cursors</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">_DatasetCursor</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">"""Estimate remaining samples from token-mode effective draw shares."""</span>
