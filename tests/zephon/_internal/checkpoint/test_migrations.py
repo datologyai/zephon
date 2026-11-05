@@ -698,3 +698,75 @@ def test_engine_v2_rejects_rank_prefixed_rr_key():
     state["rr_next_idx"] = {"0:0/1:0,1": 1}
     with pytest.raises(ValueError, match="rr_next_idx key '0:0/1:0,1'"):
         EngineStateV2.from_dict(state)
+
+
+@pytest.mark.parametrize("string_keys", [False, True])
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        ([2, 2, 2, 2], 0),
+        ([3, 2, 2, 2], 1),
+        ([3, 3, 2, 2], 2),
+        ([3, 3, 3, 2], 3),
+        ([1, 0, 0, 0], 1),
+        # Exhausted lanes stop delivering once upstream has ended.
+        ([17, 17, 16, 15], 2),
+        ([21, 21, 16, 15], 2),
+        ([9, 12, 12, 11], 3),
+        ([5, 0, 0, 0], 1),
+        ([4, 6, 6, 6], 0),
+    ],
+)
+def test_engine_v1_recovers_next_lane_from_delivery_counts(
+    counts: list[int], expected: int, string_keys: bool
+) -> None:
+    # Worker 1 owns non-contiguous lanes: the pointer indexes this list,
+    # not the global lane IDs. Packed source progress is not output progress.
+    lanes = [1, 3, 5, 7]
+    state = _minimal_engine_v1({"2:1/2:1,3,5,7": (expected + 1) % 4})
+    state["world"] = {"canonical_replicas": 8}
+    state["lane_emitted"] = {
+        str(lane) if string_keys else lane: count for lane, count in zip(lanes, counts)
+    }
+    original_rr = state["rr_next_idx"]
+    assert isinstance(original_rr, dict)
+    original_rr = original_rr.copy()
+    result = migrate("engine", state)
+    assert result["rr_next_idx"] == {"1/2:1,3,5,7": expected}
+    assert state["rr_next_idx"] == original_rr
+
+
+@pytest.mark.parametrize(
+    ("counts", "reload_count"),
+    [
+        ({}, 0),
+        ({0: 2}, 0),
+        ({0: 0, 1: 0}, 0),
+        ({0: 2, 1: 2}, 1),
+        ({0: True, 1: 1}, 0),
+        ({0: 2.0, 1: 2}, 0),
+        ({0: -1, 1: -1}, 0),
+    ],
+)
+def test_engine_v1_keeps_pointer_when_delivery_history_is_ambiguous(
+    counts: dict[int, int | float], reload_count: int
+) -> None:
+    state = _minimal_engine_v1({"0:0/1:0,1": 1})
+    state.update(lane_emitted=counts, checkpoint_reload_count=reload_count)
+    assert migrate("engine", state)["rr_next_idx"] == {"0/1:0,1": 1}
+
+
+def test_engine_v1_delivery_counts_do_not_hide_invalid_rr_state() -> None:
+    state = _minimal_engine_v1({"0:0/1:0,1": 2})
+    state["lane_emitted"] = {0: 2, 1: 2}
+    with pytest.raises(ValueError, match="out of range"):
+        EngineStateV2.load(state)
+    state["rr_next_idx"] = {"0:0/1:0,1": 0, "1:0/1:0,1": 1}
+    with pytest.raises(ValueError, match="conflicts with another rank"):
+        EngineStateV2.load(state)
+
+
+def test_engine_v2_keeps_saved_pointer_regardless_of_delivery_counts() -> None:
+    state = migrate("engine", _minimal_engine_v1({"0:0/1:0,1": 1}))
+    state["lane_emitted"] = {0: 2, 1: 2}
+    assert EngineStateV2.load(state).rr_next_idx == {"0/1:0,1": 1}

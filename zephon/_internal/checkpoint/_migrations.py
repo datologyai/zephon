@@ -189,6 +189,42 @@ def _work_chunk_v2_to_v3(v2: WorkChunkStateV2) -> dict[str, Any]:
     return d
 
 
+def _legacy_rr_from_deliveries(v1: EngineStateV1, key: str, saved: int) -> int:
+    """Recover a first-run RR turn; retain the saved pointer when unknown.
+
+    b23 replaced the next output lane with the least-advanced source lane.
+    Packing makes source offsets unsuitable for recovering output order.
+    Before any restore, RR starts at index 0 and skips a lane only once
+    upstream has ended and that lane's buffer is empty, so it never emits
+    again. Each lane still active in a pass therefore emits in index order:
+    the last-delivered lane has the largest count, ties going to the later
+    index, and the drain loop skips any exhausted lanes after it.
+
+    After a restore, the initial turn may have changed, and cumulative counts
+    no longer establish the ordering. Do not guess.
+    """
+    # The legacy subtree is unvalidated and can carry integer or string keys.
+    lane_emitted: Any = v1.lane_emitted
+    if v1.checkpoint_reload_count != 0 or not isinstance(lane_emitted, dict):
+        return saved
+    try:
+        lanes = [int(lane) for lane in key.rpartition(":")[2].split(",")]
+    except ValueError:
+        return saved  # Malformed/empty keys remain subject to v2 validation.
+    if not 0 <= saved < len(lanes) or len(set(lanes)) != len(lanes):
+        return saved  # Never conceal an out-of-range pointer.
+    counts: list[int] = []
+    for lane in lanes:
+        count = lane_emitted.get(str(lane), lane_emitted.get(lane))
+        if type(count) is not int or count < 0:
+            return saved
+        counts.append(count)
+    if not any(counts):
+        return saved
+    _, last_idx = max((count, idx) for idx, count in enumerate(counts))
+    return (last_idx + 1) % len(lanes)
+
+
 def _engine_v1_to_v2(v1: EngineStateV1) -> dict[str, Any]:
     """Drop the ``"{global_rank}:"`` prefix from ``rr_next_idx`` keys.
 
@@ -196,6 +232,9 @@ def _engine_v1_to_v2(v1: EngineStateV1) -> dict[str, Any]:
     find it again; v2 keys it by lane set, shared by every DP peer. The merge
     keeps one representative per DP group, so stripped keys should not collide;
     if they disagree, no peer's pointer is trustworthy.
+
+    Repair b23's source-derived pointer when delivery counts prove the next
+    turn. Missing counts and previously resumed histories retain their pointer.
     """
     rr: dict[str, int] = {}
     for key, val in sorted(v1.rr_next_idx.items()):
@@ -208,7 +247,9 @@ def _engine_v1_to_v2(v1: EngineStateV1) -> dict[str, Any]:
             )
         rr[new_key] = int(val)
     d = v1.to_dict()
-    d["rr_next_idx"] = rr
+    d["rr_next_idx"] = {
+        key: _legacy_rr_from_deliveries(v1, key, saved) for key, saved in rr.items()
+    }
     return d
 
 
