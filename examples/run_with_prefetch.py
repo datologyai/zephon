@@ -44,7 +44,11 @@ def build_pipeline_with_prefetch() -> Pipeline:
         parallelism=1,
         padding=True,
     )
-    pipe = pipe.options(io_options={"cache": {"enabled": True, "root": cache_root}})
+    pipe = pipe.options(
+        io_options={
+            "cache": {"enabled": True, "root": cache_root, "limit_bytes": 64 << 20}
+        }
+    )
     pipe = pipe.batch(microbatch_size=8, drop_last=False)
     return pipe
 
@@ -70,7 +74,11 @@ def build_pipeline_without_prefetch() -> Pipeline:
         parallelism=1,
         padding=True,
     )
-    pipe = pipe.options(io_options={"cache": {"enabled": True, "root": cache_root}})
+    pipe = pipe.options(
+        io_options={
+            "cache": {"enabled": True, "root": cache_root, "limit_bytes": 64 << 20}
+        }
+    )
     pipe = pipe.batch(microbatch_size=8, drop_last=False)
     return pipe
 

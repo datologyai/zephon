@@ -16,6 +16,32 @@ from zephon.work.static_mixture import StaticMixtureWorkSource
 pytestmark = pytest.mark.integration
 
 
+def test_jsonl_explicit_cache_root_enables_staging(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    shard = source / "data.jsonl"
+    shard.write_text('{"text": "hello"}\n{"text": "world"}\n', encoding="utf-8")
+    dataset = Dataset.from_path("demo", str(source), fmt="jsonl")
+    work = StaticMixtureWorkSource(
+        [dataset], {"demo": 1.0}, chunk_size=2, shuffle_shards=False
+    )
+    cache_root = tmp_path / "cache"
+    pipeline = (
+        PublicPipeline(work)
+        .decode_text()
+        .options(
+            runner="inline",
+            mtp_mode=False,
+            io_options={"cache": {"root": str(cache_root), "limit_bytes": 1 << 20}},
+        )
+    )
+
+    records = list(pipeline)
+
+    assert sorted(record.payload["text"] for record in records) == ["hello", "world"]
+    assert (cache_root / "demo" / "data.jsonl").read_bytes() == shard.read_bytes()
+
+
 def _write_jsonl_dir(
     root: Path,
     shard_files: int,

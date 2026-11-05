@@ -11,6 +11,10 @@ work_source = StaticMixtureWorkSource([dataset], MixtureSpec({"wikipedia": 1.0})
 # All ranks on a node share this directory, so size it for the whole node.
 pipeline = Pipeline(work_source).options(
     io_options=StoreOptions(
-        cache=CacheOptions(root="/mnt/nvme/zephon-cache", limit_bytes=512 << 30),
+        cache=CacheOptions(
+            enabled=True,
+            root="/mnt/nvme/zephon-cache",
+            limit_bytes=512 << 30,
+        ),
     )
 )

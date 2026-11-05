@@ -104,7 +104,13 @@ def parse_size_bytes(value: str | int | None) -> int | None:
 
 @dataclass
 class CacheOptions:
-    """On-disk shard-cache configuration."""
+    """On-disk shard-cache configuration.
+
+    Supplying a nonempty ``root`` enables caching when ``enabled`` is omitted.
+    An explicit ``enabled=False`` takes precedence, including across option
+    merges. Without a supplied root or enablement, caching stays disabled.
+    Configure ``limit_bytes`` to bound disk usage; its default is unlimited.
+    """
 
     enabled: bool = _option(False)
     root: str | Path = _option(Path("~/.cache/zephon").expanduser())
@@ -128,9 +134,22 @@ class CacheOptions:
         repr=False,
         compare=False,
     )
+    _root_was_reset: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        # Raw dataclass inputs can include the None reset before normalization.
+        raw_root: Any = self.root
+        self._root_was_reset = raw_root is None
         _normalize_options(self)
+        if (
+            "root" in self._provided_fields
+            and "enabled" not in self._provided_fields
+            and not self._root_was_reset
+            and self.root
+        ):
+            # Keep inferred enablement out of _provided_fields so a root-only
+            # override cannot replace an explicit disable during a merge.
+            self.enabled = True
 
     @classmethod
     def from_any(cls, obj: Any) -> "CacheOptions":
@@ -149,7 +168,13 @@ class CacheOptions:
 
     def merge(self, other: "CacheOptions") -> "CacheOptions":
         """Overlay fields supplied by ``other`` onto ``self``."""
-        return CacheOptions(**_merged_options(self, other))
+        merged = _merged_options(self, other)
+        root_source = other if "root" in other._provided_fields else self
+        if root_source._root_was_reset:
+            # Preserve a root reset rather than inferring enablement from the
+            # default path installed by _normalize_options.
+            merged["root"] = None
+        return CacheOptions(**merged)
 
 
 @dataclass

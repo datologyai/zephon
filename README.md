@@ -116,6 +116,9 @@ ws = StaticMixtureWorkSource(
 )
 ```
 
+Note that running a pipeline with a cloud storage backend requires enabling the
+[shard cache](https://datologyai.github.io/zephon/datasets/storage_backends_and_shard_cache.html).
+
 A `Pipeline` is a plain Python iterable, so it works with whatever training loop you
 have. It will also run inside a PyTorch `DataLoader` or torchdata `StatefulDataLoader` if
 your framework insists on one, although we recommend iterating over it directly.
