@@ -8,7 +8,11 @@ from collections import Counter
 
 import pytest
 
-from zephon._internal.utils.swrr import SmoothWeightedRoundRobin, swrr_iterate
+from zephon._internal.utils.swrr import (
+    DeficitRoundRobin,
+    SmoothWeightedRoundRobin,
+    swrr_iterate,
+)
 
 # ----------------------------
 # SmoothWeightedRoundRobin Tests
@@ -659,3 +663,29 @@ class TestSWRRTargetRemoval:
             counts[chosen] += 1
             swrr.record(chosen)
         assert counts == {"b": 60, "c": 40}
+
+
+class TestDeficitRoundRobin:
+    def test_ties_go_to_the_earliest_index(self) -> None:
+        assert DeficitRoundRobin([0.5, 0.5], [1.0, 1.0]).select() == 0
+
+    def test_charge_credits_weights_and_debits_the_chosen_cost(self) -> None:
+        rr = DeficitRoundRobin([0.75, 0.25], [0.0, 0.0])
+        rr.charge(0, 4.0)
+        assert rr.deficits == [-1.0, 1.0]
+        assert rr.select() == 1
+
+    def test_seed_deficits_are_copied(self) -> None:
+        seed = [0.0, 0.0]
+        DeficitRoundRobin([0.5, 0.5], seed).charge(0, 2.0)
+        assert seed == [0.0, 0.0]
+
+    def test_weighted_costs_converge_to_the_token_target(self) -> None:
+        rr = DeficitRoundRobin([0.5, 0.5], [0.0, 0.0])
+        tokens = [0.0, 0.0]
+        costs = [1.0, 4.0]
+        for _ in range(500):
+            chosen = rr.select()
+            rr.charge(chosen, costs[chosen])
+            tokens[chosen] += costs[chosen]
+        assert tokens[0] / sum(tokens) == pytest.approx(0.5, abs=0.01)
