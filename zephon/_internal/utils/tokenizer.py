@@ -393,9 +393,8 @@ def _honor_tokenizer_json(
     from tokenizers import Tokenizer
     from transformers import PreTrainedTokenizerFast
 
-    saved = Tokenizer.from_file(str(folder / "tokenizer.json"))
-    expected = saved.encode(_PIPELINE_PROBE, add_special_tokens=False).ids
-    if backend.encode(_PIPELINE_PROBE, add_special_tokens=False).ids == expected:
+    expected = _content_ids(Tokenizer.from_file(str(folder / "tokenizer.json")))
+    if _content_ids(backend) == expected:
         return tokenizer
 
     # Keep the special tokens Transformers chose (class defaults included) so only
@@ -409,9 +408,7 @@ def _honor_tokenizer_json(
     reloaded = PreTrainedTokenizerFast.from_pretrained(
         str(folder), **{role: token for role, token in special.items() if token}
     )
-    actual = reloaded.backend_tokenizer.encode(
-        _PIPELINE_PROBE, add_special_tokens=False
-    ).ids
+    actual = _content_ids(reloaded.backend_tokenizer)
     wrapping = _special_wrapping(tokenizer), _special_wrapping(reloaded)
     if actual != expected or wrapping[0] != wrapping[1]:
         raise ValueError(
@@ -428,6 +425,18 @@ def _honor_tokenizer_json(
         folder,
     )
     return reloaded
+
+
+def _content_ids(backend: Any) -> list[int]:
+    """Encode the probe without special tokens, padding or truncation."""
+    from tokenizers import Tokenizer
+
+    # A copy, so a saved fixed-length padding or truncation (sentence-transformers
+    # ships both) neither skews the comparison nor is lost from the live tokenizer.
+    probe = Tokenizer.from_str(backend.to_str())
+    probe.no_padding()
+    probe.no_truncation()
+    return probe.encode(_PIPELINE_PROBE, add_special_tokens=False).ids
 
 
 def _special_wrapping(tokenizer: Any) -> tuple[list[int], list[int]]:

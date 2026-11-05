@@ -399,6 +399,35 @@ def test_load_keeps_tokenizer_that_already_matches(
     assert "ignores the pre-tokenizer" not in caplog.text
 
 
+def test_load_ignores_saved_padding_and_truncation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pytest.importorskip("transformers")
+    folder = write_wordlevel_tokenizer(tmp_path)
+    saved = json.loads((folder / "tokenizer.json").read_text())
+    saved["padding"] = {
+        "strategy": {"Fixed": 8},
+        "direction": "Right",
+        "pad_to_multiple_of": None,
+        "pad_id": 2,
+        "pad_type_id": 0,
+        "pad_token": "<pad>",
+    }
+    saved["truncation"] = {
+        "direction": "Right",
+        "max_length": 8,
+        "strategy": "LongestFirst",
+        "stride": 0,
+    }
+    (folder / "tokenizer.json").write_text(json.dumps(saved))
+
+    with caplog.at_level(logging.WARNING):
+        tok = load_hf_tokenizer(str(folder))
+
+    assert tok("hello world", add_special_tokens=False)["input_ids"] == [4, 5]
+    assert "ignores the pre-tokenizer" not in caplog.text
+
+
 def test_load_retries_transient_failure_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
