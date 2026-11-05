@@ -183,7 +183,8 @@ class HFBackend(OpenViaDownloadMixin):
             raise FileNotFoundError(f"hf:// object not found: {what}")
         if status in (401, 403):
             raise PermissionError(
-                f"hf:// access denied: {what}; set HF_TOKEN or run `hf auth login`."
+                f"hf:// access denied: {what}; set HF_TOKEN or run `hf auth login` "
+                "(`huggingface-cli login` for huggingface_hub<0.34)."
             )
         resp.raise_for_status()
 
@@ -599,7 +600,8 @@ class HFBackend(OpenViaDownloadMixin):
             if status in (401, 403):
                 self._unlink_quiet(incomplete)
                 raise PermissionError(
-                    f"hf:// access denied: {src}; set HF_TOKEN or run `hf auth login`."
+                    f"hf:// access denied: {src}; set HF_TOKEN or run `hf auth login` "
+                    "(`huggingface-cli login` for huggingface_hub<0.34)."
                 ) from exc
             # Transient HTTP failure (5xx etc.): keep ``.incomplete`` so a
             # caller-driven retry can resume from the current offset.
@@ -690,7 +692,8 @@ class HFBackend(OpenViaDownloadMixin):
                 raise FileNotFoundError(f"No such hf:// file: {src}") from exc
             if status in (401, 403):
                 raise PermissionError(
-                    f"hf:// access denied: {src}; set HF_TOKEN or run `hf auth login`."
+                    f"hf:// access denied: {src}; set HF_TOKEN or run `hf auth login` "
+                    "(`huggingface-cli login` for huggingface_hub<0.34)."
                 ) from exc
             raise
         finally:
