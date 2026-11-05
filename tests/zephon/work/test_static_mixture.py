@@ -2634,6 +2634,81 @@ def test_repeat_guard_rejects_2_samples_chunk5() -> None:
         )
 
 
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_repeat_error_explains_default_and_provides_working_fixes(mode: str) -> None:
+    sizes = {"tiny": 1000}
+    with pytest.raises(ValueError) as exc_info:
+        _mixture_source(mode, sizes, chunk_size=16384, exhausted_policy=None)
+
+    message = str(exc_info.value)
+    assert "Dataset 'tiny' has 1000 samples" in message
+    assert "repeat policy requires at least 16384" in message
+    assert "chunk_size=16384, mixture weight=100%" in message
+    assert "Each allocation must fit within a single dataset pass." in message
+    assert "stop_after_passes=1 (the default) uses exhausted_policy='repeat'" in message
+    assert "Reduce chunk_size to 1000 or smaller." in message
+    assert (
+        "exhausted_policy='redistribute' and leave stop_after_passes unset" in message
+    )
+
+    # Both advertised fixes must yield all of the samples without repeating.
+    for options in (
+        {"chunk_size": 1000, "exhausted_policy": None},
+        {"chunk_size": 16384, "exhausted_policy": "redistribute"},
+    ):
+        source = _mixture_source(mode, sizes, **options).clone_for_lane(0, 1)
+        chunks = _redistribute_chunks(source)
+        sample_ids = [sid for chunk in chunks for sid, _ in chunk]
+        assert len(sample_ids) == len(set(sample_ids)) == 1000
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+@pytest.mark.parametrize(
+    "options",
+    [{"exhausted_policy": "repeat"}, {"stop_after_passes": 2}],
+)
+def test_repeat_error_explains_mixture_and_explicit_policy(
+    mode: str, options: dict[str, Any]
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        _mixture_source(
+            mode,
+            {"tiny": 2, "big": 100},
+            chunk_size=5,
+            **{"exhausted_policy": None, **options},
+        )
+
+    message = str(exc_info.value)
+    assert "Dataset 'tiny' has 2 samples" in message
+    required = 4 if mode == "samples" else 5
+    assert f"repeat policy requires at least {required}" in message
+    assert "chunk_size=5, mixture weight=50%" in message
+    assert "Reduce chunk_size." in message
+    assert (
+        "With redistribution, mixture proportions change as datasets finish." in message
+    )
+    assert "(the default)" not in message
+    if "stop_after_passes" in options:
+        assert "stop_after_passes=2 uses exhausted_policy='repeat'" in message
+        assert "leave stop_after_passes unset" in message
+    else:
+        assert "stop_after_passes" not in message
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_repeat_error_does_not_suggest_invalid_fixes_for_empty_dataset(
+    mode: str,
+) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        _mixture_source(mode, {"tiny": 0, "big": 16}, exhausted_policy=None)
+
+    message = str(exc_info.value)
+    assert "Dataset 'tiny' has 0 samples" in message
+    assert "Provide a non-empty dataset." in message
+    assert "Reduce chunk_size" not in message
+    assert "redistribute" not in message
+
+
 def test_repeat_guard_allows_exact_quota() -> None:
     """An integral share needs only weight * chunk_size samples."""
     # 0.5 * 10 = 5, dataset has exactly 5 samples — should be fine

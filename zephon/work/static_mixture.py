@@ -311,15 +311,57 @@ def _average_quota_remaining_samples(
     return int(chunks_possible) * cfg.chunk_size
 
 
+def _repeat_liveness_error(
+    cfg: _AllocationConfig,
+    name: str,
+    available: int,
+    required: int,
+) -> str:
+    """Explain an undersized repeat dataset and suggest valid configuration fixes."""
+    parts = [
+        f"Dataset '{name}' has {available} samples but repeat policy requires "
+        f"at least {required} for its per-chunk allocation "
+        f"(chunk_size={cfg.chunk_size}, mixture weight={cfg.weights[name] * 100:.4g}%).",
+        "Each allocation must fit within a single dataset pass.",
+    ]
+    if cfg.stop_after_passes is not None:
+        default = " (the default)" if cfg.stop_after_passes == 1 else ""
+        parts.append(
+            f"stop_after_passes={cfg.stop_after_passes}{default} uses "
+            "exhausted_policy='repeat'."
+        )
+    if available == 0:
+        parts.append("Provide a non-empty dataset.")
+        return "\n".join(parts)
+
+    single_dataset = len(cfg.component_order) == 1
+    parts.append(
+        f"Reduce chunk_size to {available} or smaller."
+        if single_dataset
+        else "Reduce chunk_size."
+    )
+    redistribution = (
+        "To read each dataset once and allow short chunks, "
+        "set exhausted_policy='redistribute'"
+    )
+    if cfg.stop_after_passes is not None:
+        redistribution += " and leave stop_after_passes unset"
+    parts.append(redistribution + ".")
+    if not single_dataset:
+        parts.append(
+            "With redistribution, mixture proportions change as datasets finish."
+        )
+    return "\n".join(parts)
+
+
 def _validate_repeat_liveness(
     cfg: _AllocationConfig,
     cursors: Mapping[str, "_DatasetCursor"],
     min_required: Callable[[str], int],
-    formula: Callable[[str], str],
 ) -> None:
     """Reject repeat datasets smaller than their per-chunk demand bound.
 
-    ``min_required`` is the mode's bound; ``formula`` renders it for the error.
+    ``min_required`` is the mode's bound.
     """
     for name in cfg.component_order:
         if cfg.exhausted_policy[name] != "repeat":
@@ -328,10 +370,7 @@ def _validate_repeat_liveness(
         cursor = cursors[name]
         if cursor._total_samples < required:
             raise ValueError(
-                f"Dataset '{name}' has {cursor._total_samples} samples "
-                f"but repeat policy requires at least {required} "
-                f"({formula(name)}). "
-                f"Increase dataset size or decrease chunk_size."
+                _repeat_liveness_error(cfg, name, cursor._total_samples, required)
             )
 
 
@@ -1236,13 +1275,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
                 return int(share)
             return min(math.ceil(share) + 1, cfg.chunk_size)
 
-        def formula(n: str) -> str:
-            share = f"max_weight={shares[n]:.4g} * chunk_size={cfg.chunk_size}"
-            if (shares[n] * cfg.chunk_size).is_integer():
-                return share
-            return f"min(ceil({share}) + 1, chunk_size)"
-
-        _validate_repeat_liveness(cfg, cursors, required, formula)
+        _validate_repeat_liveness(cfg, cursors, required)
 
     # -- quota computation ------------------------------------------------
 
@@ -1879,19 +1912,7 @@ class TokenAwareStrategy(AllocationStrategy):
             # No component can supply more than the entire chunk.
             return min(cfg.chunk_size, bound)
 
-        def formula(name: str) -> str:
-            bound = (
-                f"ceil(effective_share={shares[name]:.4g} * "
-                f"chunk_size={cfg.chunk_size} * safety={self._TOKEN_LIVENESS_SAFETY})"
-            )
-            return f"min(chunk_size, {bound})"
-
-        _validate_repeat_liveness(
-            cfg,
-            cursors,
-            required,
-            formula,
-        )
+        _validate_repeat_liveness(cfg, cursors, required)
 
     def estimate_remaining_samples(self, cursors: dict[str, _DatasetCursor]) -> int:
         """Estimate remaining samples from token-mode effective draw shares."""
