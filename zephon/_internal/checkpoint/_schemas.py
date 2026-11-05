@@ -33,6 +33,7 @@ import math
 import re
 import types
 import typing
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Union, cast, get_args, get_origin
 
@@ -51,7 +52,18 @@ def _is_optional(annotation: Any) -> bool:
     return annotation is type(None)
 
 
-def _auto_coerce(annotation: Any) -> type | None:
+def _parse_bool(value: Any) -> bool:
+    """Parse a bool without truth-testing: ``bool("false")`` is True."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    raise ValueError(f"expected a bool, 0/1 or 'true'/'false', got {value!r}")
+
+
+def _auto_coerce(annotation: Any) -> Callable[[Any], Any] | None:
     """Return a coercion callable for primitive type annotations, else None."""
     origin = get_origin(annotation)
     if origin is Union or isinstance(annotation, types.UnionType):
@@ -60,7 +72,7 @@ def _auto_coerce(annotation: Any) -> type | None:
             annotation = args[0]
     # bool before int: bool is a subclass of int, so check it first.
     if annotation is bool:
-        return bool
+        return _parse_bool
     if annotation is int:
         return int
     if annotation is float:

@@ -746,6 +746,25 @@ def test_auto_coerce_bool_before_int():
     assert isinstance(sm.reshuffle_on_repeat, bool)
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(False, False), (0, False), ("false", False), ("False", False), ("true", True)],
+)
+def test_bool_fields_parse_instead_of_truth_testing(raw: object, expected: bool):
+    sm = StaticMixtureStateV1.from_dict(
+        _minimal_static_mixture_raw(reshuffle_on_repeat=raw)
+    )
+    assert sm.reshuffle_on_repeat is expected
+
+
+@pytest.mark.parametrize("raw", [2, "yes", "", 0.0, [False]])
+def test_bool_fields_reject_ambiguous_values(raw: object):
+    with pytest.raises(ValueError, match="reshuffle_on_repeat"):
+        StaticMixtureStateV1.from_dict(
+            _minimal_static_mixture_raw(reshuffle_on_repeat=raw)
+        )
+
+
 def test_from_dict_reports_all_structural_errors_at_once():
     """A dict with multiple bad fields surfaces every error in one ValueError."""
     import pytest
