@@ -38,11 +38,6 @@
     }
   }
 
-  const CHEVRON =
-    "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' " +
-    "fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E" +
-    "%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")";
-
   function addStyles() {
     const style = document.createElement("style");
     style.textContent = `
@@ -56,12 +51,11 @@
         color: var(--color-sidebar-search-foreground, var(--color-foreground-primary));
         background: var(--color-sidebar-search-background, var(--color-sidebar-background));
         border: 1px solid var(--color-sidebar-search-border, var(--color-background-border)); }
-      /* The native arrow hugs the border; draw our own, inset from it. */
+      /* A border chevron stays visible in forced colors, unlike a background mask. */
       .zephon-versions-control { position: relative; display: block; }
-      .zephon-versions-control::after { content: ""; position: absolute; top: 50%; right: 0.65rem;
-        width: 0.7rem; height: 0.7rem; transform: translateY(-50%); pointer-events: none;
-        background-color: var(--color-foreground-secondary);
-        -webkit-mask: ${CHEVRON} center / contain no-repeat; mask: ${CHEVRON} center / contain no-repeat; }
+      .zephon-versions-control::after { content: ""; position: absolute; top: 50%; right: 0.8rem;
+        width: 0.3rem; height: 0.3rem; transform: translateY(-75%) rotate(45deg); pointer-events: none;
+        color: var(--color-foreground-secondary); border: solid currentColor; border-width: 0 1.5px 1.5px 0; }
       /* Furo themes with CSS variables only, so tell the browser when the
        * native dropdown list should be dark too. */
       body[data-theme="dark"] .zephon-versions select { color-scheme: dark; }
@@ -71,7 +65,7 @@
       /* Above Furo's floated page icons, at full width, with the same top
        * spacing the icons have. */
       .zephon-version-banner { margin: 1.5rem 0 0; padding: 0.6rem 0.9rem; border-radius: 0.25rem;
-        font-size: var(--font-size--small, 0.875rem);
+        font-size: var(--font-size--small, 0.875rem); line-height: 1.5;
         background: var(--color-admonition-title-background--note, var(--color-background-secondary));
         border-left: 0.25rem solid var(--color-brand-primary); }
     `;
@@ -103,11 +97,8 @@
 
   function addBanner(index) {
     if (current === index.latest) return;
-    const container =
-      document.querySelector(".article-container") ||
-      document.querySelector("article[role=main]") ||
-      document.querySelector(".content");
-    if (!container) return;
+    const article = document.querySelector("article[role=main]") || document.querySelector(".content");
+    if (!article) return;
     let kind = "an older release";
     if (current === "main") kind = "the unreleased development version";
     else if (index.versions.indexOf(current) < index.versions.indexOf(index.latest)) kind = "a pre-release";
@@ -122,7 +113,11 @@
       go(index.latest, index.latest);
     });
     banner.append(`You're reading the docs for ${current}, ${kind}. See `, link, ".");
-    container.prepend(banner);
+    /* Keep the warning inside main and its skip-link target. Put Furo's floated
+     * page icons after it so they cannot narrow the banner. */
+    const icons = article.previousElementSibling;
+    if (icons && icons.classList.contains("content-icon-container")) article.prepend(icons);
+    article.prepend(banner);
   }
 
   fetch(new URL("versions.json", siteRoot))
