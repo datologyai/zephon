@@ -1,4 +1,5 @@
 import pickle
+from pathlib import Path
 
 import pytest
 
@@ -250,6 +251,81 @@ def test_cache_options_from_any_and_merge(tmp_path) -> None:
         _ = CacheOptions.from_any(123)
     legacy = CacheOptions.from_any({"rg_cache_bytes": "4gb"})
     assert legacy.rg_cache_bytes == 4 * 1024**3
+
+
+@pytest.mark.parametrize("as_dict", [False, True])
+@pytest.mark.parametrize("as_string", [False, True])
+def test_explicit_cache_root_enables_cache(
+    tmp_path: Path, as_dict: bool, as_string: bool
+) -> None:
+    root = str(tmp_path) if as_string else tmp_path
+    values = {"root": root, "limit_bytes": 1024}
+    cache = (
+        CacheOptions.from_any(values)
+        if as_dict
+        else CacheOptions(root=root, limit_bytes=1024)
+    )
+
+    assert cache.enabled is True
+    assert cache.root == root
+    assert cache.limit_bytes == 1024
+    assert "enabled" not in cache._provided_fields
+    assert pickle.loads(pickle.dumps(cache)) == cache
+
+
+def test_cache_defaults_and_limit_alone_do_not_enable_cache() -> None:
+    for cache in (
+        CacheOptions(),
+        CacheOptions(limit_bytes=1024),
+        CacheOptions.from_any({}),
+        CacheOptions.from_any({"limit_bytes": "1gb"}),
+        CacheOptions.from_any(None),
+        CacheOptions.from_any(False),
+    ):
+        assert cache.enabled is False
+
+
+def test_explicit_cache_disable_overrides_root(tmp_path: Path) -> None:
+    cache = CacheOptions(enabled=False, root=tmp_path, limit_bytes=1024)
+    assert cache.enabled is False
+    assert cache.merge(CacheOptions(root=tmp_path / "other")).enabled is False
+    assert CacheOptions(root=tmp_path).merge(cache).enabled is False
+
+
+@pytest.mark.parametrize("root", [None, ""])
+def test_unset_cache_root_does_not_enable_cache(root: str | None) -> None:
+    cache = CacheOptions.from_any({"root": root})
+    assert cache.enabled is False
+    assert cache.merge(CacheOptions()).enabled is False
+    assert CacheOptions().merge(cache).enabled is False
+
+
+def test_reset_inferred_cache_root_does_not_enable_default_path(tmp_path: Path) -> None:
+    cache = CacheOptions(root=tmp_path).merge(CacheOptions.from_any({"root": None}))
+    assert cache.root == CacheOptions().root
+    assert cache.enabled is False
+    assert cache.merge(CacheOptions()).enabled is False
+
+
+def test_inferred_cache_enablement_survives_partial_merges_and_resets(
+    tmp_path: Path,
+) -> None:
+    base = StoreOptions()
+    configured = base.merge(StoreOptions.from_any({"cache": {"root": tmp_path}}))
+    merged = configured.merge(
+        StoreOptions.from_any({"cache": {"limit_bytes": "1gb"}})
+    ).merge(StoreOptions())
+
+    assert base.cache.enabled is False
+    assert merged.cache.enabled is True
+    assert merged.cache.root == tmp_path
+    assert merged.cache.limit_bytes == 1024**3
+    assert "enabled" not in merged.cache._provided_fields
+
+    for reset_value in (None, False):
+        reset = merged.merge(StoreOptions.from_any({"cache": reset_value}))
+        assert reset.cache == CacheOptions()
+        assert reset.merge(StoreOptions()).cache.enabled is False
 
 
 def test_store_options_from_any_and_merge(tmp_path) -> None:

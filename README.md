@@ -106,6 +106,8 @@ Mixing datasets is a matter of adding them to the `WorkSource` with the proporti
 want:
 
 ```python
+from zephon.io import CacheOptions, StoreOptions
+
 ws = StaticMixtureWorkSource(
     datasets=[
         Dataset.from_path("fineweb", "s3://my-bucket/fineweb/"),
@@ -114,7 +116,22 @@ ws = StaticMixtureWorkSource(
     mixture=MixtureSpec({"fineweb": 0.7, "dclm": 0.3}),
     seed=42,
 )
+
+# Remote shard reads require a local cache. Choose its placement and budget.
+pipeline = Pipeline(ws).options(
+    io_options=StoreOptions(
+        cache=CacheOptions(
+            enabled=True,
+            root="/mnt/nvme/zephon-cache",
+            limit_bytes=512 << 30,
+        )
+    )
+)
 ```
+
+Supplying a cache `root` also enables caching when `enabled` is omitted; an explicit
+`enabled=False` takes precedence. See [Storage backends and shard cache](https://datologyai.github.io/zephon/datasets/storage_backends_and_shard_cache.html)
+for configuration details.
 
 A `Pipeline` is a plain Python iterable, so it works with whatever training loop you
 have. It will also run inside a PyTorch `DataLoader` or torchdata `StatefulDataLoader` if

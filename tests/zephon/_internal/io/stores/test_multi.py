@@ -92,8 +92,9 @@ def test_build_multi_dataset_store_unknown_backend_kind_raises(tmp_path: Path) -
     "root", ["s3://bucket/data", "gs://bucket/data", "hf://datasets/org/repo"]
 )
 @pytest.mark.parametrize("explicit_storage", [False, True])
+@pytest.mark.parametrize("disable_explicitly", [False, True])
 def test_remote_root_requires_shard_cache(
-    tmp_path: Path, root: str, explicit_storage: bool
+    tmp_path: Path, root: str, explicit_storage: bool, disable_explicitly: bool
 ) -> None:
     # Include a local dataset first: every catalog root must be checked.
     catalogs = catalog_set_from_locators(
@@ -114,7 +115,11 @@ def test_remote_root_requires_shard_cache(
     with pytest.raises(ValueError, match=r"set cache\.enabled=True") as exc:
         build_resolver(
             catalogs,
-            options=StoreOptions(cache=CacheOptions(enabled=False)),
+            options=(
+                StoreOptions(cache=CacheOptions(enabled=False))
+                if disable_explicitly
+                else None
+            ),
             storage=storage,
         )
     assert root in str(exc.value)
@@ -127,6 +132,38 @@ def test_nonlocal_storage_requires_shard_cache() -> None:
             options=StoreOptions(cache=CacheOptions(enabled=False)),
             storage=RouterStorageBackend(),
         )
+
+
+def test_remote_shard_downloads_with_explicit_cache_root(tmp_path: Path) -> None:
+    class DownloadStorage(MemoryStorage):
+        def exists(self, path: str) -> bool:
+            return path in self.files
+
+        def download(self, src: str, dst: str, timeout: float | None = None) -> None:
+            Path(dst).write_bytes(self.files[src])
+
+    root = "s3://bucket/data"
+    data = b'{"text": "hello"}\n'
+    locator = ShardLocator(
+        dataset="remote",
+        shard_id=0,
+        format="jsonl",
+        root=root,
+        raw=ShardFile("data.jsonl", len(data), {}),
+    )
+    catalogs = catalog_set_from_locators([locator], tmp_path / "catalogs")
+    cache_root = tmp_path / "cache"
+    resolver = build_resolver(
+        catalogs,
+        options=StoreOptions(cache=CacheOptions(root=cache_root, limit_bytes=1 << 20)),
+        storage=DownloadStorage(root, {"data.jsonl": data}),
+    )
+    try:
+        resolved = resolver.resolve(locator)
+        assert resolved.raw.path.read_bytes() == data
+        assert resolved.raw.path.is_relative_to(cache_root)
+    finally:
+        resolver.close()
 
 
 def test_build_multi_dataset_store_mixed_inmem_and_file_backed(tmp_path: Path) -> None:

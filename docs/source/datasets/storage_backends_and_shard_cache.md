@@ -29,26 +29,38 @@ available. The path must identify the split you want to read such as `train` or
 `validation`. If you also need to select a particular dataset configuration, include its
 name before the split: for example, `hf://org/name/config/train`.
 
-Whenever you are training from datasets in remote locations (e.g., object storage, Hugging
-Face, or a DFS) we recommend that you enable Zephon's *shard cache*. The shard cache
-functions — as implied by the name — as a node-local intermediate storage for the shards
-we are currently training on, to avoid repeated download of the same files from the remote
-location.
+Reading shards directly from object storage or Hugging Face requires Zephon's *shard
+cache*. Zephon downloads whole shards into this node-local storage before reading samples
+from them. For datasets exposed as filesystem paths, including distributed filesystems
+and FUSE mounts, the cache is optional and can help avoid repeated reads from remote
+storage.
+
+Caching is disabled by default. A remote dataset URI does not enable it automatically:
+choose where downloaded shards should live and how much disk space they may use. Setting
+`CacheOptions(root=...)` with a nonempty path enables caching when `enabled` is omitted.
+An explicit `enabled=False` takes precedence, including across option merges. Setting only a size
+limit does not enable caching.
 
 This requires there to be a local filesystem directory on each of the training nodes that
 is used for storing copies of the shards that the workers on that node are currently
 processing samples from. You need to configure this local cache directory and its size
-limit before starting the run:
+limit before starting the run. The example below shows all three settings together:
 
-1. The name of the local filesystem directory that should be used for caching shards: the
-   default directory if you do not specify one is `~/.cache/zephon`; we recommend that
-   this directory is backed by very fast local storage like NVMe.
-2. A size limit for the shard cache: before preparing another shard, Zephon will evict the
-   least recently used shards from the cache as needed to make room within this limit. The
-   size limit must be high enough to accommodate the shard being prepared, including
+1. Enablement: `enabled=True` makes the choice explicit. You can omit it when supplying a
+   cache root; `enabled=False` disables the cache even when a root is configured.
+2. Placement: set `root` to a local filesystem directory backed by fast storage such as
+   NVMe. Enabling the cache without a root uses `~/.cache/zephon`.
+3. Budget: set `limit_bytes` to bound the shard cache. Before preparing another shard,
+   Zephon will evict the least recently used shards as needed to make room within this
+   limit. The size limit must be high enough to accommodate the shard being prepared, including
    compressed and decompressed copies if the upstream format is compressed. Although this
    limit is disabled by default, we strongly recommend setting a limit that is safely
    below the disk capacity available to the workers.
+
+```{literalinclude} ../../../examples/guide/datasets/storage_configuration.py
+:language: python
+:caption: examples/guide/datasets/storage_configuration.py
+```
 
 Note that this cache is another reason we have introduced the shard abstraction above
 samples. Having one file per sample would, especially for cases with smaller samples such
@@ -80,11 +92,6 @@ node over the same datasets, set `persist_state=True` in `CacheOptions` so the n
 reuses the shards already on disk. The next job reuses them only if it reads exactly the
 same shards; any difference, such as an added dataset, wipes the cache as before. Reused
 shards count toward `limit_bytes` and are evicted like any other shard.
-
-```{literalinclude} ../../../examples/guide/datasets/storage_configuration.py
-:language: python
-:caption: examples/guide/datasets/storage_configuration.py
-```
 
 :::{warning}
 **Direct reads from S3.** Some object storage services like S3 introduced the option to

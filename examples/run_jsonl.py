@@ -32,7 +32,11 @@ def build_pipeline() -> PublicPipeline:
         parallelism=1,
         padding=True,
     )
-    pipe = pipe.options(io_options={"cache": {"enabled": True, "root": cache_root}})
+    pipe = pipe.options(
+        io_options={
+            "cache": {"enabled": True, "root": cache_root, "limit_bytes": 64 << 20}
+        }
+    )
     pipe = pipe.batch(microbatch_size=2, drop_last=False)
     return pipe
 
