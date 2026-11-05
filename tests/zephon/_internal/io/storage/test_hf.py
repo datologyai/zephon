@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import posixpath
+import sys
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -167,6 +168,64 @@ class TestHubClient:
         http.on("GET", f"{_API}/revision/main", _Resp(status))
         with pytest.raises(error):
             HFBackend().commit_for("org/repo", "main")
+
+    @pytest.mark.parametrize("status", [401, 403])
+    @pytest.mark.parametrize(
+        ("version", "command"),
+        [
+            ("0.25.0", "huggingface-cli login"),
+            ("0.33.5", "huggingface-cli login"),
+            ("0.34.0rc1", "huggingface-cli login"),
+            ("0.34.0", "hf auth login"),
+            ("0.34.0+local", "hf auth login"),
+            ("1.0.0rc1", "hf auth login"),
+            ("2.4.0", "hf auth login"),
+        ],
+    )
+    def test_auth_error_suggests_installed_login_command(
+        self,
+        http: _FakeHTTP,
+        monkeypatch: pytest.MonkeyPatch,
+        status: int,
+        version: str,
+        command: str,
+    ) -> None:
+        monkeypatch.setitem(
+            sys.modules, "huggingface_hub", SimpleNamespace(__version__=version)
+        )
+        http.on("GET", f"{_API}/revision/main", _Resp(status))
+
+        with pytest.raises(PermissionError) as exc:
+            HFBackend().commit_for("org/repo", "main")
+
+        assert str(exc.value) == (
+            f"hf:// access denied: hf://org/repo@main; set HF_TOKEN or run `{command}`."
+        )
+
+    @pytest.mark.parametrize(
+        "failure", ["missing-package", "invalid-version", "unexpected"]
+    )
+    def test_auth_error_keeps_both_commands_when_version_detection_fails(
+        self, http: _FakeHTTP, monkeypatch: pytest.MonkeyPatch, failure: str
+    ) -> None:
+        hub = (
+            None if failure == "missing-package" else SimpleNamespace(__version__="bad")
+        )
+        monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+        if failure == "unexpected":
+            monkeypatch.setattr(
+                "packaging.version.Version",
+                MagicMock(side_effect=RuntimeError("failed")),
+            )
+        http.on("GET", f"{_API}/revision/main", _Resp(403))
+
+        with pytest.raises(PermissionError) as exc:
+            HFBackend().commit_for("org/repo", "main")
+
+        assert str(exc.value) == (
+            "hf:// access denied: hf://org/repo@main; set HF_TOKEN or run `hf auth login` "
+            "(`huggingface-cli login` for huggingface_hub<0.34)."
+        )
 
     def test_conversion_commit(self, http: _FakeHTTP) -> None:
         refs = {
@@ -589,7 +648,7 @@ class TestDownload:
             raise HfHubHTTPError("forbidden", response=forbidden)
 
         with patch("huggingface_hub.file_download.http_get", side_effect=fake_http_get):
-            with pytest.raises(PermissionError):
+            with pytest.raises(PermissionError, match="set HF_TOKEN or run"):
                 HFBackend().download(
                     f"{FROZEN_ORIGINAL}/{self._NAME}", str(tmp_path / "o")
                 )
@@ -704,8 +763,8 @@ class TestXetDownload:
         ("status", "expected", "message"),
         [
             (404, FileNotFoundError, "No such hf:// file"),
-            (401, PermissionError, "hf auth login"),
-            (403, PermissionError, "hf auth login"),
+            (401, PermissionError, "set HF_TOKEN or run"),
+            (403, PermissionError, "set HF_TOKEN or run"),
             (500, Exception, "failed"),
         ],
     )

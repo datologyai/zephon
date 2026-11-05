@@ -80,6 +80,26 @@ _xet_lookup_retry_at: dict[str, float] = {}
 _XET_LOOKUP_RETRY_SECONDS = 60.0
 
 
+def _auth_error_message(path: str) -> str:
+    """Suggest the login command supported by the installed Hub version."""
+    try:
+        import huggingface_hub
+        from packaging.version import Version
+
+        command = (
+            "huggingface-cli login"
+            if Version(huggingface_hub.__version__) < Version("0.34.0")
+            else "hf auth login"
+        )
+        hint = f"set HF_TOKEN or run `{command}`."
+    except Exception:
+        hint = (
+            "set HF_TOKEN or run `hf auth login` "
+            "(`huggingface-cli login` for huggingface_hub<0.34)."
+        )
+    return f"hf:// access denied: {path}; {hint}"
+
+
 def _key_lock(key: tuple[str | bool | None, ...]) -> threading.Lock:
     with _memo_lock:
         return _key_locks.setdefault(tuple(str(part) for part in key), threading.Lock())
@@ -182,10 +202,7 @@ class HFBackend(OpenViaDownloadMixin):
         if status == 404:
             raise FileNotFoundError(f"hf:// object not found: {what}")
         if status in (401, 403):
-            raise PermissionError(
-                f"hf:// access denied: {what}; "
-                "set HF_TOKEN or run `huggingface-cli login`."
-            )
+            raise PermissionError(_auth_error_message(what))
         resp.raise_for_status()
 
     def _get_token(self) -> str | None:
@@ -599,10 +616,7 @@ class HFBackend(OpenViaDownloadMixin):
                 raise FileNotFoundError(f"No such hf:// file: {src}") from exc
             if status in (401, 403):
                 self._unlink_quiet(incomplete)
-                raise PermissionError(
-                    f"hf:// access denied: {src}; "
-                    "set HF_TOKEN or run `huggingface-cli login`."
-                ) from exc
+                raise PermissionError(_auth_error_message(src)) from exc
             # Transient HTTP failure (5xx etc.): keep ``.incomplete`` so a
             # caller-driven retry can resume from the current offset.
             raise
@@ -691,9 +705,7 @@ class HFBackend(OpenViaDownloadMixin):
             if status == 404:
                 raise FileNotFoundError(f"No such hf:// file: {src}") from exc
             if status in (401, 403):
-                raise PermissionError(
-                    f"hf:// access denied: {src}; set HF_TOKEN or run `hf auth login`."
-                ) from exc
+                raise PermissionError(_auth_error_message(src)) from exc
             raise
         finally:
             self._unlink_quiet(incomplete)
