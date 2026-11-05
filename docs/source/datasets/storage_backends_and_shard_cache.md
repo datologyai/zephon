@@ -29,34 +29,28 @@ available. The path must identify the split you want to read such as `train` or
 `validation`. If you also need to select a particular dataset configuration, include its
 name before the split: for example, `hf://org/name/config/train`.
 
-When you train on datasets stored in object storage or on Hugging Face, Zephon needs to
-download the shards to a local *shard cache* before it can read them. The cache keeps
-these files close to the training workers, so samples from the same shard do not require
-repeated downloads. If you access your data through a filesystem path, such as a DFS or
-FUSE mount, the cache is optional, but can also help avoid repeated reads from remote
-storage.
+Whenever you are training from datasets in remote locations (e.g., object storage, Hugging
+Face, or a DFS) we recommend that you enable Zephon's *shard cache*. The shard cache
+functions — as implied by the name — as a node-local intermediate storage for the shards
+we are currently training on, to avoid repeated download of the same files from the remote
+location.
 
-The cache is off by default. You can turn it on with `enabled=True`, or by choosing a
-cache directory with `root`. Before starting the run, choose a directory and size limit
-that fit each training node:
+Reading directly from object storage or Hugging Face requires the shard cache.
 
-1. The local filesystem directory to use for downloaded shards, set with `root`. We
-   recommend fast local storage like NVMe. If you enable the cache without choosing a
-   directory, Zephon uses `~/.cache/zephon`.
-2. A size limit for the shard cache, set with `limit_bytes`: before preparing another
-   shard, Zephon will evict the least recently used shards as needed to make room within
-   this limit. The size limit must be high enough to accommodate the shard being prepared, including
+This requires there to be a local filesystem directory on each of the training nodes that
+is used for storing copies of the shards that the workers on that node are currently
+processing samples from. You need to configure this local cache directory and its size
+limit before starting the run:
+
+1. The name of the local filesystem directory that should be used for caching shards: the
+   default directory if you do not specify one is `~/.cache/zephon`; we recommend that
+   this directory is backed by very fast local storage like NVMe.
+2. A size limit for the shard cache: before preparing another shard, Zephon will evict the
+   least recently used shards from the cache as needed to make room within this limit. The
+   size limit must be high enough to accommodate the shard being prepared, including
    compressed and decompressed copies if the upstream format is compressed. Although this
    limit is disabled by default, we strongly recommend setting a limit that is safely
    below the disk capacity available to the workers.
-
-```{literalinclude} ../../../examples/guide/datasets/storage_configuration.py
-:language: python
-:caption: examples/guide/datasets/storage_configuration.py
-```
-
-If you have a cache directory configured but want to read directly from a filesystem
-instead, set `enabled=False`.
 
 Note that this cache is another reason we have introduced the shard abstraction above
 samples. Having one file per sample would, especially for cases with smaller samples such
@@ -88,6 +82,14 @@ node over the same datasets, set `persist_state=True` in `CacheOptions` so the n
 reuses the shards already on disk. The next job reuses them only if it reads exactly the
 same shards; any difference, such as an added dataset, wipes the cache as before. Reused
 shards count toward `limit_bytes` and are evicted like any other shard.
+
+The cache is disabled by default. Enable it with `enabled=True` or by setting `root`.
+An explicit `enabled=False` keeps it disabled even when `root` is set.
+
+```{literalinclude} ../../../examples/guide/datasets/storage_configuration.py
+:language: python
+:caption: examples/guide/datasets/storage_configuration.py
+```
 
 :::{warning}
 **Direct reads from S3.** Some object storage services like S3 introduced the option to
