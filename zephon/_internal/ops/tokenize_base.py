@@ -107,6 +107,10 @@ class TokenizeBase(BaseOp):
     def _finalize_setup(self) -> None:
         """Post-load, per-op configuration; failures are cached and re-raised."""
 
+    def _preflight_setup(self) -> None:
+        """Run every setup check, including ones that execution defers."""
+        self._setup_tokenizer()
+
     def _cache_preflight_result(self, probe: TokenizeBase) -> None:
         """Retain reusable checks without copying the probe's initialized tokenizer."""
 

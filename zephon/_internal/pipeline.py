@@ -45,6 +45,7 @@ from zephon._internal.ops.prefetch import PrefetchOp
 from zephon._internal.ops.shuffle_buffer import ShuffleBuffer
 from zephon._internal.ops.tokenize_base import TokenizeBase
 from zephon._internal.ops.tokenize_chat import TokenizeChat, _resolve_loss_scope
+from zephon._internal.ops.tokenize_mixed import TokenizeMixed
 from zephon._internal.ops.tokenize_text import TokenizeText
 from zephon._internal.planner import Planner
 from zephon._internal.runtime_spec import (
@@ -931,6 +932,7 @@ class Pipeline:
         eos_token_id: int | None = None,
         field: str = "messages",
         max_length: int | None = None,
+        split_long_samples: bool = False,
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
         span_source: SpanSource = "auto",
@@ -958,7 +960,9 @@ class Pipeline:
         Output replaces the payload with aligned, unshifted NumPy arrays:
         ``input_ids`` (int64) and ``loss_mask`` (uint8; rename via ``mask_field_out``).
         Ones mark target tokens. ``preserve_upstream_payload=True`` retains other
-        fields; ``max_length`` truncates the output.
+        fields; ``max_length`` truncates the output, or with
+        ``split_long_samples=True`` splits it into ``max_length`` chunks whose
+        first tokens are unsupervised; chunks without supervised tokens are dropped.
         Samples with fewer than two tokens or no supervised tokens are dropped.
 
         Targets come from ``{% generation %}`` blocks. Untagged templates infer
@@ -1009,6 +1013,7 @@ class Pipeline:
             eos_token_id=eos_token_id,
             field=field,
             max_length=max_length,
+            split_long_samples=split_long_samples,
             chat_template=chat_template,
             apply_chat_template=apply_chat_template,
             span_source=span_source,
@@ -1022,6 +1027,102 @@ class Pipeline:
         )
         node = self._graph.add(
             "tokenize_chat",
+            op,
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
+        self._tail = node
+        return self
+
+    @_mutates_graph
+    def tokenize_mixed(
+        self,
+        tokenizer: Any | None = None,
+        tokenizer_id: str | None = None,
+        *,
+        eos_token: str | None = None,
+        max_length: int | None = None,
+        truncation: bool = False,
+        split_long_samples: bool = False,
+        text_field: str = "text",
+        text_special_tokens: SpecialTokensMode = "bos_eos",
+        text_bos_token_id: int | None = None,
+        text_eos_token_id: int | None = None,
+        chat_field: str = "messages",
+        chat_special_tokens: ChatSpecialTokensMode | None = None,
+        chat_bos_token_id: int | None = None,
+        chat_eos_token_id: int | None = None,
+        chat_template: str | os.PathLike[str] | None = None,
+        apply_chat_template: bool = True,
+        span_source: SpanSource = "auto",
+        supervise_assistant_header: bool = False,
+        loss_scope: LossScope = "all_assistant",
+        chat_template_kwargs: Mapping[str, Any] | None = None,
+        tools_field: str = "tools",
+        enable_thinking_field: str = "enable_thinking",
+        mask_field_out: str = "loss_mask",
+        placement: str = "auto",
+        parallelism: Optional[int] = None,
+    ) -> "Pipeline":
+        """Tokenize a stream that mixes plain-text documents and conversations.
+
+        Records whose payload has a non-null ``chat_field`` are tokenized as
+        ``tokenize_chat`` would tokenize them; all others are tokenized from
+        ``text_field`` as ``tokenize`` would. Options prefixed ``text_`` or
+        ``chat_`` behave like the same option on that operator and keep its
+        default, so special tokens and overflow handling match the standalone
+        operators. Both paths share one fast Hugging Face tokenizer.
+
+        Output replaces the payload with unshifted NumPy arrays ``input_ids``
+        (int64) and ``loss_mask`` (uint8; rename via ``mask_field_out``), so text
+        and chat records can be packed together. Text records supervise every
+        token except the first; chat records follow ``loss_scope``. The first
+        token of every record is unsupervised, so packed training never learns a
+        prediction across a document boundary. Neither path emits an
+        ``attention_mask`` and text is never padded;
+        ``to_training(return_padding_mask=True)`` marks padding added later.
+
+        ``max_length``, ``truncation`` and ``split_long_samples`` are shared. As
+        with ``tokenize``, text applies ``max_length`` only with ``truncation``
+        or ``split_long_samples``. As with ``tokenize_chat``, chat truncates to
+        it unless ``split_long_samples`` is set. Split chunks are separate
+        records whose first tokens are unsupervised; chat chunks without
+        supervised tokens are dropped.
+
+        The remaining options match ``tokenize_chat``. Each worker prepares the
+        chat template on its first chat record, so streams without chat records
+        never need one; ``preflight_tokenizers()`` still checks the chat path
+        before iteration. For token-aware mixtures, calibration counts each
+        sample with the path it would take.
+        """
+        op = TokenizeMixed(
+            tokenizer,
+            tokenizer_id,
+            eos_token=eos_token,
+            max_length=max_length,
+            truncation=truncation,
+            split_long_samples=split_long_samples,
+            text_field=text_field,
+            text_special_tokens=text_special_tokens,
+            text_bos_token_id=text_bos_token_id,
+            text_eos_token_id=text_eos_token_id,
+            chat_field=chat_field,
+            chat_special_tokens=chat_special_tokens,
+            chat_bos_token_id=chat_bos_token_id,
+            chat_eos_token_id=chat_eos_token_id,
+            chat_template=chat_template,
+            apply_chat_template=apply_chat_template,
+            span_source=span_source,
+            supervise_assistant_header=supervise_assistant_header,
+            loss_scope=loss_scope,
+            chat_template_kwargs=chat_template_kwargs,
+            tools_field=tools_field,
+            enable_thinking_field=enable_thinking_field,
+            mask_field_out=mask_field_out,
+        )
+        node = self._graph.add(
+            "tokenize_mixed",
             op,
             self._tail,
             placement=placement,

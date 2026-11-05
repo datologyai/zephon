@@ -91,7 +91,32 @@ Non-object arguments use additional verification renders, cached by exact value.
 Templates that cannot render the verification probe or attribute the affected output
 fail verification. These are supervision checks; they do not validate JSON syntax.
 
-By default, both tokenization operators replace the original record payload with their
+**Mixing text and chat.** Some recipes train on plain documents and chat traces in the
+same stream, for example web text supervised on every token alongside conversations
+supervised only on the assistant's turns. The `tokenize_mixed` operator routes each
+record by its contents: records with a non-null `messages` field go through the chat
+template like `tokenize_chat`, and all other records are tokenized from `text` like
+`tokenize`. Both paths share one tokenizer and emit the same `input_ids` and
+`loss_mask` fields, so they can be packed together:
+
+```{literalinclude} ../../../examples/guide/pipelines/tokenize_mixed.py
+:language: python
+:caption: examples/guide/pipelines/tokenize_mixed.py
+```
+
+Each path behaves like its standalone operator. Options prefixed `text_` or `chat_`
+keep that operator's defaults, so text records get `tokenize`'s BOS/EOS brackets and chat
+records get `tokenize_chat`'s template tokens and final EOS. Text records supervise
+every token except the first, matching the chat operator's rule that a document's
+first token is never a target after packing. `max_length`, `truncation` and
+`split_long_samples` are shared: text applies `max_length` only with `truncation` or
+`split_long_samples`, as `tokenize` does, and chat truncates to it unless
+`split_long_samples` splits long conversations into chunks. Unlike `tokenize`, the
+mixed operator emits no `attention_mask`, so text and chat records have the same
+fields; if your model needs a padding mask, request one with
+`to_training(return_padding_mask=True)`.
+
+By default, the tokenization operators replace the original record payload with their
 tokenized output. If later operations in your pipeline need access to the original fields,
 set `preserve_upstream_payload=True` to retain those fields along with the tokenized
 output. We recommend to check out the full docstring of all options.

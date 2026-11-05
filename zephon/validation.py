@@ -1789,7 +1789,7 @@ def preflight_tokenizers(pipeline: "Pipeline") -> ValidationReport:
         tokenizer_id = op.configured_tokenizer_id()
         try:
             probe = copy.deepcopy(op)
-            probe._setup_tokenizer()
+            probe._preflight_setup()
             op._cache_preflight_result(probe)
         except Exception as exc:
             report.issues.append(

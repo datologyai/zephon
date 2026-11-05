@@ -2080,3 +2080,77 @@ def test_tool_loop_rebinding_inside_generation_retains_message_owner(
         CYCLE,
     )
     assert result.payload["loss_mask"].any()
+
+
+# Splitting long conversations
+
+
+def _split_op(fast_tokenizer: Any, **kwargs: Any) -> TokenizeChat:
+    return TokenizeChat(
+        fast_tokenizer,
+        chat_template=TAGGED_TEMPLATE,
+        max_length=8,
+        split_long_samples=True,
+        **kwargs,
+    )
+
+
+def test_split_chunks_the_untruncated_sample(fast_tokenizer: Any) -> None:
+    whole = _run_one(
+        TokenizeChat(fast_tokenizer, chat_template=TAGGED_TEMPLATE),
+        {"messages": CONVERSATION},
+    )
+    out = _split_op(fast_tokenizer).process_many([_rec({"messages": CONVERSATION})])
+    # 22 tokens make chunks [0, 8), [8, 16) and [16, 22). The middle chunk holds
+    # only the second user turn, so it is dropped; it does not close the sample.
+    assert [r.meta.lineage for r in out] == [(0,), (2,)]
+    assert not any(r.meta.tombstone for r in out)
+    ids = _payload(whole)["input_ids"].tolist()
+    mask = _mask(whole)
+    assert _payload(out[0])["input_ids"].tolist() == ids[:8]
+    assert _payload(out[1])["input_ids"].tolist() == ids[16:]
+    assert _mask(out[0]) == mask[:8]
+    # Each chunk is its own document after packing: its first token is no target.
+    assert _mask(out[1]) == [0] + mask[17:]
+
+
+def test_split_drops_an_unsupervised_final_chunk_with_a_tombstone(
+    fast_tokenizer: Any,
+) -> None:
+    messages = [*CONVERSATION, {"role": "user", "content": "thanks"}]
+    out = _split_op(fast_tokenizer).process_many([_rec({"messages": messages})])
+    # 25 tokens: the final one-token chunk is unsupervised but closes the sample.
+    assert [(r.meta.lineage, r.meta.tombstone) for r in out] == [
+        ((0,), False),
+        ((2,), False),
+        ((3,), True),
+    ]
+
+
+def test_split_leaves_short_samples_whole(fast_tokenizer: Any) -> None:
+    short = {"messages": _messages(("user", "hi"), ("assistant", "hello"))}
+    [out] = _split_op(fast_tokenizer).process_many([_rec(short)])
+    assert out.meta.lineage == ()
+    assert len(_payload(out)["input_ids"]) <= 8
+
+
+def test_split_appends_the_final_eos_before_chunking(fast_tokenizer: Any) -> None:
+    op = _split_op(fast_tokenizer, special_tokens="eos")
+    out = op.process_many([_rec({"messages": CONVERSATION})])
+    eos = fast_tokenizer.eos_token_id
+    assert _payload(out[-1])["input_ids"].tolist()[-1] == eos
+    assert _mask(out[-1])[-1] == 1
+
+
+def test_split_requires_max_length(fast_tokenizer: Any) -> None:
+    with pytest.raises(ValueError, match="split_long_samples requires max_length"):
+        TokenizeChat(fast_tokenizer, split_long_samples=True)
+
+
+def test_split_counting_matches_delivery(fast_tokenizer: Any) -> None:
+    op = _split_op(fast_tokenizer)
+    out = op.process_many([_rec({"messages": CONVERSATION})])
+    plan = op.token_counting_spec().build_counter().plan([])
+    assert plan.count({"messages": CONVERSATION}) == sum(
+        len(_payload(r)["input_ids"]) for r in out
+    )

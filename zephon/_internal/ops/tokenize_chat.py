@@ -37,7 +37,7 @@ from zephon._internal.utils.tokenizer import (
     selected_assistant_indices,
     thread_salted_template,
 )
-from zephon.ops.children import tombstones_for_record
+from zephon.ops.children import spawn_child, tombstones_for_record
 from zephon.ops.config import (
     ChatSpecialTokensMode,
     LossScope,
@@ -282,6 +282,7 @@ class TokenizeChat(TokenizeBase):
         eos_token_id: int | None = None,
         field: str = "messages",
         max_length: int | None = None,
+        split_long_samples: bool = False,
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
         span_source: SpanSource = "auto",
@@ -324,6 +325,10 @@ class TokenizeChat(TokenizeBase):
                 document modes reserve space before truncating content. A
                 right-truncated answer does not supervise an added outer EOS
                 under assistant-scoped loss.
+            split_long_samples: Split conversations longer than ``max_length``
+                into ``max_length`` chunks instead of truncating them. Each chunk
+                is a separate record whose first token is unsupervised; chunks
+                without supervised tokens are dropped. Requires ``max_length``.
             chat_template: Jinja text, file path, or any named tokenizer template.
                 None uses the tokenizer's own template. For a dictionary, HF selects
                 tool_use when available and the document's tools field is not None
@@ -379,6 +384,8 @@ class TokenizeChat(TokenizeBase):
             chat_template=chat_template,
             loss_scope=loss_scope,
         )
+        if split_long_samples and max_length is None:
+            raise ValueError("split_long_samples requires max_length")
         if max_length is not None and max_length < 2:
             raise ValueError(
                 f"max_length={max_length} cannot hold a shifted training pair; "
@@ -419,9 +426,13 @@ class TokenizeChat(TokenizeBase):
         self.field = field
         self._field_path: tuple[str, ...] = tuple(field.split("."))
         self.max_length = max_length
+        self.split_long_samples = split_long_samples
         self.special_tokens: ChatSpecialTokensMode | None = special_tokens
+        # Split mode tokenizes the complete conversation and chunks it afterwards.
         self._content_max_length = (
-            None if max_length is None else max_length - num_brackets
+            None
+            if max_length is None or split_long_samples
+            else max_length - num_brackets
         )
         self._append_assistant_eos = not apply_chat_template and special_tokens in (
             None,
@@ -963,7 +974,11 @@ class TokenizeChat(TokenizeBase):
             and self._eos_token_id is not None
             and ids
             and ids[-1] != self._eos_token_id
-            and (self.max_length is None or len(ids) < self.max_length)
+            and (
+                self.max_length is None
+                or self.split_long_samples
+                or len(ids) < self.max_length
+            )
         ):
             ids.append(self._eos_token_id)
             if mask is not None:
@@ -1064,8 +1079,40 @@ class TokenizeChat(TokenizeBase):
         result = self._tokenize_delivery(payload, "<calibration>")
         if isinstance(result, str):
             return 0
-        ids, _ = result
-        return len(ids)
+        _, mask = result
+        return sum(
+            end - start
+            for start, end, chunk_mask in self._chunks(mask)
+            if chunk_mask.any()
+        )
+
+    def _chunks(self, mask: "np.ndarray") -> list[tuple[int, int, "np.ndarray"]]:
+        """Return ``(start, end, mask)`` for each delivered chunk.
+
+        Without splitting, the sample is one chunk. Split chunks are separate
+        documents after packing, so each chunk's first token is unsupervised.
+        """
+        if not self.split_long_samples or len(mask) <= cast(int, self.max_length):
+            return [(0, len(mask), mask)]
+        size = cast(int, self.max_length)
+        chunks: list[tuple[int, int, np.ndarray]] = []
+        for start in range(0, len(mask), size):
+            end = min(start + size, len(mask))
+            chunk_mask = mask[start:end].copy()
+            chunk_mask[0] = 0
+            chunks.append((start, end, chunk_mask))
+        return chunks
+
+    def _output_payload(
+        self, record: SampleRecord, ids: Sequence[int], mask: "np.ndarray"
+    ) -> SamplePayloadDict:
+        upstream = record.payload if isinstance(record.payload, Mapping) else None
+        payload: SamplePayloadDict = (
+            dict(upstream) if (self.preserve_upstream_payload and upstream) else {}
+        )
+        payload["input_ids"] = np.asarray(ids, dtype=np.int64)
+        payload[self.mask_field_out] = mask
+        return payload
 
     def _process_record(self, record: SampleRecord) -> list[SampleRecord]:
         if record.meta.tombstone:
@@ -1098,14 +1145,26 @@ class TokenizeChat(TokenizeBase):
             return tombstones_for_record(record)
 
         ids, mask = result
-        upstream = record.payload if isinstance(record.payload, Mapping) else None
-        payload: SamplePayloadDict = (
-            dict(upstream) if (self.preserve_upstream_payload and upstream) else {}
-        )
-        payload["input_ids"] = np.asarray(ids, dtype=np.int64)
-        payload[self.mask_field_out] = mask
-        record.payload = payload
-        return [record]
+        chunks = self._chunks(mask)
+        if len(chunks) == 1:
+            record.payload = self._output_payload(record, ids, mask)
+            return [record]
+
+        outputs: list[SampleRecord] = []
+        last = len(chunks) - 1
+        for index, (start, end, chunk_mask) in enumerate(chunks):
+            child = SampleRecord(
+                meta=spawn_child(record.meta, index, is_last_child=index == last),
+                payload=None,
+            )
+            if chunk_mask.any():
+                child.payload = self._output_payload(record, ids[start:end], chunk_mask)
+                outputs.append(child)
+            else:
+                # Unsupervised chunks are dropped; the last one still closes
+                # the source sample.
+                outputs.extend(tombstones_for_record(child))
+        return outputs
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
         return self._process_record(elem)
@@ -1141,6 +1200,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
 
     field: str = "messages"
     max_length: int | None = None
+    split_long_samples: bool = False
     chat_template: str | None = None
     apply_chat_template: bool = True
     special_tokens: ChatSpecialTokensMode | None = None
@@ -1162,6 +1222,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
             tokenizer_id=op.tokenizer_id,
             field=op.field,
             max_length=op.max_length,
+            split_long_samples=op.split_long_samples,
             chat_template=op.chat_template,
             apply_chat_template=op.apply_chat_template,
             special_tokens=op.special_tokens,
@@ -1185,6 +1246,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
                 eos_token=self.eos_token if self.tokenizer is None else None,
                 field=self.field,
                 max_length=self.max_length,
+                split_long_samples=self.split_long_samples,
                 chat_template=self.chat_template,
                 apply_chat_template=self.apply_chat_template,
                 special_tokens=self.special_tokens,
