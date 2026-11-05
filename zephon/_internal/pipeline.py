@@ -164,6 +164,12 @@ class _TorchPipelineIterableDataset(_RTIterableDatasetBase):
                 "Warning! You seem to be using neither torchdata.StatefulDataloader nor torch.DataLoader. You might want to consider iterating over the Pipeline directly, as the TorchDataset wrapper is mostly used as a tool to integrate with legacy setups that require the DataLoader class."
             )
 
+        # A loaded checkpoint not yet applied (__iter__ applies it lazily) is
+        # the resume position; it supersedes any live or cached runtime state
+        # left over from a previous iteration.
+        if self._pending_ckpt is not None:
+            return {"engine": self._pending_ckpt}
+
         # If an iteration exists (inline engine or live subprocess), or a
         # finished MTP iteration cached its final state, use pipeline.checkpoint().
         p = self._pipeline
@@ -174,8 +180,8 @@ class _TorchPipelineIterableDataset(_RTIterableDatasetBase):
             or p._last_state is not None
         ):
             return {"engine": p.checkpoint()}
-        # If iteration hasn’t begun in this process, return whatever pending state we have (or None).
-        return {"engine": self._pending_ckpt}
+        # Nothing loaded and no iteration has run in this process yet.
+        return {"engine": None}
 
     def load_state_dict(self, sd: dict[str, Any]) -> None:
         if not self._stateful:

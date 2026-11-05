@@ -52,27 +52,28 @@ def test_to_torch_dataset_iterates_pipeline(monkeypatch: pytest.MonkeyPatch) -> 
     assert all(isinstance(x, SampleRecord) for x in out)
 
 
+def _make_six_record_pipe(*, mtp: bool) -> PublicPipeline:
+    rows = [{"text": f"s{i}"} for i in range(6)]
+    ws = FakeIndexableWorkSource(make_inmem_dataset("tiny", rows), chunk_size=3)
+    return (
+        PublicPipeline(ws)
+        .decode_text()
+        .options(
+            deterministic=True,
+            max_workers=1,
+            default_stage_prefetch=0,
+            mtp_mode=mtp,
+        )
+    )
+
+
 @pytest.mark.parametrize("mtp", [False, True])
 def test_stateful_torch_dataset_state_dict_after_exhaustion(
     monkeypatch: pytest.MonkeyPatch, mtp: bool
 ) -> None:
     _install_torch_stubs(monkeypatch)
 
-    def make_pipe() -> PublicPipeline:
-        rows = [{"text": f"s{i}"} for i in range(6)]
-        ws = FakeIndexableWorkSource(make_inmem_dataset("tiny", rows), chunk_size=3)
-        return (
-            PublicPipeline(ws)
-            .decode_text()
-            .options(
-                deterministic=True,
-                max_workers=1,
-                default_stage_prefetch=0,
-                mtp_mode=mtp,
-            )
-        )
-
-    pipe = make_pipe()
+    pipe = _make_six_record_pipe(mtp=mtp)
     torch_ds = pipe.to_torch_dataset(stateful=True)
     assert len(list(iter(torch_ds))) == 6
 
@@ -82,9 +83,34 @@ def test_stateful_torch_dataset_state_dict_after_exhaustion(
     assert state["engine"]["progress"] == pipe.checkpoint()["progress"]
 
     # Resuming from it yields nothing more instead of replaying the epoch.
-    resumed = make_pipe().to_torch_dataset(stateful=True)
+    resumed = _make_six_record_pipe(mtp=mtp).to_torch_dataset(stateful=True)
     resumed.load_state_dict(state)
     assert list(iter(resumed)) == []
+
+
+@pytest.mark.parametrize("mtp", [False, True])
+def test_stateful_torch_dataset_resave_loaded_state_after_exhaustion(
+    monkeypatch: pytest.MonkeyPatch, mtp: bool
+) -> None:
+    _install_torch_stubs(monkeypatch)
+
+    torch_ds = _make_six_record_pipe(mtp=mtp).to_torch_dataset(stateful=True)
+    it = iter(torch_ds)
+    next(it)
+    next(it)
+    saved_after_two = torch_ds.state_dict()
+    assert len(list(it)) == 4
+
+    # Loading a checkpoint into an exhausted dataset and saving again before
+    # iterating must return the loaded position, not the previous iteration's
+    # end-of-stream state.
+    torch_ds.load_state_dict(saved_after_two)
+    resaved = torch_ds.state_dict()
+    assert resaved == saved_after_two
+
+    resumed = _make_six_record_pipe(mtp=mtp).to_torch_dataset(stateful=True)
+    resumed.load_state_dict(resaved)
+    assert len(list(iter(resumed))) == 4
 
 
 def test_to_indexable_torch_dataset_with_indexable_pipeline(
