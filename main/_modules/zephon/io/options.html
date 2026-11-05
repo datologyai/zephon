@@ -440,7 +440,13 @@
 <a class="viewcode-back" href="../../../api/datasets.html#zephon.io.CacheOptions">[docs]</a>
 <span class="nd">@dataclass</span>
 <span class="k">class</span><span class="w"> </span><span class="nc">CacheOptions</span><span class="p">:</span>
-<span class="w">    </span><span class="sd">"""On-disk shard-cache configuration."""</span>
+<span class="w">    </span><span class="sd">"""On-disk shard-cache configuration.</span>
+
+<span class="sd">    Supplying a nonempty ``root`` enables caching when ``enabled`` is omitted.</span>
+<span class="sd">    An explicit ``enabled=False`` takes precedence, including across option</span>
+<span class="sd">    merges. Without a supplied root or enablement, caching stays disabled.</span>
+<span class="sd">    Configure ``limit_bytes`` to bound disk usage; its default is unlimited.</span>
+<span class="sd">    """</span>
 
     <span class="n">enabled</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="n">_option</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
     <span class="n">root</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Path</span> <span class="o">=</span> <span class="n">_option</span><span class="p">(</span><span class="n">Path</span><span class="p">(</span><span class="s2">"~/.cache/zephon"</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">())</span>
@@ -464,9 +470,22 @@
         <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
         <span class="n">compare</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
     <span class="p">)</span>
+    <span class="n">_root_was_reset</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">init</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="nb">repr</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">compare</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="c1"># Raw dataclass inputs can include the None reset before normalization.</span>
+        <span class="n">raw_root</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_root_was_reset</span> <span class="o">=</span> <span class="n">raw_root</span> <span class="ow">is</span> <span class="kc">None</span>
         <span class="n">_normalize_options</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+        <span class="k">if</span> <span class="p">(</span>
+            <span class="s2">"root"</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_provided_fields</span>
+            <span class="ow">and</span> <span class="s2">"enabled"</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_provided_fields</span>
+            <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_root_was_reset</span>
+            <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span>
+        <span class="p">):</span>
+            <span class="c1"># Keep inferred enablement out of _provided_fields so a root-only</span>
+            <span class="c1"># override cannot replace an explicit disable during a merge.</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">enabled</span> <span class="o">=</span> <span class="kc">True</span>
 
 <div class="viewcode-block" id="CacheOptions.from_any">
 <a class="viewcode-back" href="../../../api/datasets.html#zephon.io.CacheOptions.from_any">[docs]</a>
@@ -490,7 +509,13 @@
 <a class="viewcode-back" href="../../../api/datasets.html#zephon.io.CacheOptions.merge">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">merge</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">:</span> <span class="s2">"CacheOptions"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">"CacheOptions"</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">"""Overlay fields supplied by ``other`` onto ``self``."""</span>
-        <span class="k">return</span> <span class="n">CacheOptions</span><span class="p">(</span><span class="o">**</span><span class="n">_merged_options</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">))</span></div>
+        <span class="n">merged</span> <span class="o">=</span> <span class="n">_merged_options</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">)</span>
+        <span class="n">root_source</span> <span class="o">=</span> <span class="n">other</span> <span class="k">if</span> <span class="s2">"root"</span> <span class="ow">in</span> <span class="n">other</span><span class="o">.</span><span class="n">_provided_fields</span> <span class="k">else</span> <span class="bp">self</span>
+        <span class="k">if</span> <span class="n">root_source</span><span class="o">.</span><span class="n">_root_was_reset</span><span class="p">:</span>
+            <span class="c1"># Preserve a root reset rather than inferring enablement from the</span>
+            <span class="c1"># default path installed by _normalize_options.</span>
+            <span class="n">merged</span><span class="p">[</span><span class="s2">"root"</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">return</span> <span class="n">CacheOptions</span><span class="p">(</span><span class="o">**</span><span class="n">merged</span><span class="p">)</span></div>
 </div>
 
 

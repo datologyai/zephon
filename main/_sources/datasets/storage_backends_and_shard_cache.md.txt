@@ -29,11 +29,11 @@ available. The path must identify the split you want to read such as `train` or
 `validation`. If you also need to select a particular dataset configuration, include its
 name before the split: for example, `hf://org/name/config/train`.
 
-Whenever you are training from datasets in remote locations (e.g., object storage, Hugging
-Face, or a DFS) we recommend that you enable Zephon's *shard cache*. The shard cache
-functions — as implied by the name — as a node-local intermediate storage for the shards
-we are currently training on, to avoid repeated download of the same files from the remote
-location.
+Whenever you are training from datasets in object storage or on Hugging Face, you need to
+enable Zephon's *shard cache*. For datasets on a DFS, the cache can also help improve
+throughput. The shard cache functions — as implied by the name — as a node-local
+intermediate storage for the shards we are currently training on, to avoid repeated
+download of the same files from the remote location.
 
 This requires there to be a local filesystem directory on each of the training nodes that
 is used for storing copies of the shards that the workers on that node are currently
@@ -80,6 +80,9 @@ node over the same datasets, set `persist_state=True` in `CacheOptions` so the n
 reuses the shards already on disk. The next job reuses them only if it reads exactly the
 same shards; any difference, such as an added dataset, wipes the cache as before. Reused
 shards count toward `limit_bytes` and are evicted like any other shard.
+
+The cache is disabled by default. Enable it with `enabled=True` or by setting `root`.
+An explicit `enabled=False` keeps it disabled even when `root` is set.
 
 ```{literalinclude} ../../../examples/guide/datasets/storage_configuration.py
 :language: python
