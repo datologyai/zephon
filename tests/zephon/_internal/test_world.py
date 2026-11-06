@@ -23,8 +23,6 @@ def test_world_defaults() -> None:
         (32, 8, 8, 1, "Use canonical_replicas=4, or an output batch size of 4."),
         (48, 4, 8, 2, "Use canonical_replicas=6 or 12, or an output batch size of 3."),
         (12, 4, 2, 2, "a multiple of 8, or an output batch size of 3."),
-        # Every lane fits the step, but four DP groups cannot share six lanes.
-        (24, 4, 6, 4, "Use a global_batch_size that is a multiple of 16."),
     ],
 )
 def test_lane_window_check_names_layouts_that_fit(

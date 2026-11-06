@@ -295,19 +295,9 @@ class Engine:
         self._opts = opts
         self._mp_context = self._resolve_mp_context(self._opts.mp_context)
         self._world = self._build_world()
-        global_batch_size = self._opts.global_batch_size
-        if global_batch_size is not None:
-            if (
-                isinstance(global_batch_size, bool)
-                or not isinstance(global_batch_size, int)
-                or global_batch_size <= 0
-            ):
-                raise ValueError(
-                    "global_batch_size must be a positive integer, got "
-                    f"{global_batch_size!r}"
-                )
+        if self._opts.global_batch_size is not None:
             check_step_lane_windows(
-                global_batch_size,
+                self._opts.global_batch_size,
                 self._plan.batch_size_hint or 1,
                 self._world.canonical_replicas,
                 self._world.dp_degree,
@@ -541,6 +531,16 @@ class Engine:
         if opts.world_size < 1:
             raise ValueError(f"world_size ({opts.world_size}) must be >= 1")
 
+        global_batch_size = opts.global_batch_size
+        if global_batch_size is not None and (
+            isinstance(global_batch_size, bool)
+            or not isinstance(global_batch_size, int)
+            or global_batch_size <= 0
+        ):
+            raise ValueError(
+                f"global_batch_size must be a positive integer, got {global_batch_size!r}"
+            )
+
         # Default dp params to 1D parallelism if not specified
         if opts.dp_degree is None:
             opts.dp_degree = opts.world_size
@@ -602,6 +602,15 @@ class Engine:
             )
 
         if opts.canonical_replicas % opts.dp_degree != 0:
+            if global_batch_size is not None:
+                lower = opts.canonical_replicas // opts.dp_degree * opts.dp_degree
+                raise ValueError(
+                    f"canonical_replicas ({opts.canonical_replicas}) must be divisible "
+                    f"by dp_degree ({opts.dp_degree}) when global_batch_size is set: "
+                    "every DP group must own the same number of lanes for optimizer "
+                    "steps to stay identical across elastic resumes. Use "
+                    f"canonical_replicas={lower} or {lower + opts.dp_degree}."
+                )
             warnings.warn(
                 f"[zephon] canonical_replicas ({opts.canonical_replicas}) is not divisible by "
                 + f"dp_degree ({opts.dp_degree}). This will result in uneven lane distribution "

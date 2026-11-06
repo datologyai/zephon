@@ -47,8 +47,9 @@ def check_step_lane_windows(
     """Raise unless every lane contributes the same whole batches to each step.
 
     Elastic resume keeps global batches identical only when an optimizer step
-    takes an equal number of batches from every canonical lane, and every DP
-    group owns the same number of lanes.
+    takes an equal number of batches from every canonical lane. The engine
+    checks first that every DP group owns the same number of lanes;
+    ``dp_degree`` only limits the suggested lane counts.
     """
     batches, remainder = divmod(records_per_step, batch_size)
     if remainder:
@@ -56,7 +57,7 @@ def check_step_lane_windows(
             f"global_batch_size={records_per_step} must be a multiple of the "
             f"pipeline's output batch size ({batch_size})."
         )
-    if batches % canonical_replicas == 0 and canonical_replicas % dp_degree == 0:
+    if batches % canonical_replicas == 0:
         return
     fits = [
         replicas
@@ -71,16 +72,13 @@ def check_step_lane_windows(
         if options
         else f"a global_batch_size that is a multiple of {dp_degree * batch_size}"
     )
-    if (
-        records_per_step % canonical_replicas == 0
-        and canonical_replicas % dp_degree == 0
-    ):
+    if records_per_step % canonical_replicas == 0:
         per_lane = records_per_step // canonical_replicas
         batch = max(d for d in range(1, batch_size + 1) if per_lane % d == 0)
         hint += f", or an output batch size of {batch}"
     raise ValueError(
         f"An optimizer step of {records_per_step} records is {batches} batches of "
         f"{batch_size}, which does not split evenly over canonical_replicas="
-        f"{canonical_replicas} lanes owned by dp_degree={dp_degree} groups: every "
-        f"lane and every DP group must take an equal share. Use {hint}."
+        f"{canonical_replicas} lanes: every lane must take an equal share. "
+        f"Use {hint}."
     )
