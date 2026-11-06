@@ -272,6 +272,17 @@ class Engine:
         self._runtime_spec = runtime_spec
         self._plan = plan
         self._preserves_cursor_order = bool(plan.preserves_cursor_order)
+        self._opts = opts
+        self._mp_context = self._resolve_mp_context(self._opts.mp_context)
+        # Option-only checks run before disk preflight and catalog builds.
+        self._world = self._build_world()
+        if self._opts.global_batch_size is not None:
+            check_step_lane_windows(
+                self._opts.global_batch_size,
+                self._plan.batch_size_hint or 1,
+                self._world.canonical_replicas,
+                self._world.dp_degree,
+            )
         base_ctx: dict[str, Any] = {
             "datasets_by_id": work.datasets_by_id,
             "io_options": opts.io_options,
@@ -292,16 +303,6 @@ class Engine:
         # metadata copy.
         if datasets_by_id := self._ctx["datasets_by_id"]:
             finalize_dataset_catalogs(datasets_by_id, opts.io_options)
-        self._opts = opts
-        self._mp_context = self._resolve_mp_context(self._opts.mp_context)
-        self._world = self._build_world()
-        if self._opts.global_batch_size is not None:
-            check_step_lane_windows(
-                self._opts.global_batch_size,
-                self._plan.batch_size_hint or 1,
-                self._world.canonical_replicas,
-                self._world.dp_degree,
-            )
         self.inflight_chunks_per_lane: dict[LaneId, dict[ChunkId, Any]] = defaultdict(
             dict
         )

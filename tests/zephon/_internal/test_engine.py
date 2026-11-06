@@ -432,6 +432,20 @@ def test_engine_checks_lane_windows_against_the_plan_batch_size() -> None:
         _batch_engine(canonical_replicas=128, global_batch_size=512)
 
 
+def test_engine_rejects_global_batch_size_before_disk_preflight(
+    monkeypatch, tmp_path
+) -> None:
+    check = Mock()
+    monkeypatch.setattr(
+        "zephon._internal.engine.validate_store_cache_disk_space", check
+    )
+    plan, opts, spec = _cache_preflight_engine_args(tmp_path, 50 * _GiB)
+    opts.global_batch_size = -1
+    with pytest.raises(ValueError, match="global_batch_size must be a positive"):
+        Engine(plan, opts, _FileBackedWorkSource(), spec)
+    check.assert_not_called()
+
+
 def test_engine_accepts_matching_global_batch_size() -> None:
     _batch_engine(canonical_replicas=2, global_batch_size=16).close()
 
