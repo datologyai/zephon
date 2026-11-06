@@ -3,6 +3,7 @@
 
 import copy
 import math
+import random
 from typing import Any, cast
 
 import pytest
@@ -10,13 +11,16 @@ import pytest
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import (
     ConstantSchedule,
+    MixturePhase,
     MixtureSchedule,
     PhaseConstantSchedule,
     PhaseLinearSchedule,
     StaticMixtureWorkSource,
+    StepMixturePlan,
     TokenEstimation,
     WorkChunk,
 )
+from zephon.work.curriculum import _RoundTable
 from zephon.work.static_mixture import LegacyFixedStrategy, _AllocationConfig
 
 
@@ -603,3 +607,347 @@ def test_unscheduled_checkpoint_rejects_an_attached_schedule(pre_v7: bool) -> No
     _restore_into(None, state)
     with pytest.raises(RuntimeError, match="written with no schedule"):
         _restore_into(_crossfade(10), state)
+
+
+@pytest.mark.parametrize(
+    "phases,total_steps,message",
+    [
+        (
+            [MixturePhase(step=1, proportions={"a": 1.0})],
+            10,
+            "start at step 0",
+        ),
+        (
+            [
+                MixturePhase(step=0, proportions={"a": 1.0}),
+                MixturePhase(step=0, proportions={"a": 1.0}),
+            ],
+            10,
+            "strictly increasing",
+        ),
+        (
+            [
+                MixturePhase(step=0, proportions={"a": 1.0}),
+                MixturePhase(step=5, proportions={"b": 1.0}),
+            ],
+            10,
+            "component mismatch",
+        ),
+        (
+            [MixturePhase(step=0, proportions={"a": 0.7, "b": 0.2})],
+            10,
+            "not 1.0",
+        ),
+        (
+            [MixturePhase(step=0, proportions={"a": 1.0})],
+            0,
+            "positive integer",
+        ),
+        (
+            [
+                MixturePhase(step=0, proportions={"a": 1.0}),
+                MixturePhase(step=10, proportions={"a": 1.0}),
+            ],
+            10,
+            "smaller than total_steps",
+        ),
+        (
+            [MixturePhase(step=0, proportions={"a": 1.0, "b": 0.0})],
+            10,
+            "never active",
+        ),
+    ],
+)
+def test_invalid_step_mixture_plan_is_rejected(
+    phases: list[MixturePhase], total_steps: int, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        StepMixturePlan(phases=phases, total_steps=total_steps)
+
+
+@pytest.mark.parametrize(
+    "phase,error,message",
+    [
+        ({"proportions": {"a": 1.0}}, ValueError, "missing 'step'"),
+        ({"step": 0}, ValueError, "missing 'proportions'"),
+        ({"step": 1.5, "proportions": {"a": 1.0}}, TypeError, "must be an integer"),
+        ({"step": 0, "proportions": {"a": True}}, TypeError, "must be a number"),
+        (
+            {"step": 0, "proportions": {"a": 1.0}, "name": "phase-a"},
+            ValueError,
+            "unknown MixturePhase fields",
+        ),
+    ],
+)
+def test_mixture_phase_rejects_malformed_payloads(
+    phase: dict, error: type[Exception], message: str
+) -> None:
+    with pytest.raises(error, match=message):
+        MixturePhase.from_dict(phase)
+
+
+def _two_phase_plan(boundary_step: int, **kwargs: Any) -> StepMixturePlan:
+    return StepMixturePlan(
+        phases=[
+            MixturePhase(0, {"alpha": 0.8, "beta": 0.2}),
+            MixturePhase(boundary_step, {"alpha": 0.2, "beta": 0.8}),
+        ],
+        total_steps=80_000,
+        **kwargs,
+    )
+
+
+def _public(layout: dict[str, int]) -> dict[str, int]:
+    public = dict(layout)
+    public["global_batch_size"] = public.pop("samples_per_step")
+    return public
+
+
+def test_describe_reports_resolution_and_blended_boundaries() -> None:
+    layout = {"samples_per_step": 32, "chunk_size": 128, "canonical_replicas": 8}
+    assert _two_phase_plan(8_000).describe(**_public(layout)).splitlines() == [
+        "One chunk round is chunk_size=128 x canonical_replicas=8 = 1024 records "
+        "= 32 optimizer steps of 32 records; the mixture changes once per round.",
+        "  step 8000: exact (starts chunk round 250)",
+    ]
+    (blended,) = _two_phase_plan(1_000)._blended_boundaries(**layout)
+    assert (blended.first_step, blended.last_step) == (992, 1023)
+    assert blended.exact_steps == (992, 1024)
+
+
+def test_describe_reports_fractional_steps_per_round() -> None:
+    layout = {"samples_per_step": 3, "chunk_size": 2, "canonical_replicas": 2}
+    assert _two_phase_plan(7).describe(**_public(layout)).splitlines() == [
+        "One chunk round is chunk_size=2 x canonical_replicas=2 = 4 records "
+        "= 1.33333 optimizer steps of 3 records; the mixture changes once per round.",
+        "  step 7: averaged over steps 6-7; the nearest exact steps are 4 and 8",
+    ]
+
+
+def test_nearest_exact_steps_stay_between_neighbouring_breakpoints() -> None:
+    plan = StepMixturePlan(
+        phases=[
+            MixturePhase(0, {"a": 1.0, "b": 0.0}),
+            MixturePhase(3, {"a": 0.0, "b": 1.0}),
+            MixturePhase(5, {"a": 1.0, "b": 0.0}),
+        ],
+        total_steps=6,
+    )
+    layout = {"samples_per_step": 1, "chunk_size": 4, "canonical_replicas": 1}
+    assert [b.exact_steps for b in plan._blended_boundaries(**layout)] == [(4,), (4,)]
+    crowded = StepMixturePlan(
+        phases=[
+            MixturePhase(0, {"a": 1.0, "b": 0.0}),
+            MixturePhase(1, {"a": 0.0, "b": 1.0}),
+            MixturePhase(2, {"a": 1.0, "b": 0.0}),
+        ],
+        total_steps=3,
+    )
+    blended = crowded._blended_boundaries(**layout)
+    assert [b.exact_steps for b in blended] == [(), ()]
+    assert "no nearby step is exact" in blended[0].describe()
+
+
+def test_exact_boundary_mode_rejects_blended_breakpoints() -> None:
+    layout = {"samples_per_step": 32, "chunk_size": 128, "canonical_replicas": 8}
+    _two_phase_plan(8_000, boundary="exact")._compile(**layout)
+    with pytest.raises(ValueError, match="nearest exact steps are 992 and 1024"):
+        _two_phase_plan(1_000, boundary="exact")._compile(**layout)
+    with pytest.raises(ValueError, match="pass boundary='warn'"):
+        _two_phase_plan(1_000)._compile(**layout)
+
+
+def test_unknown_boundary_mode_is_rejected() -> None:
+    with pytest.raises(ValueError, match="boundary must be one of"):
+        _two_phase_plan(8, boundary="average")
+
+
+def test_step_plan_boundary_round_trips() -> None:
+    plan = _two_phase_plan(1_000, boundary="warn")
+    payload = plan.to_dict()
+    assert payload["boundary"] == "warn"
+    assert StepMixturePlan.from_dict(payload).boundary == "warn"
+    assert "boundary" not in _two_phase_plan(1_000).to_dict()
+    assert _two_phase_plan(1_000).boundary == "exact"
+
+
+def test_equal_fingerprints_compile_to_identical_tables() -> None:
+    # Proportional ramps whose normalized sums round differently by order.
+    def plan(order: list[tuple[str, float]]) -> StepMixturePlan:
+        return StepMixturePlan(
+            schedules={
+                name: PhaseLinearSchedule([(0, w), (200, w), (207, 3 * w)])
+                for name, w in order
+            },
+            total_steps=208,
+            boundary="warn",
+        )
+
+    layout = {"samples_per_step": 1, "chunk_size": 5, "canonical_replicas": 1}
+    forward = plan([("c", 0.6), ("b", 0.3), ("a", 0.1)])
+    reverse = plan([("a", 0.1), ("b", 0.3), ("c", 0.6)])
+    assert forward._fingerprint(**layout) == reverse._fingerprint(**layout)
+    first, second = forward._compile(**layout), reverse._compile(**layout)
+    assert first._starts.tolist() == second._starts.tolist()
+    assert first._rows.tolist() == second._rows.tolist()
+
+
+# Step plans: compiled round weights against a logical-sample reference.
+
+
+def _compile(plan: StepMixturePlan) -> _RoundTable:
+    return plan._compile(samples_per_step=32, chunk_size=128, canonical_replicas=8)
+
+
+# Readable examples; test_matches_independent_sample_oracle covers the rest.
+@pytest.mark.parametrize(
+    "schedule_type,points,expected",
+    [
+        # A switch at step 8 lands a quarter into round 0 (32 steps per round).
+        (PhaseConstantSchedule, [(0, 0.3), (8, 0.6)], [0.525, 0.6]),
+        (PhaseLinearSchedule, [(0, 0.2), (40, 0.6)], [0.355, 0.58875, 0.6]),
+    ],
+    ids=["switch-inside-round", "ramp"],
+)
+def test_round_weights_average_the_steps_they_cover(
+    schedule_type: type[PhaseConstantSchedule | PhaseLinearSchedule],
+    points: list[tuple[int, float]],
+    expected: list[float],
+) -> None:
+    plan = StepMixturePlan(
+        schedules={
+            "a": schedule_type(points),
+            "b": schedule_type([(step, 1 - weight) for step, weight in points]),
+        },
+        total_steps=64,
+        boundary="warn",
+    )
+    result = _compile(plan)
+    assert [result.weights_at(r)["a"] for r in range(len(expected))] == pytest.approx(
+        expected
+    )
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_plan_serialization_preserves_compiled_weights(version: int) -> None:
+    if version == 1:
+        plan = StepMixturePlan(
+            [
+                MixturePhase(0, {"a": 0.3, "b": 0.7}),
+                MixturePhase(8, {"a": 0.6, "b": 0.4}),
+            ],
+            total_steps=64,
+            boundary="warn",
+        )
+    else:
+        plan = StepMixturePlan(
+            schedules={
+                "a": PhaseLinearSchedule([(0, 0.2), (40, 0.6)]),
+                "b": PhaseLinearSchedule([(0, 0.8), (40, 0.4)]),
+            },
+            total_steps=64,
+            boundary="warn",
+        )
+    payload = plan.to_dict()
+    assert payload["version"] == version
+    restored = StepMixturePlan.from_dict(payload)
+    assert restored == plan
+    restored_table, table = _compile(restored), _compile(plan)
+    assert restored_table._starts.tolist() == table._starts.tolist()
+    assert restored_table._rows.tolist() == table._rows.tolist()
+
+
+def test_large_constant_ranges_stay_sparse() -> None:
+    plan = StepMixturePlan(
+        [
+            MixturePhase(0, {"a": 0.3, "b": 0.7}),
+            MixturePhase(100_000_001, {"a": 0.6, "b": 0.4}),
+        ],
+        total_steps=200_000_000,
+        boundary="warn",
+    )
+    table = _compile(plan)
+    assert table._starts.tolist() == [0, 3_125_000, 3_125_001]
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        (
+            {
+                "phases": [MixturePhase(0, {"a": 1})],
+                "schedules": {"a": PhaseConstantSchedule([(0, 1)])},
+            },
+            "exactly one",
+        ),
+        ({"schedules": {"a": PhaseLinearSchedule([(0, 1), (9, 2)])}}, "outside"),
+        ({"schedules": {"a": PhaseLinearSchedule([(1, 1)])}}, "start at step 0"),
+        (
+            {
+                "schedules": {
+                    "a": PhaseLinearSchedule([(0, 1), (2, 0), (3, 1)]),
+                    "b": PhaseConstantSchedule([(0, 0)]),
+                }
+            },
+            "positive finite total",
+        ),
+    ],
+    ids=["both-inputs", "past-total-steps", "late-start", "zero-total"],
+)
+def test_invalid_schedule_plans_are_rejected(
+    kwargs: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        StepMixturePlan(**kwargs, total_steps=8)
+
+
+def test_normalized_peaks_cover_both_sides_of_constant_jump() -> None:
+    plan = StepMixturePlan(
+        schedules={
+            "a": PhaseLinearSchedule([(0, 1), (10, 2)]),
+            "b": PhaseConstantSchedule([(0, 1), (5, 100)]),
+        },
+        total_steps=20,
+        boundary="warn",
+    )
+    assert plan.peak_proportions == pytest.approx({"a": 1.4 / 2.4, "b": 100 / 101.5})
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_matches_independent_sample_oracle(seed: int) -> None:
+    rng = random.Random(seed)
+    schedules = {}
+    for name in ("a", "b", "c"):
+        positions = [0] + sorted(rng.sample(range(1, 15), rng.randint(1, 5)))
+        points = [(position, rng.randint(1, 20) / 10) for position in positions]
+        schedule_type = rng.choice([PhaseConstantSchedule, PhaseLinearSchedule])
+        schedules[name] = schedule_type(points)
+    samples_per_step = rng.randint(1, 13)
+    chunk_size = rng.randint(1, 9)
+    canon = rng.randint(1, 4)
+    plan = StepMixturePlan(schedules=schedules, total_steps=20, boundary="warn")
+    result = plan._compile(
+        samples_per_step=samples_per_step,
+        chunk_size=chunk_size,
+        canonical_replicas=canon,
+    )
+    length = chunk_size * canon
+    for round_index in range(math.ceil(20 * samples_per_step / length) + 2):
+        expected = {name: [] for name in schedules}
+        for source_sample in range(round_index * length, (round_index + 1) * length):
+            step = source_sample // samples_per_step
+            # Enumerate source-sample slots, independently of compiler splitting.
+            values = {
+                name: schedule.value(step) for name, schedule in schedules.items()
+            }
+            denominator = sum(values.values())
+            for name in schedules:
+                expected[name].append(values[name] / denominator)
+        actual = result.weights_at(round_index)
+        assert actual == pytest.approx(
+            {name: math.fsum(values) / length for name, values in expected.items()},
+            abs=1e-12,
+        )
+        assert all(
+            actual[name] <= plan.peak_proportions[name] + 1e-12 for name in schedules
+        )
