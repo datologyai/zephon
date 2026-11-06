@@ -27,10 +27,11 @@ enabled, reading one record decompresses its whole chunk. `group_size:1` lets ea
 be decoded independently; larger groups can improve compression but may increase the
 work needed for isolated reads. Measure the tradeoff with your access pattern.
 
-An index is optional. With an `index.json`, Zephon discovers the dataset from the index
-without reading the shards. Without one, it reads metadata from every shard; remote
-discovery does not download the complete files. For large or remote datasets, build an
-index to speed up discovery:
+An index is optional but highly recommended for any file format in Zephon.
+With an `index.json`, Zephon discovers the dataset from the index without reading the
+shards. Without one, it reads metadata from every shard; remote discovery does not
+download the complete files. For large or remote datasets, build an index to speed up
+discovery:
 
 ```{literalinclude} ../../../../examples/guide/datasets/array_record_index.sh
 :language: bash
