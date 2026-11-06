@@ -766,6 +766,37 @@ def test_step_plan_switches_every_lane_at_the_same_step() -> None:
         ]
 
 
+def test_step_plan_zero_weight_dataset_takes_no_records() -> None:
+    # c has one record; drawing it again after its weight reaches 0 would
+    # stop the whole source.
+    plan = StepMixturePlan(
+        phases=[
+            MixturePhase(0, {"a": 0.25, "b": 0.25, "c": 0.5}),
+            MixturePhase(1, {"a": 0.5, "b": 0.5, "c": 0.0}),
+        ],
+        total_steps=4,
+    )
+    work = StaticMixtureWorkSource(
+        [_make_dataset("a", 100), _make_dataset("b", 100), _make_dataset("c", 1)],
+        plan,
+        chunk_size=3,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="stop",
+    )
+    work._prepare_for_execution(
+        canonical_replicas=1,
+        output_batch_size=1,
+        preserves_cursor_order=True,
+        global_batch_size=3,
+    )
+    lane = work.clone_for_lane(0, canonical_replicas=1)
+    assert _counts(lane.next_chunk()) == {"a": 1, "b": 1, "c": 1}
+    for _ in range(3):
+        counts = _counts(lane.next_chunk())
+        assert "c" not in counts and sum(counts.values()) == 3
+
+
 def _two_phase_plan(boundary_step: int, **kwargs: Any) -> StepMixturePlan:
     return StepMixturePlan(
         phases=[
