@@ -20,9 +20,33 @@ def test_world_defaults() -> None:
 @pytest.mark.parametrize(
     "records,batch,replicas,dp,hint",
     [
-        (32, 8, 8, 1, "Use canonical_replicas=4, or an output batch size of 4."),
-        (48, 4, 8, 2, "Use canonical_replicas=6 or 12, or an output batch size of 3."),
-        (12, 4, 2, 2, "a multiple of 8, or an output batch size of 3."),
+        (
+            32,
+            8,
+            8,
+            1,
+            "Use global_batch_size=64, canonical_replicas=4, or an output batch "
+            "size of 4.",
+        ),
+        (
+            48,
+            4,
+            8,
+            2,
+            "Use global_batch_size=32 or 64, canonical_replicas=6 or 12, or an "
+            "output batch size of 3.",
+        ),
+        (12, 4, 2, 2, "Use global_batch_size=8 or 16, or an output batch size of 3."),
+        # No lane count or batch size fits, so only the step size can change.
+        (12, 4, 8, 2, "Use global_batch_size=32."),
+        (
+            192,
+            4,
+            64,
+            16,
+            "Use global_batch_size=256, canonical_replicas=48, or an output batch "
+            "size of 3.",
+        ),
     ],
 )
 def test_lane_window_check_names_layouts_that_fit(
