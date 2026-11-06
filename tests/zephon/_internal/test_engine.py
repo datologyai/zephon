@@ -405,6 +405,37 @@ def test_engine_batch_with_post_ops_not_inline() -> None:
 
 
 # ---------------------------------------------------------------------------
+# global_batch_size validation
+# ---------------------------------------------------------------------------
+
+
+def _batch_engine(**options: Any) -> Engine:
+    g = Graph()
+    src = g.add("src", DelayById(max_delay_ms=0.0))
+    g.add("batch", Batch(microbatch_size=8), src)
+    plan = Planner().make_plan(g)
+    opts = RuntimeOptions(**options)
+    return Engine(plan, opts, _DummyWorkSource(), resolve_runtime_spec(plan, opts))
+
+
+@pytest.mark.parametrize("global_batch_size", [0, -8, True, 8.0])
+def test_engine_rejects_invalid_global_batch_size(global_batch_size: Any) -> None:
+    with pytest.raises(ValueError, match="global_batch_size must be a positive"):
+        _batch_engine(canonical_replicas=2, global_batch_size=global_batch_size)
+
+
+def test_engine_checks_lane_windows_against_the_plan_batch_size() -> None:
+    with pytest.raises(
+        ValueError, match=r"Use canonical_replicas=64, or an output batch size of 4"
+    ):
+        _batch_engine(canonical_replicas=128, global_batch_size=512)
+
+
+def test_engine_accepts_matching_global_batch_size() -> None:
+    _batch_engine(canonical_replicas=2, global_batch_size=16).close()
+
+
+# ---------------------------------------------------------------------------
 # max_worker_retries plumbing (RuntimeOptions -> Engine -> ProcessStageRunner)
 # ---------------------------------------------------------------------------
 
