@@ -14,7 +14,8 @@ the `array_record` extra:
 :caption: examples/guide/datasets/array_record_install.sh
 ```
 
-Each `.array_record` file is one shard. Here we serialize each record with MessagePack:
+Each `.array_record` file is one shard. Here we serialize text documents for pretraining
+with MessagePack:
 
 ```{literalinclude} ../../../../examples/guide/datasets/array_record_write_shards.py
 :language: python
@@ -59,10 +60,9 @@ decodes their MessagePack records, and prints the original dictionaries:
 ```
 
 ```text
-{'text': 'sample 0', 'label': 0}
-{'text': 'sample 1', 'label': 1}
-...
-{'text': 'sample 999', 'label': 1}
+{'text': "The ocean covers most of Earth's surface."}
+{'text': 'Plants use sunlight to turn water and carbon dioxide into sugars.'}
+{'text': 'Written language allows knowledge to be shared across generations.'}
 ```
 
 Shards in remote storage are copied into Zephon's local shard cache before they are read,

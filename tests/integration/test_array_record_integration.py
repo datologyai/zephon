@@ -171,7 +171,12 @@ def test_guide_writer_and_pipeline(
     runpy.run_path(str(examples / "array_record_write_shards.py"))
     runpy.run_path(str(examples / "array_record_pipeline.py"))
     assert capsys.readouterr().out.splitlines() == [
-        str({"text": f"sample {i}", "label": i % 2}) for i in range(1000)
+        str({"text": text})
+        for text in (
+            "The ocean covers most of Earth's surface.",
+            "Plants use sunlight to turn water and carbon dioxide into sugars.",
+            "Written language allows knowledge to be shared across generations.",
+        )
     ]
 
 
