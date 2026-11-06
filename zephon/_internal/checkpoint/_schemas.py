@@ -339,7 +339,7 @@ class WorkChunkStateV3(WorkChunkStateV2):
 # Component: StaticMixtureWorkSource
 # ---------------------------------------------------------------------------
 
-STATIC_MIXTURE_VERSION = 6
+STATIC_MIXTURE_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -802,6 +802,18 @@ class StaticMixtureStateV6(StaticMixtureStateV5):
     # Compatibility state, not a user knob: only the v5 -> v6 migration sets it.
     _legacy_repeat_skip_tail: bool
     version: int = 6
+
+
+@dataclass(frozen=True, kw_only=True)
+class StaticMixtureStateV7(StaticMixtureStateV6):
+    """StaticMixture checkpoint schema that records the attached mixture schedule.
+
+    ``schedule_fingerprint`` identifies the schedule that drove the weights, or
+    is ``None`` without one.
+    """
+
+    schedule_fingerprint: str | None
+    version: int = 7
 
 
 # ---------------------------------------------------------------------------
