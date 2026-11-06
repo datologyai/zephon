@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import random
+import runpy
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -46,7 +47,7 @@ def _write_dataset(root: Path, values: list[int], shards: int, *, index: bool) -
 
 
 def _decode(payload: Any) -> dict[str, Any]:
-    return msgpack.unpackb(payload["data"])
+    return msgpack.unpackb(payload)
 
 
 def _run(
@@ -92,7 +93,9 @@ def _run(
     for rec in pipe:
         assert isinstance(rec, SampleRecord)
         assert isinstance(rec.payload, dict)
-        out.append((names[int(rec.meta.sample_id[0])], int(rec.payload["value"])))
+        value = rec.payload["value"]
+        assert isinstance(value, int)
+        out.append((names[int(rec.meta.sample_id[0])], value))
     return out
 
 
@@ -155,7 +158,21 @@ def test_index_build_discovery_and_inspector(tmp_path: Path) -> None:
     dataset = Dataset.from_path("ds", str(root))
     assert dataset.counts().tolist() == [3, 3]
     with DatasetInspector(dataset) as inspector:
-        assert _decode(inspector.read(shard_id=1, sample_index=2)) == {"value": 5}
+        payload = inspector.read(shard_id=1, sample_index=2)
+        assert isinstance(payload, bytes)
+        assert _decode(payload) == {"value": 5}
+
+
+def test_guide_writer_and_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    examples = Path(__file__).resolve().parents[2] / "examples" / "guide" / "datasets"
+    monkeypatch.chdir(tmp_path)
+    runpy.run_path(str(examples / "array_record_write_shards.py"))
+    runpy.run_path(str(examples / "array_record_pipeline.py"))
+    assert capsys.readouterr().out.splitlines() == [
+        str({"text": f"sample {i}", "label": i % 2}) for i in range(1000)
+    ]
 
 
 def test_discovery_and_indexing_use_only_metadata_ranges(tmp_path: Path) -> None:

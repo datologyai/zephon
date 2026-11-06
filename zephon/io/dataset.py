@@ -178,7 +178,8 @@ class Dataset:
           optional Zephon ``index.json`` for fast discovery
         - ``array_record`` directories where ``*.array_record`` files act as
           shards, with an optional Zephon ``index.json`` for fast discovery.
-          Each sample is ``{"data": <record bytes>}``
+          Each sample is the record's bytes; use ``Pipeline.map_transform``
+          to decode them with the serializer used when writing the dataset.
         - ``lance`` dataset directories, one shard per fragment. Discovery pins
           the dataset to its latest version and ``path`` becomes that version's
           manifest; pass a ``_versions/*.manifest`` path to pin an earlier one.

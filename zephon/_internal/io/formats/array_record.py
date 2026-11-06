@@ -3,8 +3,8 @@
 
 """ArrayRecord metadata discovery and native sample reads.
 
-Each file is one shard. Records remain opaque bytes under the ``data`` key;
-decode them with ``Pipeline.map_transform``.
+Each file is one shard. Records are returned as bytes; decode them with
+``Pipeline.map_transform`` using the serializer chosen when writing the data.
 """
 
 import importlib
@@ -20,9 +20,7 @@ from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.suffixes import ARRAY_RECORD_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardLocator
-from zephon.types import SamplePayload
 
-RECORD_FIELD = "data"
 _READER_OPTIONS = "readahead_buffer_size:0"
 # The Python binding declares read(begin, end) with signed int32 endpoints.
 _MAX_RANGE_END = (1 << 31) - 1
@@ -74,7 +72,7 @@ class ArrayRecordShard(RandomAccessShard):
         self._reader: Any = _open_reader(str(path))
         self._length = length if length is not None else self._reader.num_records()
 
-    def __getitem__(self, index: int) -> SamplePayload:
+    def __getitem__(self, index: int) -> bytes:
         return self.getsamples([index])[0]
 
     def __len__(self) -> int:
@@ -85,7 +83,7 @@ class ArrayRecordShard(RandomAccessShard):
             reader, self._reader = self._reader, None
             reader.close()
 
-    def getsamples(self, indices: list[int]) -> list[SamplePayload]:
+    def getsamples(self, indices: list[int]) -> list[bytes]:
         """Read in request order, retaining duplicates and releasing the GIL."""
         if not indices:
             return []
@@ -97,10 +95,8 @@ class ArrayRecordShard(RandomAccessShard):
         # read(begin, end) skips the indexed API's all-chunk bookkeeping.
         # Its exclusive end must fit in int32; read(indices) accepts uint64.
         if len(indices) == 1 and indices[0] + 1 <= _MAX_RANGE_END:
-            records = self._reader.read(indices[0], indices[0] + 1)
-        else:
-            records = self._reader.read(indices)
-        return [{RECORD_FIELD: record} for record in records]
+            return self._reader.read(indices[0], indices[0] + 1)
+        return self._reader.read(indices)
 
 
 class ArrayRecordFormat(SingleFileFormat):
@@ -122,4 +118,4 @@ class ArrayRecordFormat(SingleFileFormat):
 
 register_format(ArrayRecordFormat())
 
-__all__ = ["RECORD_FIELD", "ArrayRecordFormat", "ArrayRecordShard"]
+__all__ = ["ArrayRecordFormat", "ArrayRecordShard"]

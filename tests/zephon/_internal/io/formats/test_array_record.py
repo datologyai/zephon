@@ -44,7 +44,7 @@ def test_getsamples_preserves_order_and_duplicates(
     original = indices.copy()
     try:
         assert len(shard) == 6
-        assert shard.getsamples(indices) == [{"data": records[i]} for i in original]
+        assert shard.getsamples(indices) == [records[i] for i in original]
         assert indices == original
     finally:
         shard.close()
@@ -61,10 +61,8 @@ def test_reads_grouped_records(
 
     shard = ArrayRecordShard(path)
     try:
-        assert shard[0] == {"data": records[0]}
-        assert shard.getsamples([499, 7, 250]) == [
-            {"data": records[i]} for i in (499, 7, 250)
-        ]
+        assert shard[0] == records[0]
+        assert shard.getsamples([499, 7, 250]) == [records[i] for i in (499, 7, 250)]
     finally:
         shard.close()
 
@@ -149,7 +147,7 @@ def test_open_shard_uses_length_hint(tmp_path: Path, write_array_record: Any) ->
     shard = handler.open_shard(locator, ref)
     try:
         assert len(shard) == 4
-        assert shard[3] == {"data": b"row-3"}
+        assert shard[3] == b"row-3"
     finally:
         shard.close()
 
@@ -181,7 +179,7 @@ def test_singleton_native_range_boundary(
     with mock.patch.object(array_record_format, "_open_reader", return_value=reader):
         shard = ArrayRecordShard(tmp_path / "s.array_record", length=(1 << 32) + 1)
     try:
-        assert shard.getsamples([index]) == [{"data": b"record"}]
+        assert shard.getsamples([index]) == [b"record"]
         reader.read.assert_called_once_with(*expected_args)
     finally:
         shard.close()
