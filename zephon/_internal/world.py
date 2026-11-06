@@ -59,6 +59,12 @@ def check_step_lane_windows(
         )
     if batches % canonical_replicas == 0:
         return
+    # Keeping the layout is listed first: canonical_replicas is often chosen
+    # for future DP degrees and the batch size for GPU memory.
+    unit = canonical_replicas * batch_size
+    lower = records_per_step // unit * unit
+    sizes = [size for size in (lower, lower + unit) if size > 0]
+    options = ["global_batch_size=" + " or ".join(str(size) for size in sizes)]
     fits = [
         replicas
         for replicas in range(dp_degree, batches + 1, dp_degree)
@@ -66,16 +72,19 @@ def check_step_lane_windows(
     ]
     below = [replicas for replicas in fits if replicas <= canonical_replicas][-1:]
     above = [replicas for replicas in fits if replicas >= canonical_replicas][:1]
-    options = sorted(set(below + above))
-    hint = (
-        "canonical_replicas=" + " or ".join(str(r) for r in options)
-        if options
-        else f"a global_batch_size that is a multiple of {dp_degree * batch_size}"
-    )
+    if replicas_fit := sorted(set(below + above)):
+        options.append(
+            "canonical_replicas=" + " or ".join(str(r) for r in replicas_fit)
+        )
     if records_per_step % canonical_replicas == 0:
         per_lane = records_per_step // canonical_replicas
         batch = max(d for d in range(1, batch_size + 1) if per_lane % d == 0)
-        hint += f", or an output batch size of {batch}"
+        options.append(f"an output batch size of {batch}")
+    hint = (
+        options[0]
+        if len(options) == 1
+        else ", ".join(options[:-1]) + ", or " + options[-1]
+    )
     raise ValueError(
         f"An optimizer step of {records_per_step} records is {batches} batches of "
         f"{batch_size}, which does not split evenly over canonical_replicas="

@@ -426,7 +426,8 @@ def test_engine_rejects_invalid_global_batch_size(global_batch_size: Any) -> Non
 
 def test_engine_checks_lane_windows_against_the_plan_batch_size() -> None:
     with pytest.raises(
-        ValueError, match=r"Use canonical_replicas=64, or an output batch size of 4"
+        ValueError,
+        match=r"Use global_batch_size=1024, canonical_replicas=64, or an output batch size of 4",
     ):
         _batch_engine(canonical_replicas=128, global_batch_size=512)
 
