@@ -93,9 +93,6 @@ class ArrayRecordShard(RandomAccessShard):
     def __init__(self, path: Path, *, length: int | None = None) -> None:
         self._reader: Any = _open_reader(str(path))
         self._length = length if length is not None else self._reader.num_records()
-        self._single_record_chunks = (
-            "group_size:1" in self._reader.writer_options_string().split(",")
-        )
 
     def __getitem__(self, index: int) -> bytes:
         return self.getsamples([index])[0]
@@ -117,25 +114,13 @@ class ArrayRecordShard(RandomAccessShard):
                 raise IndexError(index)
         if self._reader is None:
             raise RuntimeError("ArrayRecordShard has been closed")
-        # read(begin, end) skips the indexed API's all-chunk bookkeeping.
-        # Its exclusive end must fit in int32; read(indices) accepts uint64.
-        if len(indices) == 1 and indices[0] + 1 <= _MAX_RANGE_END:
-            return self._reader.read(indices[0], indices[0] + 1)
-        # Avoid all-chunk bookkeeping for individual chunks and consecutive runs.
-        # Sparse grouped reads retain the indexed API's parallel decompression.
-        if max(indices) < _MAX_RANGE_END and (
-            self._single_record_chunks
-            or all(a + 1 == b for a, b in zip(indices, indices[1:]))
+        # Singletons and consecutive requests avoid indexed all-chunk bookkeeping.
+        # The exclusive range end must fit in int32; indexed reads accept uint64.
+        end = indices[-1] + 1
+        if end <= _MAX_RANGE_END and all(
+            a + 1 == b for a, b in zip(indices, indices[1:])
         ):
-            records: list[bytes] = []
-            start = 0
-            for pos in range(1, len(indices) + 1):
-                if pos == len(indices) or indices[pos] != indices[pos - 1] + 1:
-                    records.extend(
-                        self._reader.read(indices[start], indices[pos - 1] + 1)
-                    )
-                    start = pos
-            return records
+            return self._reader.read(indices[0], end)
         return self._reader.read(indices)
 
 

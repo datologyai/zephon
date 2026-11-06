@@ -52,7 +52,7 @@ def test_getsamples_preserves_order_and_duplicates(
         shard.close()
 
 
-@pytest.mark.parametrize("options", ["group_size:1", "group_size:64"])
+@pytest.mark.parametrize("options", ["group_size:1", "group_size:2", "group_size:64"])
 def test_reads_grouped_records(
     tmp_path: Path, options: str, write_array_record: Any
 ) -> None:
@@ -65,6 +65,7 @@ def test_reads_grouped_records(
     try:
         assert shard[0] == records[0]
         assert shard.getsamples([499, 7, 250]) == [records[i] for i in (499, 7, 250)]
+        assert shard.getsamples([62, 63, 64, 65]) == records[62:66]
     finally:
         shard.close()
 
@@ -203,7 +204,6 @@ def test_singleton_native_range_boundary(
 ) -> None:
     reader = mock.Mock()
     reader.read.return_value = [b"record"]
-    reader.writer_options_string.return_value = "group_size:1,zstd:3"
     with mock.patch.object(array_record_format, "_open_reader", return_value=reader):
         shard = ArrayRecordShard(tmp_path / "s.array_record", length=(1 << 32) + 1)
     try:
@@ -214,19 +214,23 @@ def test_singleton_native_range_boundary(
 
 
 @pytest.mark.parametrize(
-    ("group", "indices", "calls"),
+    ("indices", "calls"),
     [
-        (1, [5, 6, 2, 2, 3], [(5, 7), (2, 3), (2, 4)]),
-        (1000, [2, 3, 4], [(2, 5)]),
-        (1000, [2, 4, 4], [([2, 4, 4],)]),
-        (1, [1 << 31, 0], [([1 << 31, 0],)]),
+        ([5, 6, 2, 2, 3], [([5, 6, 2, 2, 3],)]),
+        ([2, 3, 4], [(2, 5)]),
+        ([2, 4, 4], [([2, 4, 4],)]),
+        ([(1 << 31) - 3, (1 << 31) - 2], [((1 << 31) - 3, (1 << 31) - 1)]),
+        (
+            [(1 << 31) - 2, (1 << 31) - 1],
+            [([(1 << 31) - 2, (1 << 31) - 1],)],
+        ),
+        ([1 << 31, 0], [([1 << 31, 0],)]),
     ],
 )
 def test_bulk_native_dispatch_preserves_order_and_duplicates(
-    tmp_path: Path, group: int, indices: list[int], calls: list[tuple[Any, ...]]
+    tmp_path: Path, indices: list[int], calls: list[tuple[Any, ...]]
 ) -> None:
     reader = mock.Mock()
-    reader.writer_options_string.return_value = f"group_size:{group},zstd:3"
 
     def read(*args: Any) -> list[bytes]:
         requested = args[0] if len(args) == 1 else range(*args)
