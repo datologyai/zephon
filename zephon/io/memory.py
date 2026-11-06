@@ -2,6 +2,7 @@
 
 from functools import cached_property
 
+from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.observability.size_estimator import (
     content_bytes as _content_bytes,
 )
@@ -11,7 +12,7 @@ from zephon._internal.observability.size_estimator import (
 _BYTE_SAMPLES = 64
 
 
-class InMemoryShard:
+class InMemoryShard(RandomAccessShard):
     """List-backed shard useful for tests and quickstarts."""
 
     def __init__(self, rows: list[dict[str, object]]):

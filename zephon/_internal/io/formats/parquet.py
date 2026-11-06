@@ -31,9 +31,10 @@ import numpy as np
 
 from zephon._internal.io.catalog.extra_codec import EncodedExtra, register_extra_codec
 from zephon._internal.io.formats.arrow_rows import (
+    arrow_table_to_samples,
     configure_pyarrow,
+    content_sizes,
     require_pyarrow,
-    take_and_materialize,
 )
 from zephon._internal.io.formats.base import (
     FormatHandler,
@@ -45,7 +46,7 @@ from zephon._internal.io.formats.parquet_cache.cache import ParquetRGCache
 from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
-from zephon._internal.io.protocols import RandomAccessShard
+from zephon._internal.io.protocols import _SIZE_BATCH, RandomAccessShard
 from zephon._internal.io.storage.base import StorageBackend
 from zephon._internal.io.suffixes import PARQUET_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -59,6 +60,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PARQUET_FOOTER_PREFETCH_BYTES = 64 * 1024
+
+#: Read-ahead per column while sizing; Arrow otherwise reads whole column chunks.
+_SIZE_STREAM_BUFFER_BYTES = 1 << 20
 
 
 def _ensure_pyarrow():
@@ -155,6 +159,13 @@ class ParquetShard(RandomAccessShard):
             if idx < 0 or idx >= self._length:
                 raise IndexError(idx)
 
+        if self._decoded_cache is None:
+            results: list[SamplePayload] = [None] * len(indices)
+            for at, rows in self._streamed_rows(indices):
+                for pos, row in zip(at, arrow_table_to_samples(rows), strict=True):
+                    results[pos] = row
+            return results
+
         rg_groups: defaultdict[int, list[tuple[int, int]]] = defaultdict(list)
         for orig_pos, idx in enumerate(indices):
             rg_id, local_idx = self._locate_row_group(idx)
@@ -174,18 +185,14 @@ class ParquetShard(RandomAccessShard):
                 pq_file = pq.ParquetFile(self._path, metadata=metadata)
             return pq_file.read_row_group(rg_id, use_threads=self._use_threads)
 
-        results: list[SamplePayload] = [None] * len(indices)
+        assert self._rg_slot_start is not None
+        results = [None] * len(indices)
         for rg_id, items in rg_groups.items():
-            local_indices = [local_idx for _, local_idx in items]
-            if self._decoded_cache is None:
-                rows = take_and_materialize(decode(rg_id), local_indices)
-            else:
-                assert self._rg_slot_start is not None
-                rows = self._decoded_cache.get_or_decode(
-                    slot=self._rg_slot_start + rg_id,
-                    local_indices=local_indices,
-                    decode=lambda rg_id=rg_id: decode(rg_id),
-                )
+            rows = self._decoded_cache.get_or_decode(
+                slot=self._rg_slot_start + rg_id,
+                local_indices=[local_idx for _, local_idx in items],
+                decode=lambda rg_id=rg_id: decode(rg_id),
+            )
             for (orig_pos, _), row in zip(items, rows, strict=True):
                 results[orig_pos] = row
 
@@ -197,6 +204,47 @@ class ParquetShard(RandomAccessShard):
 
     def close(self) -> None:
         pass
+
+    def content_sizes(self, indices: list[int]) -> np.ndarray:
+        if any(idx < 0 or idx >= self._length for idx in indices):
+            raise IndexError(indices)
+        sizes = np.empty(len(indices), dtype=np.int64)
+        for at, rows in self._streamed_rows(indices):
+            sizes[at] = content_sizes(rows)
+        return sizes
+
+    def _streamed_rows(self, indices: list[int]) -> Iterator[tuple[np.ndarray, Any]]:
+        """Yield ``(positions in indices, those rows as an Arrow table)``.
+
+        Each touched row group streams through a buffered reader in small
+        batches, ending at its last requested row, so memory stays near one
+        batch rather than a whole decoded row group.
+        """
+        pa, pq = _ensure_pyarrow()
+        metadata = (
+            self._metadata_loader() if self._metadata_loader is not None else None
+        )
+        pq_file = pq.ParquetFile(
+            self._path, metadata=metadata, buffer_size=_SIZE_STREAM_BUFFER_BYTES
+        )
+        positions = np.asarray(indices, dtype=np.int64)
+        rg_ids = np.searchsorted(self._rg_boundaries, positions, side="right") - 1
+        for rg_id in np.unique(rg_ids):
+            start = self._rg_boundaries[rg_id]
+            last = int(positions[rg_ids == rg_id].max())
+            batches = pq_file.iter_batches(
+                batch_size=_SIZE_BATCH,
+                row_groups=[int(rg_id)],
+                use_threads=self._use_threads,
+            )
+            for batch in batches:
+                end = start + batch.num_rows
+                at = np.flatnonzero((positions >= start) & (positions < end))
+                if at.size:
+                    yield at, pa.Table.from_batches([batch]).take(positions[at] - start)
+                if end > last:
+                    break
+                start = end
 
 
 def _row_groups_from_ref(

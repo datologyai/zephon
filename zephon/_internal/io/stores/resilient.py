@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 
+import numpy as np
 from tenacity import (
     Retrying,
     retry_if_exception_type,
@@ -255,6 +256,21 @@ class ResilientShard(RandomAccessShard):
                 )
 
         return rows, stats_list
+
+    def content_sizes(self, indices: list[int]) -> np.ndarray:
+        def _size_many() -> np.ndarray:
+            shard = self._opener.open_shard(
+                self._locator, self._resolver.resolve(self._locator)
+            )
+            try:
+                sizes = shard.content_sizes(indices)
+            finally:
+                with contextlib.suppress(Exception):
+                    shard.close()
+            self._resolver.touch(self._locator)
+            return sizes
+
+        return self._retrying(_size_many)
 
     def close(self) -> None:
         return None

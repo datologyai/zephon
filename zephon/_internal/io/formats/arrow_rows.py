@@ -42,6 +42,7 @@ from typing import Any, Iterable, Mapping
 
 import numpy as np
 
+from zephon._internal.observability.size_estimator import content_bytes
 from zephon._internal.utils.thread_utils import configure_arrow_threads
 from zephon.io.options import ArrowOptions
 from zephon.types import SamplePayload
@@ -447,8 +448,97 @@ def take_and_materialize(
     return arrow_table_to_samples(selected)
 
 
+def content_sizes(table: Any) -> np.ndarray:
+    """Per-row ``content_bytes`` of ``arrow_table_to_samples(table)``, in Arrow.
+
+    Sizing from buffers skips building Python payloads. Types without a
+    buffer rule size their converted values, so every row matches exactly.
+    """
+    pa = require_pyarrow()
+    sizes = np.zeros(table.num_rows, dtype=np.int64)
+    for name in table.column_names:
+        sizes += _chunked_sizes(table.column(name), pa, _column_sizes)
+    return sizes
+
+
+def _chunked_sizes(array: Any, pa: Any, size: Any) -> np.ndarray:
+    if isinstance(array, pa.ChunkedArray):
+        if not array.num_chunks:
+            return np.zeros(0, dtype=np.int64)
+        return np.concatenate([size(chunk, pa) for chunk in array.chunks])
+    return size(array, pa)
+
+
+def _column_sizes(array: Any, pa: Any) -> np.ndarray:
+    """Sizes of one column chunk as ``_column_values`` converts it."""
+    kind = array.type
+    if (
+        pa.types.is_integer(kind)
+        or pa.types.is_floating(kind)
+        or pa.types.is_timestamp(kind)
+        or pa.types.is_date(kind)
+        or pa.types.is_duration(kind)
+    ):
+        # NumPy scalars size as their itemsize; date32 widens to datetime64[D].
+        itemsize = 8 if pa.types.is_date(kind) else kind.bit_width // 8
+        return _validity(array).astype(np.int64) * itemsize
+    if (
+        pa.types.is_fixed_size_list(kind)
+        or pa.types.is_list_view(kind)
+        or pa.types.is_large_list_view(kind)
+        or pa.types.is_list(kind)
+        or pa.types.is_large_list(kind)
+    ) and _is_numeric_type(kind.value_type, pa):
+        # Numeric lists become NumPy arrays, or Python lists where elements are null.
+        return _converted_sizes(_column_values(array, pa))
+    return _python_sizes(array, pa)
+
+
+def _python_sizes(array: Any, pa: Any) -> np.ndarray:
+    """Sizes of ``array``'s Python values: 8 per number, string bytes, None 0."""
+    kind = array.type
+    valid = _validity(array).astype(np.int64)
+    if (
+        pa.types.is_string(kind)
+        or pa.types.is_large_string(kind)
+        or pa.types.is_binary(kind)
+        or pa.types.is_large_binary(kind)
+    ):
+        # Arrow strings are valid UTF-8, so their byte length is content_bytes.
+        import pyarrow.compute as pc
+
+        lengths = pc.binary_length(array).fill_null(0)
+        return _fixed_width_values(lengths, pa).astype(np.int64)
+    if (
+        pa.types.is_integer(kind)
+        or pa.types.is_floating(kind)
+        or pa.types.is_boolean(kind)
+    ):
+        return valid * 8
+    if pa.types.is_null(kind):
+        return np.zeros(len(array), dtype=np.int64)
+    if pa.types.is_struct(kind):
+        sizes = np.zeros(len(array), dtype=np.int64)
+        # ``flatten`` applies the parent's nulls to each child.
+        for child in array.flatten():
+            sizes += _python_sizes(child, pa)
+        return sizes
+    if pa.types.is_list(kind) or pa.types.is_large_list(kind):
+        offsets = _fixed_width_values(array.offsets, pa).astype(np.int64)
+        child = _python_sizes(array.values, pa)
+        totals = np.concatenate([[0], np.cumsum(child)])
+        # A null list may still span values.
+        return (totals[offsets[1:]] - totals[offsets[:-1]]) * valid
+    return _converted_sizes(_lists_for_python(array, pa).to_pylist())
+
+
+def _converted_sizes(values: Any) -> np.ndarray:
+    return np.fromiter(map(content_bytes, values), dtype=np.int64, count=len(values))
+
+
 __all__ = [
     "arrow_table_to_samples",
+    "content_sizes",
     "copy_array_views",
     "require_pyarrow",
     "samples_from_columns",

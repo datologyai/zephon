@@ -18,6 +18,8 @@ callable.
 from __future__ import annotations
 
 import concurrent.futures
+import ctypes
+import gc
 import hashlib
 import inspect
 import io
@@ -27,6 +29,7 @@ import math
 import multiprocessing as mp
 import os
 import random
+import sys
 import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
@@ -47,9 +50,6 @@ from zephon._internal.io.catalog import (
 )
 from zephon._internal.io.stores import (
     build_multi_dataset_store as _build_multi_dataset_store,
-)
-from zephon._internal.observability.size_estimator import (
-    content_bytes as _content_bytes,
 )
 from zephon._internal.token_counting import (
     CountPlan as _CountPlan,
@@ -416,7 +416,6 @@ def _fetch_payloads(
 
 #: Row cap per shard for a measured payload census (no format metadata).
 _CENSUS_MAX_ROWS_PER_SHARD = 65536
-_CENSUS_BATCH = 2048
 
 
 @dataclass(frozen=True)
@@ -469,17 +468,9 @@ def _census_shard(
     step = max(1, math.ceil(count / _CENSUS_MAX_ROWS_PER_SHARD))
     offsets = list(range(0, count, step))
     shard, _ = view.open(shard_id)
-    sizes: dict[tuple[int, int], int] = {}
-    size_sum = 0
-    for start in range(0, len(offsets), _CENSUS_BATCH):
-        chunk = offsets[start : start + _CENSUS_BATCH]
-        got = shard.getsamples(chunk)
-        batch = got[0] if isinstance(got, tuple) else got
-        for offset, payload in zip(chunk, batch):
-            size = _content_bytes(payload)
-            sizes[(shard_id, offset)] = size
-            size_sum += size
-    return sizes, size_sum / len(offsets)
+    row_sizes = shard.content_sizes(offsets)
+    sizes = {(shard_id, offset): int(size) for offset, size in zip(offsets, row_sizes)}
+    return sizes, float(row_sizes.sum()) / len(offsets)
 
 
 # Per-dataset scan fanout. Composes with MAX_PRIME_PROCS: up to 128 concurrent
@@ -793,19 +784,35 @@ def _ensure_imports(dataset: Dataset) -> None:
         dependencies.ensure_litdata_deps()
 
 
+def _release_memory() -> None:
+    """Return freed heap to the OS so a worker's footprint is one dataset's, not its peak.
+
+    Arrow's pool and glibc malloc both keep freed pages for reuse by default.
+    """
+    gc.collect()
+    pa = sys.modules.get("pyarrow")
+    if pa is not None:
+        pa.default_memory_pool().release_unused()
+    if sys.platform.startswith("linux"):
+        ctypes.CDLL(None).malloc_trim(0)
+
+
 def _measure_in_worker(dataset_id: int) -> _DatasetMeasurement:
     w = _prime_worker
     dataset = w["datasets"][dataset_id]
     _ensure_imports(dataset)
-    return _measure_dataset(
-        dataset,
-        dataset_id,
-        w["store"],
-        w["estimation"],
-        w["counter"],
-        w["seed"],
-        pre_tokenize_replay=w["pre_tokenize_replay"],
-    )
+    try:
+        return _measure_dataset(
+            dataset,
+            dataset_id,
+            w["store"],
+            w["estimation"],
+            w["counter"],
+            w["seed"],
+            pre_tokenize_replay=w["pre_tokenize_replay"],
+        )
+    finally:
+        _release_memory()
 
 
 def _scan_cost(dataset: Dataset) -> float:
