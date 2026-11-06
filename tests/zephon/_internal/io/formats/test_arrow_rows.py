@@ -21,8 +21,10 @@ from zephon._internal.io.formats.arrow_rows import (
     _column_values,
     arrow_array_to_samples,
     arrow_table_to_samples,
+    content_sizes,
     take_and_materialize,
 )
+from zephon._internal.observability.size_estimator import content_bytes
 from zephon.io import ArrowOptions
 
 
@@ -608,3 +610,112 @@ def test_list_bitmaps_unpack_from_unaligned_offsets(kind: Any, offset: int) -> N
         type=kind(pa.string()),
     ).slice(offset, 17)
     assert _column_values(strings, pa) == strings.to_pylist()
+
+
+def _sizing_table() -> Any:
+    words = ["a", None, "héllo", "", "日本語", "z" * 40]
+    return pa.table(
+        {
+            "int8": pa.array([1, None, 3, 4, 5, 6], pa.int8()),
+            "int64": pa.array([1, 2, 3, 4, 5, 6], pa.int64()),
+            "float32": pa.array([1.5, None, 3.5, 0.0, 1.0, 2.0], pa.float32()),
+            "flag": pa.array([True, None, False, True, False, True]),
+            "text": words,
+            "large_text": pa.array(words, pa.large_string()),
+            "bytes": pa.array([b"ab", None, b"", b"c", b"de", b"f"], pa.binary()),
+            "dictionary": pa.array(words, pa.dictionary(pa.int8(), pa.string())),
+            "decimal": pa.array([Decimal("1.25")] * 5 + [None], pa.decimal128(8, 2)),
+            "timestamp": pa.array([1, None, 3, 4, 5, 6], pa.timestamp("us")),
+            "date32": pa.array([1, 2, None, 4, 5, 6], pa.date32()),
+            "duration": pa.array([1, 2, 3, None, 5, 6], pa.duration("s")),
+            "time": pa.array([1, 2, 3, 4, None, 6], pa.time32("s")),
+            "null": pa.nulls(6),
+            "numbers": pa.array(
+                [[1, 2], [1, None], [], None, [7], [8, 9, 10]], pa.list_(pa.int32())
+            ),
+            "bools": pa.array(
+                [[True], [False, True], None, [], [True], [False]], pa.list_(pa.bool_())
+            ),
+            "fixed": pa.array(
+                [[1, 2], [3, 4], None, [7, 8], [9, 10], [11, 12]],
+                pa.list_(pa.int16(), 2),
+            ),
+            "strings": pa.array(
+                [["ab", None], None, [], ["日本"], ["x", "yz"], [""]],
+                pa.large_list(pa.string()),
+            ),
+            "nested": pa.array(
+                [[[1], [2, 3]], None, [], [None], [[4]], [[5, 6]]],
+                pa.list_(pa.list_(pa.int32())),
+            ),
+            "struct": pa.array(
+                [
+                    {"content": "hi", "ids": [1, 2], "score": 1.5},
+                    None,
+                    {"content": None, "ids": [], "score": None},
+                    {"content": "日本語", "ids": None, "score": 2.0},
+                    {"content": "", "ids": [None, 3], "score": 0.0},
+                    {"content": "end", "ids": [4], "score": 3.0},
+                ],
+                pa.struct(
+                    [
+                        ("content", pa.string()),
+                        ("ids", pa.list_(pa.int64())),
+                        ("score", pa.float64()),
+                    ]
+                ),
+            ),
+            "list_of_structs": pa.array(
+                [[{"k": "a", "v": 1}], None, [], [{"k": None, "v": None}], [], []],
+                pa.list_(pa.struct([("k", pa.string()), ("v", pa.int32())])),
+            ),
+            "list_view": pa.array(
+                [["a"], None, ["bc", "d"], [], ["e"], ["f"]], pa.list_view(pa.string())
+            ),
+        }
+    )
+
+
+def _expected_sizes(table: Any) -> list[int]:
+    return [content_bytes(row) for row in arrow_table_to_samples(table)]
+
+
+def test_content_sizes_match_content_bytes_of_converted_rows() -> None:
+    table = _sizing_table()
+    assert content_sizes(table).tolist() == _expected_sizes(table)
+
+
+def test_content_sizes_respect_slices_and_chunk_boundaries() -> None:
+    table = _sizing_table()
+    chunked = pa.concat_tables([table.slice(0, 2), table.slice(2, 3), table.slice(5)])
+    assert chunked.column("text").num_chunks == 3
+    assert content_sizes(chunked).tolist() == _expected_sizes(table)
+    for start, length in ((1, 4), (3, 3), (5, 1), (2, 0)):
+        part = table.slice(start, length)
+        assert content_sizes(part).tolist() == _expected_sizes(part)
+
+
+def test_content_sizes_skip_values_under_null_lists() -> None:
+    values = pa.array(["ab", "cde", "f"])
+    lists = pa.ListArray.from_arrays(
+        pa.array([0, 1, 3], pa.int32()), values, mask=pa.array([False, True])
+    )
+    table = pa.table(
+        {"words": lists, "nested": pa.StructArray.from_arrays([lists], ["w"])}
+    )
+    assert content_sizes(table).tolist() == _expected_sizes(table) == [4, 0]
+
+
+def test_parquet_shard_content_sizes_match_getsamples(tmp_path: Path) -> None:
+    pq = pytest.importorskip("pyarrow.parquet")
+    from zephon._internal.io.formats.parquet import ParquetShard
+
+    table = _sizing_table().drop_columns(["list_view"])
+    path = tmp_path / "data.parquet"
+    pq.write_table(table, path, row_group_size=2)
+    shard = ParquetShard(path, row_groups=[{"num_rows": 2}] * 3)
+    for indices in ([0], [5, 0, 3], [4, 4, 1, 2], list(range(6)), []):
+        expected = [content_bytes(row) for row in shard.getsamples(indices)]
+        assert shard.content_sizes(indices).tolist() == expected
+    with pytest.raises(IndexError):
+        shard.content_sizes([6])

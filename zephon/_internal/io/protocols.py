@@ -5,7 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+import numpy as np
+
+from zephon._internal.observability.size_estimator import content_bytes
 from zephon.types import SamplePayload
+
+#: Rows decoded per ``getsamples`` call when sizing, bounding payloads held at once.
+_SIZE_BATCH = 2048
 
 
 @dataclass(slots=True)
@@ -48,6 +54,18 @@ class RandomAccessShard(Protocol):
     def __len__(self) -> int: ...
 
     def close(self) -> None: ...
+
+    def content_sizes(self, indices: list[int]) -> np.ndarray:
+        """``content_bytes`` of each requested row, in request order.
+
+        Formats with columnar buffers override this to size rows unmaterialized.
+        """
+        sizes = np.empty(len(indices), dtype=np.int64)
+        for start in range(0, len(indices), _SIZE_BATCH):
+            got = self.getsamples(indices[start : start + _SIZE_BATCH])
+            rows = got[0] if isinstance(got, tuple) else got
+            sizes[start : start + len(rows)] = [content_bytes(row) for row in rows]
+        return sizes
 
 
 class DatasetShardView(Protocol):

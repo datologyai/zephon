@@ -32,6 +32,7 @@ import numpy as np
 from zephon._internal.io.catalog.extra_codec import EncodedExtra, register_extra_codec
 from zephon._internal.io.formats.arrow_rows import (
     configure_pyarrow,
+    content_sizes,
     require_pyarrow,
     take_and_materialize,
 )
@@ -45,7 +46,7 @@ from zephon._internal.io.formats.parquet_cache.cache import ParquetRGCache
 from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
-from zephon._internal.io.protocols import RandomAccessShard
+from zephon._internal.io.protocols import _SIZE_BATCH, RandomAccessShard
 from zephon._internal.io.storage.base import StorageBackend
 from zephon._internal.io.suffixes import PARQUET_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -59,6 +60,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PARQUET_FOOTER_PREFETCH_BYTES = 64 * 1024
+
+#: Read-ahead per column while sizing; Arrow otherwise reads whole column chunks.
+_SIZE_STREAM_BUFFER_BYTES = 1 << 20
 
 
 def _ensure_pyarrow():
@@ -197,6 +201,40 @@ class ParquetShard(RandomAccessShard):
 
     def close(self) -> None:
         pass
+
+    def content_sizes(self, indices: list[int]) -> np.ndarray:
+        """Size rows by streaming each touched row group in small batches.
+
+        A buffered stream decodes one batch at a time, so memory stays near one
+        batch rather than a whole decoded row group.
+        """
+        pa, pq = _ensure_pyarrow()
+        if any(idx < 0 or idx >= self._length for idx in indices):
+            raise IndexError(indices)
+        metadata = (
+            self._metadata_loader() if self._metadata_loader is not None else None
+        )
+        pq_file = pq.ParquetFile(
+            self._path, metadata=metadata, buffer_size=_SIZE_STREAM_BUFFER_BYTES
+        )
+        positions = np.asarray(indices, dtype=np.int64)
+        sizes = np.empty(len(indices), dtype=np.int64)
+        rg_ids = np.searchsorted(self._rg_boundaries, positions, side="right") - 1
+        for rg_id in np.unique(rg_ids):
+            start = self._rg_boundaries[rg_id]
+            batches = pq_file.iter_batches(
+                batch_size=_SIZE_BATCH,
+                row_groups=[int(rg_id)],
+                use_threads=self._use_threads,
+            )
+            for batch in batches:
+                end = start + batch.num_rows
+                at = (positions >= start) & (positions < end)
+                if at.any():
+                    rows = pa.Table.from_batches([batch]).take(positions[at] - start)
+                    sizes[at] = content_sizes(rows)
+                start = end
+        return sizes
 
 
 def _row_groups_from_ref(
