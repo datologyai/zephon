@@ -205,6 +205,44 @@ class SmoothWeightedRoundRobin(Generic[K]):
         return {k: v / self._total for k, v in self._emitted.items() if v > 0}
 
 
+class DeficitRoundRobin:
+    """Classic SWRR over raw per-component deficits.
+
+    Each draw credits every component ``weight * cost`` and debits the chosen
+    one by ``cost``. Unlike :class:`SmoothWeightedRoundRobin`, the deficits are
+    plain floats the caller seeds and reads back, so they can be rolled back,
+    checkpointed and carried across target changes unchanged.
+
+    Args:
+        weights: Normalized target weight per component index.
+        deficits: Starting deficit per component index (copied).
+    """
+
+    __slots__ = ("_weights", "deficits")
+
+    def __init__(self, weights: Sequence[float], deficits: Sequence[float]) -> None:
+        self._weights = list(weights)
+        self.deficits = list(deficits)
+
+    def select(self) -> int:
+        """Return the index with the highest deficit; ties go to the earliest."""
+        deficits = self.deficits
+        best = 0
+        best_deficit = deficits[0]
+        for i in range(1, len(deficits)):
+            if deficits[i] > best_deficit:
+                best = i
+                best_deficit = deficits[i]
+        return best
+
+    def charge(self, chosen: int, cost: float) -> None:
+        """Record a draw of ``cost`` from component ``chosen``."""
+        deficits = self.deficits
+        for i, weight in enumerate(self._weights):
+            deficits[i] += weight * cost
+        deficits[chosen] -= cost
+
+
 def swrr_iterate(
     components: dict[K, Sequence[T]],
     weights: dict[K, float],
