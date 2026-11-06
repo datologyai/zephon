@@ -710,7 +710,8 @@ def test_parquet_shard_content_sizes_match_getsamples(tmp_path: Path) -> None:
     pq = pytest.importorskip("pyarrow.parquet")
     from zephon._internal.io.formats.parquet import ParquetShard
 
-    table = _sizing_table().drop_columns(["list_view"])
+    # Parquet stores no list views, and PyArrow 25 cannot read back a null fixed-size list.
+    table = _sizing_table().drop_columns(["list_view", "fixed"])
     path = tmp_path / "data.parquet"
     pq.write_table(table, path, row_group_size=2)
     shard = ParquetShard(path, row_groups=[{"num_rows": 2}] * 3)
