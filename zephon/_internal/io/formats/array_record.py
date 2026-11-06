@@ -33,6 +33,7 @@ from zephon._internal.io.index.shard_index import (
 )
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
+from zephon._internal.io.storage.base import LocalPathBackend
 from zephon._internal.io.suffixes import ARRAY_RECORD_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardLocator
 
@@ -74,12 +75,15 @@ def _open_reader(path: str) -> Any:
     raise ValueError(f"Not a readable ArrayRecord file: {path}{detail}")
 
 
-def _read_array_record_row_count(
-    path: str, storage: StorageBackend, size: int | None = None
-) -> int:
-    """Read postscript/footer ranges using the backend's path semantics."""
-    if size is None:
-        size = int(storage.stat(path)["size"])
+def _read_array_record_row_count(path: str, storage: StorageBackend, size: int) -> int:
+    """Use native local metadata reads, or bounded ranges through the backend."""
+    local = storage.local_path(path) if isinstance(storage, LocalPathBackend) else None
+    if local is not None:
+        reader = _open_reader(str(local))
+        try:
+            return reader.num_records()
+        finally:
+            reader.close()
     return read_row_count(path, storage, size)
 
 
@@ -89,6 +93,9 @@ class ArrayRecordShard(RandomAccessShard):
     def __init__(self, path: Path, *, length: int | None = None) -> None:
         self._reader: Any = _open_reader(str(path))
         self._length = length if length is not None else self._reader.num_records()
+        self._single_record_chunks = (
+            "group_size:1" in self._reader.writer_options_string().split(",")
+        )
 
     def __getitem__(self, index: int) -> bytes:
         return self.getsamples([index])[0]
@@ -114,6 +121,21 @@ class ArrayRecordShard(RandomAccessShard):
         # Its exclusive end must fit in int32; read(indices) accepts uint64.
         if len(indices) == 1 and indices[0] + 1 <= _MAX_RANGE_END:
             return self._reader.read(indices[0], indices[0] + 1)
+        # Avoid all-chunk bookkeeping for individual chunks and consecutive runs.
+        # Sparse grouped reads retain the indexed API's parallel decompression.
+        if max(indices) < _MAX_RANGE_END and (
+            self._single_record_chunks
+            or all(a + 1 == b for a, b in zip(indices, indices[1:]))
+        ):
+            records: list[bytes] = []
+            start = 0
+            for pos in range(1, len(indices) + 1):
+                if pos == len(indices) or indices[pos] != indices[pos - 1] + 1:
+                    records.extend(
+                        self._reader.read(indices[start], indices[pos - 1] + 1)
+                    )
+                    start = pos
+            return records
         return self._reader.read(indices)
 
 
@@ -135,23 +157,21 @@ class ArrayRecordFormat(FormatHandler):
                 raise ValueError(f"Inconsistent ArrayRecord index length for shard {i}")
         return index
 
+    def _index(self, path: str, storage: StorageBackend) -> ShardIndex:
+        index = self._load_index(path, storage)
+        return self._scan_files(path, storage) if index is None else index
+
     def discover(
         self, path: str, storage: StorageBackend
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, Any]]]:
         """Read the index, or inspect each shard's metadata."""
-        index = self._load_index(path, storage)
-        if index is None:
-            index = self._scan_files(path, storage)
-        return shard_index_metadata(index)
+        return shard_index_metadata(self._index(path, storage))
 
     def discover_counts(
         self, path: str, storage: StorageBackend
     ) -> tuple[np.ndarray, np.ndarray]:
         """Read counts without constructing locator metadata."""
-        index = self._load_index(path, storage)
-        if index is None:
-            index = self._scan_files(path, storage)
-        return shard_index_counts(index)
+        return shard_index_counts(self._index(path, storage))
 
     def _scan_files(self, path: str, storage: StorageBackend) -> ShardIndex:
         entries = sorted(

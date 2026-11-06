@@ -6,6 +6,13 @@ import pytest
 from zephon._internal.io.storage.local import LocalFSBackend
 
 
+def test_local_path_respects_root_and_absolute_paths(tmp_path: Path) -> None:
+    backend = LocalFSBackend(root=tmp_path)
+    assert backend.local_path("part") == tmp_path / "part"
+    absolute = tmp_path.parent / "elsewhere" / "part"
+    assert backend.local_path(str(absolute)) == absolute
+
+
 def test_local_open_and_exists_relative_and_absolute(tmp_path: Path) -> None:
     backend = LocalFSBackend(root=tmp_path)
     rel_file = tmp_path / "rel.txt"

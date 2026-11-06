@@ -8,7 +8,8 @@ Riegeli's simple encoding (google/riegeli doc/riegeli_records_file_format.md).
 No sample data or native reader is needed. Unknown encodings fail explicitly.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from functools import cache
 
 from zephon._internal.io.formats.array_record_support.highwayhash import highwayhash64
 from zephon._internal.io.storage import StorageBackend
@@ -71,8 +72,6 @@ def _unblock(data: bytes, offset: int, length: int) -> bytes:
                 raise ValueError("Invalid Riegeli block header checksum")
             pos += 24
             absolute += 24
-        elif absolute % _BLOCK <= 24:
-            raise ValueError("Invalid Riegeli chunk offset")
         take = min(length, _BLOCK - absolute % _BLOCK)
         part = data[pos : pos + take]
         if len(part) != take:
@@ -84,14 +83,25 @@ def _unblock(data: bytes, offset: int, length: int) -> bytes:
 
 
 def _physical_end(offset: int, length: int) -> int:
-    # The first chunk byte can lie at a block boundary (before its header).
-    while length:
-        if offset % _BLOCK == 0:
-            offset += 24
-        take = min(length, _BLOCK - offset % _BLOCK)
-        offset += take
-        length -= take
-    return offset
+    # Riegeli's AddWithOverhead: account for every intervening block header.
+    overhead = (length + (offset + _BLOCK - 25) % _BLOCK) // (_BLOCK - 24)
+    return offset + length + 24 * overhead
+
+
+@cache
+def _codecs() -> dict[int, Callable[[bytes, bytearray], int]]:
+    """Load the optional native codecs once, on the first compressed chunk."""
+    try:
+        import cramjam
+    except ImportError as exc:
+        raise ImportError(
+            'ArrayRecord metadata compression requires pip install "zephon[array_record]"'
+        ) from exc
+    return {
+        ord("z"): cramjam.zstd.decompress_into,
+        ord("b"): cramjam.brotli.decompress_into,
+        ord("s"): cramjam.snappy.decompress_raw_into,
+    }
 
 
 def _decompress(data: bytes, codec: int, max_size: int) -> bytes:
@@ -102,17 +112,7 @@ def _decompress(data: bytes, codec: int, max_size: int) -> bytes:
     expected, pos = _varint(data, 0)
     if expected > max_size:
         raise ValueError("Invalid Riegeli decompressed size")
-    try:
-        import cramjam
-    except ImportError as exc:
-        raise ImportError(
-            'ArrayRecord metadata compression requires pip install "zephon[array_record]"'
-        ) from exc
-    codecs = {
-        ord("z"): cramjam.zstd.decompress_into,
-        ord("b"): cramjam.brotli.decompress_into,
-        ord("s"): cramjam.snappy.decompress_raw_into,
-    }
+    codecs = _codecs()
     if codec not in codecs:
         raise ValueError(f"Unsupported Riegeli compression type {codec}")
     output = bytearray(expected)
@@ -161,6 +161,9 @@ def _chunk(
 
     if not 0 <= offset < limit:
         raise ValueError("Invalid ArrayRecord footer offset")
+    # Chunk offsets identify the boundary before its header, never a byte in it.
+    if 0 < offset % _BLOCK <= 24:
+        raise ValueError("Invalid Riegeli chunk offset")
     prefix = read(offset, min(_BLOCK, limit - offset))
     header = _unblock(prefix, offset, 40)
     if int.from_bytes(header[:8], "little") != highwayhash64(header[8:]):

@@ -114,6 +114,36 @@ def test_router_defaults_to_local(tmp_path: Path) -> None:
         assert handle.read() == "local"
 
 
+def test_router_local_path_delegates_without_materializing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    router = RouterStorageBackend(local_root=tmp_path)
+    assert router.local_path("part") == tmp_path / "part"
+    remote = _DummyBackend()
+    monkeypatch.setattr(
+        "zephon._internal.io.storage.router._make_s3_backend", lambda: remote
+    )
+    assert router.local_path("s3://bucket/part") is None
+    assert remote.calls == []
+
+
+def test_router_delegates_custom_local_path_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class MountedBackend:
+        def local_path(self, path: str) -> Path:
+            assert path == "s3://bucket/part"
+            return tmp_path / "mounted-part"
+
+    monkeypatch.setattr(
+        "zephon._internal.io.storage.router._make_s3_backend", MountedBackend
+    )
+    assert (
+        RouterStorageBackend().local_path("s3://bucket/part")
+        == tmp_path / "mounted-part"
+    )
+
+
 @pytest.mark.parametrize(
     "path",
     [

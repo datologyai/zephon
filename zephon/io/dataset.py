@@ -66,8 +66,7 @@ class Dataset:
     Backend kinds used by the internal store builder:
 
     - ``litdata``/``mds``/``jsonl``/``parquet``/``vortex``/``array_record``/``lance``:
-      ``kind`` and
-      ``path`` (no per-shard ``shards`` graph — that lives in the catalog now)
+      ``kind`` and ``path`` (no per-shard ``shards`` graph — that lives in the catalog now)
     - ``inmem``: ``kind`` and ``shards`` (``dict[int, InMemoryShard]``)
 
     Note: this class does not expose any method to fetch rows; IO is delegated

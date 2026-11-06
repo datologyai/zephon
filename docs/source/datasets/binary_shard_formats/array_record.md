@@ -25,7 +25,9 @@ with MessagePack:
 The writer's `group_size` option sets how many records share a chunk. With compression
 enabled, reading one record decompresses its whole chunk. `group_size:1` lets each record
 be decoded independently; larger groups can improve compression but may increase the
-work needed for isolated reads. Measure the tradeoff with your access pattern.
+work needed for isolated reads. Smaller groups also create larger footers, increasing
+discovery time without an index and the cost of opening each shard. Measure the
+tradeoff with your access pattern.
 
 An index is optional but highly recommended for any file format in Zephon.
 With an `index.json`, Zephon discovers the dataset from the index without reading the

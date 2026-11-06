@@ -190,6 +190,9 @@ def test_discovery_and_indexing_use_only_metadata_ranges(tmp_path: Path) -> None
         writer.write(rng.randbytes(8192))
     writer.close()
     storage = mock.Mock(wraps=LocalFSBackend(tmp_path))
+    storage.local_path = mock.Mock(
+        return_value=None
+    )  # Model a range-only remote backend.
     size = path.stat().st_size
     # A complete user-data chunk lives before the metadata tail. No request may touch it.
     for action in (

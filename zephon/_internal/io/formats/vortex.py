@@ -363,23 +363,21 @@ class VortexFormat(FormatHandler):
                 raise ValueError(f"Inconsistent Vortex index length for shard {i}")
         return index
 
+    def _index(self, path: str, storage: StorageBackend) -> ShardIndex:
+        index = self._load_index(path, storage)
+        return self._scan_files(path, storage) if index is None else index
+
     def discover(
         self, path: str, storage: StorageBackend
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, Any]]]:
         """Read the index, or inspect each shard's metadata."""
-        index = self._load_index(path, storage)
-        if index is None:
-            index = self._scan_files(path, storage)
-        return shard_index_metadata(index)
+        return shard_index_metadata(self._index(path, storage))
 
     def discover_counts(
         self, path: str, storage: StorageBackend
     ) -> tuple[np.ndarray, np.ndarray]:
         """Read counts without constructing locator metadata."""
-        index = self._load_index(path, storage)
-        if index is None:
-            index = self._scan_files(path, storage)
-        return shard_index_counts(index)
+        return shard_index_counts(self._index(path, storage))
 
     def _scan_files(self, path: str, storage: StorageBackend) -> ShardIndex:
         _require_vortex()

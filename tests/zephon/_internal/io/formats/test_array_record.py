@@ -118,23 +118,48 @@ def test_corrupt_shard_raises(tmp_path: Path) -> None:
         ArrayRecordShard(path)
 
 
-@pytest.mark.parametrize("size", [None, 123])
-def test_row_count_delegates_backend_path_and_size(size: int | None) -> None:
+def test_row_count_delegates_backend_path_and_size() -> None:
     storage = mock.Mock()
-    storage.stat.return_value = {"size": 123}
+    storage.local_path = mock.Mock(return_value=None)
     path = "custom://bucket/src.array_record"
     with mock.patch.object(
         array_record_format, "read_row_count", return_value=7
     ) as read:
-        assert (
-            array_record_format._read_array_record_row_count(path, storage, size) == 7
-        )
+        assert array_record_format._read_array_record_row_count(path, storage, 123) == 7
     read.assert_called_once_with(path, storage, 123)
-    if size is None:
-        storage.stat.assert_called_once_with(path)
-    else:
-        storage.stat.assert_not_called()
+    storage.stat.assert_not_called()
     storage.download.assert_not_called()
+
+
+def test_native_count_uses_backend_local_path_and_closes_reader(tmp_path: Path) -> None:
+    storage = mock.Mock()
+    local = tmp_path / "part.array_record"
+    storage.local_path = mock.Mock(return_value=local)
+    reader = mock.Mock()
+    reader.num_records.return_value = 7
+    with mock.patch.object(
+        array_record_format, "_open_reader", return_value=reader
+    ) as open_reader:
+        assert (
+            array_record_format._read_array_record_row_count(
+                "custom://dataset/part", storage, 123
+            )
+            == 7
+        )
+    open_reader.assert_called_once_with(str(local))
+    reader.close.assert_called_once_with()
+    storage.read_range.assert_not_called()
+    storage.stat.assert_not_called()
+
+
+def test_native_count_closes_reader_when_counting_fails(tmp_path: Path) -> None:
+    storage = LocalFSBackend(tmp_path)
+    reader = mock.Mock()
+    reader.num_records.side_effect = RuntimeError("bad metadata")
+    with mock.patch.object(array_record_format, "_open_reader", return_value=reader):
+        with pytest.raises(RuntimeError, match="bad metadata"):
+            array_record_format._read_array_record_row_count("part", storage, 123)
+    reader.close.assert_called_once_with()
 
 
 def test_open_shard_uses_length_hint(tmp_path: Path, write_array_record: Any) -> None:
@@ -178,11 +203,41 @@ def test_singleton_native_range_boundary(
 ) -> None:
     reader = mock.Mock()
     reader.read.return_value = [b"record"]
+    reader.writer_options_string.return_value = "group_size:1,zstd:3"
     with mock.patch.object(array_record_format, "_open_reader", return_value=reader):
         shard = ArrayRecordShard(tmp_path / "s.array_record", length=(1 << 32) + 1)
     try:
         assert shard.getsamples([index]) == [b"record"]
         reader.read.assert_called_once_with(*expected_args)
+    finally:
+        shard.close()
+
+
+@pytest.mark.parametrize(
+    ("group", "indices", "calls"),
+    [
+        (1, [5, 6, 2, 2, 3], [(5, 7), (2, 3), (2, 4)]),
+        (1000, [2, 3, 4], [(2, 5)]),
+        (1000, [2, 4, 4], [([2, 4, 4],)]),
+        (1, [1 << 31, 0], [([1 << 31, 0],)]),
+    ],
+)
+def test_bulk_native_dispatch_preserves_order_and_duplicates(
+    tmp_path: Path, group: int, indices: list[int], calls: list[tuple[Any, ...]]
+) -> None:
+    reader = mock.Mock()
+    reader.writer_options_string.return_value = f"group_size:{group},zstd:3"
+
+    def read(*args: Any) -> list[bytes]:
+        requested = args[0] if len(args) == 1 else range(*args)
+        return [str(index).encode() for index in requested]
+
+    reader.read.side_effect = read
+    with mock.patch.object(array_record_format, "_open_reader", return_value=reader):
+        shard = ArrayRecordShard(tmp_path / "part", length=(1 << 32) + 1)
+    try:
+        assert shard.getsamples(indices) == [str(index).encode() for index in indices]
+        assert reader.read.call_args_list == [mock.call(*args) for args in calls]
     finally:
         shard.close()
 

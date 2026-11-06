@@ -10,7 +10,9 @@ from unittest import mock
 import pytest
 
 from zephon._internal.io.formats.array_record_support.metadata import (
+    _chunk,
     _fields,
+    _physical_end,
     _varint,
     read_row_count,
 )
@@ -99,6 +101,30 @@ def test_varint_uint64_boundary() -> None:
         _varint(b"\xff" * 9 + b"\x02", 0)
     with pytest.raises(ValueError, match="Truncated"):
         _varint(b"\x80", 0)
+
+
+@pytest.mark.parametrize(
+    ("offset", "length", "end"),
+    [
+        (0, 0, 0),
+        (0, 40, 64),
+        (0, 65512, 65536),
+        (0, 65513, 65561),
+        (65535, 1, 65536),
+        (65535, 2, 65561),
+        (65536, 40, 65600),
+    ],
+)
+def test_physical_end_at_block_boundaries(offset: int, length: int, end: int) -> None:
+    assert _physical_end(offset, length) == end
+
+
+@pytest.mark.parametrize("offset", [1, 24, 65537, 65560])
+def test_chunk_rejects_offsets_in_block_headers(offset: int) -> None:
+    storage = mock.Mock()
+    with pytest.raises(ValueError, match="Invalid Riegeli chunk offset"):
+        _chunk("part", storage, offset, 131072)
+    storage.read_range.assert_not_called()
 
 
 @pytest.mark.parametrize("data", [b"\x00", b"\x0b", b"\x0a\x02x"])
