@@ -288,13 +288,15 @@ def test_read_options_reach_cached_and_uncached_decodes(
     pq = pytest.importorskip("pyarrow.parquet")
     dataset = _parquet_dataset(tmp_path)
     calls: list[bool] = []
-    native_read = pq.ParquetFile.read_row_group
+    # Cached decodes read whole row groups; uncached reads stream them in batches.
+    for name in ("read_row_group", "iter_batches"):
+        native = getattr(pq.ParquetFile, name)
 
-    def read(self, *args, **kwargs):
-        calls.append(kwargs["use_threads"])
-        return native_read(self, *args, **kwargs)
+        def read(self, *args, _native=native, **kwargs):
+            calls.append(kwargs["use_threads"])
+            return _native(self, *args, **kwargs)
 
-    monkeypatch.setattr(pq.ParquetFile, "read_row_group", read)
+        monkeypatch.setattr(pq.ParquetFile, name, read)
     options = StoreOptions(
         parquet=ParquetOptions(
             use_threads=use_threads,

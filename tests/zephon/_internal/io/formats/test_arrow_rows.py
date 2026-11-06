@@ -720,3 +720,21 @@ def test_parquet_shard_content_sizes_match_getsamples(tmp_path: Path) -> None:
         assert shard.content_sizes(indices).tolist() == expected
     with pytest.raises(IndexError):
         shard.content_sizes([6])
+
+
+def test_parquet_shard_streams_rows_across_batches(tmp_path: Path) -> None:
+    pq = pytest.importorskip("pyarrow.parquet")
+    from zephon._internal.io.formats.parquet import ParquetShard
+
+    n = 5000  # one row group spanning three 2048-row batches
+    table = pa.table(
+        {"id": pa.array(range(n), pa.int64()), "text": [f"r{i}" for i in range(n)]}
+    )
+    path = tmp_path / "data.parquet"
+    pq.write_table(table, path, row_group_size=n)
+    shard = ParquetShard(path, row_groups=[{"num_rows": n}])
+    indices = [4999, 0, 2048, 2047, 0, 4095, 4096]
+    assert shard.getsamples(indices) == arrow_table_to_samples(table, indices)
+    assert shard.content_sizes(indices).tolist() == [
+        content_bytes(row) for row in arrow_table_to_samples(table, indices)
+    ]
