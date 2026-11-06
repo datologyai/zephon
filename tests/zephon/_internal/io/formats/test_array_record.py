@@ -87,9 +87,27 @@ def test_rejects_out_of_range_and_closed_reads(
 
 @pytest.mark.usefixtures("write_array_record")
 def test_missing_shard_raises_os_error(tmp_path: Path) -> None:
-    """The native reader opens a missing file as empty; the shard must not."""
+    """Missing files remain filesystem errors across native reader versions."""
     with pytest.raises(FileNotFoundError):
         ArrayRecordShard(tmp_path / "missing.array_record")
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_native_constructor_failure(tmp_path: Path, exists: bool) -> None:
+    """Normalize old native exceptions without hiding missing-file errors."""
+    path = tmp_path / "shard.array_record"
+    if exists:
+        path.touch()
+    with mock.patch.object(array_record_format, "_require_array_record") as module:
+        module.return_value.ArrayRecordReader.side_effect = RuntimeError(
+            "native failure"
+        )
+        if exists:
+            with pytest.raises(ValueError, match="native failure"):
+                ArrayRecordShard(path)
+        else:
+            with pytest.raises(FileNotFoundError):
+                ArrayRecordShard(path)
 
 
 @pytest.mark.usefixtures("write_array_record")

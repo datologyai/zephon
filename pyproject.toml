@@ -49,7 +49,7 @@ vortex = [
     "vortex-data>=0.90.0; python_version >= '3.11'",
 ]
 array_record = [
-    "array-record>=0.8.0",
+    "array-record>=0.6.0",
     "cramjam>=2.8.0",  # ArrayRecord footer codecs (Zstd, Brotli, raw Snappy).
 ]
 

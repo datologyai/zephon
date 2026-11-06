@@ -40,14 +40,19 @@ def _require_array_record() -> ModuleType:
 
 def _open_reader(path: str) -> Any:
     """Raise when the native reader opens a missing/corrupt file as empty."""
-    reader = _require_array_record().ArrayRecordReader(path, _READER_OPTIONS)
-    if reader.ok():
-        return reader
     detail = ""
     try:
-        reader.close()
+        reader = _require_array_record().ArrayRecordReader(path, _READER_OPTIONS)
     except RuntimeError as exc:
+        # Older releases raise during construction instead of returning a failed reader.
         detail = f": {exc}"
+    else:
+        if reader.ok():
+            return reader
+        try:
+            reader.close()
+        except RuntimeError as exc:
+            detail = f": {exc}"
     # Filesystem failures remain retryable by the existing shard store.
     os.stat(path)
     raise ValueError(f"Not a readable ArrayRecord file: {path}{detail}")
