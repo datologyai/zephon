@@ -22,9 +22,9 @@ class _FunctionalOp(BaseOp):
     The accumulator factory may be either `Callable[[], Accumulator]` or
     `Callable[*, deterministic, ctx], Accumulator]` — the constructor
     inspects the signature once and routes `accumulator()` calls accordingly.
-    Lets users pick between deterministic-aware accumulators (e.g. switching
-    `CountingAccumulator(max_latency_ms=...)` on the deterministic flag) and
-    the simpler 0-arg form.
+    Lets users pick between deterministic-aware accumulators and the simpler
+    0-arg form. (A `CountingAccumulator` latency bound needs no switching:
+    the runner drops it in deterministic mode.)
     """
 
     def __init__(

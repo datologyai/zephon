@@ -662,16 +662,16 @@ class Pipeline:
                   size-based per-lane batching (it always groups by lane).
                 - ``Callable[*, deterministic, ctx], Accumulator]`` —
                   for accumulators whose construction depends on the
-                  deterministic mode (e.g. enabling latency-based flush
-                  only when ``deterministic`` is False) or runtime
-                  context. Example::
+                  deterministic mode or runtime context. Example::
 
                       accumulator=lambda *, deterministic, ctx: (
-                          CountingAccumulator(
-                              max_batch=N,
-                              max_latency_ms=None if deterministic else 3,
-                          )
+                          MyAccumulator(timed_flush=not deterministic)
                       )
+
+                In deterministic mode the runner drops ``max_latency_ms``
+                from any `CountingAccumulator` either form returns, so
+                ``CountingAccumulator(max_batch=N, max_latency_ms=3)`` is
+                safe to return unconditionally.
 
                 Defaults to a `PassthroughAccumulator` factory — each
                 upstream micro-batch becomes one ready batch as-is.
@@ -708,10 +708,12 @@ class Pipeline:
                 the op before tokenization. Default False; see :class:`OpTraits`.
             batch_shape_sensitive: Kwargs form. Set True when ``process_many``'s output
                 can depend on how inputs are grouped into micro-batches
-                (per-batch RNG, statistics, etc.). In deterministic mode
-                this disables latency-based accumulator flushing for
-                stages containing this op, preserving strong determinism
-                at the cost of some throughput.
+                (per-batch RNG, statistics, etc.). Descriptive only: batch
+                boundaries come from the accumulator, and in deterministic
+                mode the runner already drops latency-based flushing from
+                `CountingAccumulator`. A custom `Accumulator` that flushes
+                on time must disable that itself when ``deterministic`` is
+                True.
             requires_serial_state: Kwargs form. Set True when the op's accumulator
                 holds cross-invocation state that cannot be sharded
                 across parallel worker instances. In deterministic mode

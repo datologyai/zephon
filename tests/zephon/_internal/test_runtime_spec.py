@@ -287,7 +287,6 @@ def test_stage_runtime_spec_default_max_worker_retries_is_zero() -> None:
         queue_capacity=1,
         prefetch_capacity=0,
         output_mode="microbatches",
-        allow_latency_flush=True,
         memory_policy=PayloadMemoryPolicy(coalesce=False, min_item_bytes=1),
     )
     assert stage_spec.max_worker_retries == 0

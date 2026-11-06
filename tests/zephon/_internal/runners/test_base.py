@@ -19,8 +19,9 @@ from zephon._internal.engine import Engine
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.pack_sequences import PackSequences
-from zephon._internal.runners.base import BaseOperatorState
+from zephon._internal.runners.base import BaseOperatorState, build_accumulator
 from zephon._internal.runners.inline import InlineStageRunner
+from zephon.ops.accumulators import CountingAccumulator, PassthroughAccumulator
 from zephon.ops.accumulators.base import Accumulator, ReadyBatch, SourceExhaustion
 from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.traits import OpTraits
@@ -840,3 +841,39 @@ def test_final_component_survives_flush_and_is_reconstructed_after_reset() -> No
     assert state._get_source_exhaustion(3) == SourceExhaustion()
     state.enqueue([notice])
     assert state._get_source_exhaustion(3) == expected
+
+
+class _FixedAccOp(BaseOp):
+    """Op whose ``accumulator()`` returns a preset instance."""
+
+    def __init__(self, acc: Accumulator[Any]) -> None:
+        super().__init__()
+        self._acc = acc
+
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True)
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[Any]:
+        return self._acc
+
+    def process_many(self, elems: list[Any]) -> list[Any]:
+        return elems
+
+
+@pytest.mark.parametrize(("deterministic", "expected"), [(True, None), (False, 5)])
+def test_build_accumulator_drops_counting_latency_only_when_deterministic(
+    deterministic: bool, expected: int | None
+) -> None:
+    acc = CountingAccumulator[Any](max_batch=4, max_latency_ms=5)
+    built = build_accumulator(_FixedAccOp(acc), deterministic=deterministic, ctx={})
+    assert built is acc
+    assert acc._max_latency_ms == expected
+
+
+def test_build_accumulator_leaves_custom_accumulators_alone() -> None:
+    """The deterministic guard only touches `CountingAccumulator`."""
+    passthrough = PassthroughAccumulator[Any]()
+    op = _FixedAccOp(passthrough)
+    assert build_accumulator(op, deterministic=True, ctx={}) is passthrough

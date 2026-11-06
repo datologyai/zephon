@@ -39,7 +39,9 @@ class CountingAccumulator(Accumulator[T]):
 
     When ``max_latency_ms`` is None, this is a pure count-based accumulator
     suitable for deterministic execution.  When set, batches are also flushed
-    after the timeout expires (per lane).
+    after the timeout expires (per lane).  In deterministic mode the runtime
+    drops the latency bound from any ``CountingAccumulator`` an operator
+    returns, so operators don't need to switch it off themselves.
 
     When ``drop_last`` is True, ``flush()`` discards partial batches instead
     of emitting them.
@@ -59,6 +61,15 @@ class CountingAccumulator(Accumulator[T]):
         self._drop_last = drop_last
         self._buffers: dict[int, list[T]] = {}
         self._first_ts_ns: dict[int, int] = {}
+
+    def _disable_latency_flush(self) -> None:
+        """Drop the latency bound so batches are emitted by count only.
+
+        Called by the runtime on accumulators built for deterministic runs,
+        before any element is pushed.
+        """
+        self._max_latency_ms = None
+        self._first_ts_ns.clear()
 
     def has_pending_data(self, lane_id: int | None = None) -> bool:
         """Return True if buffered elements remain (in ``lane_id`` if given)."""

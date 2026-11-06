@@ -193,8 +193,10 @@ Configuring `traits` is essential to get the operator to work the way you want i
 - `parallelism` notes the preference for how many workers should be given to the operator.
 - `requires_serial_state` causes the operator to run with parallelism 1 in deterministic
   mode.
-- `batch_shape_sensitive` indicates your output depends on how records were grouped, which
-  disables latency-based grouping.
+- `batch_shape_sensitive` indicates your output depends on how records were grouped. It is
+  descriptive only. In deterministic mode the runner already drops `max_latency_ms` from
+  any `CountingAccumulator` your operator returns; a custom `Accumulator` that flushes on
+  time must turn that off itself when `accumulator()` receives `deterministic=True`.
 
 **Splitting records.** When an operator turns one record into several, construct each
 child's metadata with `spawn_child` from `zephon.ops.children`. Give the children

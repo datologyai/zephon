@@ -137,7 +137,6 @@ def _make_pipeline(scenario: CheckpointScenario, *, runner: Runner) -> Pipeline:
         default_stage_prefetch=scenario.stage_prefetch,
         prefetch_batches=scenario.final_prefetch,
         op_queue_capacity=scenario.queue_capacity,
-        allow_latency_flush_in_deterministic=False,
         mtp_mode=False,
     )
 

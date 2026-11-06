@@ -1142,11 +1142,14 @@ def _make_accumulator_factory(op: Any) -> Callable[[], Accumulator[Any]]:
 
     Goes through ``op.accumulator(deterministic=True, ctx={})`` so the
     factory-signature detection logic inside the op wrapper is exercised
-    end-to-end.  Hardcodes ``deterministic=True`` to validate the strict-
-    mode branch; latency-based flushing is inherently non-deterministic
-    and can't be tested by this harness anyway.
+    end-to-end, with the same deterministic-mode enforcement the runners
+    apply.  Hardcodes ``deterministic=True`` to validate the strict-mode
+    branch; latency-based flushing is inherently non-deterministic and
+    can't be tested by this harness anyway.
     """
-    return lambda: op.accumulator(deterministic=True, ctx={})
+    from zephon._internal.runners.base import build_accumulator
+
+    return lambda: build_accumulator(op, deterministic=True, ctx={})
 
 
 def _check_acc_flush_conservation(

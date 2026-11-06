@@ -29,7 +29,11 @@ from zephon._internal.stream import (
 from zephon._internal.utils.cleanup import cleanup_budget
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
-from zephon.ops.accumulators import Accumulator, SourceExhaustion
+from zephon.ops.accumulators import (
+    Accumulator,
+    CountingAccumulator,
+    SourceExhaustion,
+)
 from zephon.ops.base import BaseOp, OpContext, StageInfo
 from zephon.types import SampleBatch, SampleRecord, StreamItem
 
@@ -43,6 +47,22 @@ def teardown_operator(instance: BaseOp) -> None:
         instance.teardown()
     except Exception:
         logger.exception("Failed to tear down operator %s", type(instance).__name__)
+
+
+def build_accumulator(
+    op: BaseOp, *, deterministic: bool, ctx: dict[str, Any]
+) -> Accumulator[Any]:
+    """Build ``op``'s accumulator, enforcing count-only flushing if deterministic.
+
+    Time-based flushing makes batch boundaries depend on wall-clock timing, so
+    in deterministic mode the latency bound is dropped from any
+    `CountingAccumulator` the operator returns. Custom `Accumulator`
+    implementations are returned unchanged.
+    """
+    acc = op.accumulator(deterministic=deterministic, ctx=ctx)
+    if deterministic and isinstance(acc, CountingAccumulator):
+        acc._disable_latency_flush()
+    return acc
 
 
 @dataclass
@@ -63,7 +83,6 @@ class BaseOperatorState:
     node: Node
     deterministic: bool
     ctx_proto: dict[str, Any]
-    allow_latency_flush: bool = False
     stage_index: int = 0
     stage_name: str = ""
     op_index: int = 0
@@ -140,9 +159,8 @@ class BaseOperatorState:
         ctx = dict(self.ctx_proto)
         ctx.setdefault("deterministic", self.deterministic)
         ctx["get_source_exhaustion"] = self._get_source_exhaustion
-        self.accumulator_impl = self.node.op.accumulator(
-            deterministic=self.deterministic,
-            ctx=ctx,
+        self.accumulator_impl = build_accumulator(
+            self.node.op, deterministic=self.deterministic, ctx=ctx
         )
 
     def _update_epoch_floor(self, elems: Sequence[RunnerStreamIn]) -> None:
@@ -414,7 +432,6 @@ class StageRunnerBase(Generic[StateT], ABC):
         *,
         prefetch_capacity: int = 0,
         deterministic: bool = False,
-        allow_latency_flush_in_deterministic: bool = True,
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         measure_bytes: bool | None = None,
@@ -449,7 +466,6 @@ class StageRunnerBase(Generic[StateT], ABC):
                     op_index=op_index,
                     deterministic=deterministic,
                     ctx_proto=self._ctx_services,
-                    allow_latency_flush=allow_latency_flush_in_deterministic,
                     stage_index=stage_index,
                     stage_name=self._stage_name,
                     collect_op_stats=collect_op_stats,
@@ -470,7 +486,6 @@ class StageRunnerBase(Generic[StateT], ABC):
         op_index: int,
         deterministic: bool,
         ctx_proto: dict[str, Any],
-        allow_latency_flush: bool,
         stage_index: int,
         stage_name: str,
         collect_op_stats: bool,

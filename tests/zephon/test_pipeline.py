@@ -508,6 +508,68 @@ def test_add_op_accumulator_factory_receives_deterministic_and_ctx() -> None:
         assert call["ctx_type"] is dict
 
 
+_BUILT_COUNTING_ACCS: list[CountingAccumulator[Any]] = []
+
+
+def _timed_counting_acc() -> CountingAccumulator[Any]:
+    acc = CountingAccumulator[Any](max_batch=4, max_latency_ms=1)
+    _BUILT_COUNTING_ACCS.append(acc)
+    return acc
+
+
+class _TimedAccOp(BaseOp):
+    """Instance-form op returning a latency-bounded accumulator unconditionally."""
+
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True)
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[Any]:
+        return _timed_counting_acc()
+
+    def process_many(self, elems: list[Any]) -> list[Any]:
+        return list(elems)
+
+
+@pytest.mark.parametrize("form", ["instance", "kwargs"])
+@pytest.mark.parametrize("deterministic", [True, False])
+def test_add_op_counting_accumulator_latency_dropped_in_deterministic(
+    form: str, deterministic: bool
+) -> None:
+    """The runner strips ``max_latency_ms`` from a `CountingAccumulator` in
+    deterministic mode, for both ``add_op`` forms, and leaves it otherwise."""
+    _BUILT_COUNTING_ACCS.clear()
+    pipe = _empty_pipeline().decode_text()
+    if form == "instance":
+        pipe = pipe.add_op(_TimedAccOp(), name="timed")
+    else:
+        pipe = pipe.add_op(
+            "timed",
+            process_many=lambda elems: list(elems),
+            accumulator=_timed_counting_acc,
+            preserves_cursor_order=True,
+        )
+    # Validation builds its own (deterministic) accumulator; keep it out of
+    # the capture so only runner-built accumulators are checked.
+    pipe = pipe.options(
+        deterministic=deterministic,
+        prefetch_batches=0,
+        default_stage_prefetch=0,
+        auto_validation="off",
+    )
+    it = iter(pipe)
+    try:
+        list(it)
+    finally:
+        it.close()
+
+    assert _BUILT_COUNTING_ACCS, "accumulator was never built"
+    expected = None if deterministic else 1
+    for acc in _BUILT_COUNTING_ACCS:
+        assert acc._max_latency_ms == expected
+
+
 def test_add_op_appears_in_explain() -> None:
     pipe = (
         _empty_pipeline()
