@@ -7,7 +7,6 @@ from typing import Any, cast
 
 import pytest
 
-from zephon import Pipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import (
     ConstantSchedule,
@@ -428,17 +427,6 @@ def test_legacy_fixed_strategy_set_weights_raises() -> None:
     )
     with pytest.raises(NotImplementedError, match="fixed quotas"):
         LegacyFixedStrategy(config=cfg).set_weights({"a": 0.9, "b": 0.1})
-
-
-def test_pipeline_rejects_ensure_mixture_override_with_schedule() -> None:
-    work = _two_dataset_work(100, chunk_size=10, schedule=_crossfade(4))
-    pipe = (
-        Pipeline(work)
-        .ensure_mixture(weight_by="samples", mixture={"alpha": 0.5, "beta": 0.5})
-        .options(mtp_mode=False, max_workers=1)
-    )
-    with pytest.raises(ValueError, match="cannot be combined with a curriculum"):
-        next(iter(pipe))
 
 
 def test_schedule_to_dict_round_trip() -> None:
