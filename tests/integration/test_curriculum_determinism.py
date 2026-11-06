@@ -625,11 +625,6 @@ def _pack_flush_every(k: int) -> dict[str, Any]:
             {"work_kwargs": {"lane_assignment": "modulo"}},
             id="step-modulo",
         ),
-        pytest.param(
-            "step_phases",
-            {"ops": lambda p: p.map_transform(_drop_every_fifth, parallelism=8)},
-            id="step-filter",
-        ),
         *(
             pytest.param(
                 api, {"batch": batch, "samples_per_step": step}, id=f"{api}-{name}"
@@ -678,6 +673,22 @@ def test_ensure_mixture_follows_the_schedule() -> None:
                 chunk_round,
                 name,
             )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [INLINE, THREADS_RACY, MTP, PROCESS],
+    ids=["inline", "threads", "mtp", "process"],
+)
+def test_step_plan_filtering_fails_under_every_runner(options: dict[str, Any]) -> None:
+    pipe = _build(
+        "step_phases",
+        ops=lambda p: p.map_transform(_drop_every_fifth, parallelism=8),
+        options=options,
+    )
+    # Process workers re-raise it wrapped, with the message intact.
+    with pytest.raises(Exception, match="map_transform dropped a record"):
+        _consume(pipe, RECORDS_TO_CONSUME)
 
 
 _TOKEN_ESTIMATION = {"token_estimation": TokenEstimation(primer=0.25)}

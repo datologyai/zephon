@@ -16,7 +16,10 @@ class Materialize(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=True, indexable=False, preserves_cursor_order=True
+            calibration_replayable=True,
+            indexable=False,
+            preserves_cursor_order=True,
+            one_to_one_records=True,
         )
 
     def accumulator(
