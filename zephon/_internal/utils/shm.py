@@ -66,8 +66,8 @@ def is_shm_error(e: BaseException) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _read_cgroup_bytes(name: str) -> int:
-    """Return a cgroup v2 memory file's byte count, or ``-1`` if unavailable or unlimited."""
+def read_cgroup_memory_limit() -> int:
+    """Return cgroup v2 ``memory.max`` in bytes, or ``-1`` if unavailable."""
     try:
         with open("/proc/self/cgroup") as f:
             cgroup_line = f.read().strip()
@@ -75,38 +75,13 @@ def _read_cgroup_bytes(name: str) -> int:
         if len(parts) < 2:
             return -1
         cg_path = parts[1].strip()
-        with open(f"/sys/fs/cgroup{cg_path}/{name}") as f:
+        with open(f"/sys/fs/cgroup{cg_path}/memory.max") as f:
             val = f.read().strip()
             if val == "max":
                 return -1
             return int(val)
     except (OSError, ValueError, IndexError):
         return -1
-
-
-def read_cgroup_memory_limit() -> int:
-    """Return cgroup v2 ``memory.max`` in bytes, or ``-1`` if unavailable."""
-    return _read_cgroup_bytes("memory.max")
-
-
-def available_memory_bytes() -> int:
-    """Bytes this machine can still allocate without swapping or hitting its cgroup cap.
-
-    Linux reads ``MemAvailable``, capped by cgroup v2 headroom. Elsewhere, total
-    physical memory, since other platforms expose no reclaim-aware figure.
-    """
-    if not sys.platform.startswith("linux"):
-        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-    with open("/proc/meminfo") as f:
-        available = next(
-            int(line.split()[1]) * 1024
-            for line in f
-            if line.startswith("MemAvailable:")
-        )
-    limit = _read_cgroup_bytes("memory.max")
-    if limit > 0:
-        available = min(available, limit - max(0, _read_cgroup_bytes("memory.current")))
-    return available
 
 
 def shm_has_free_space(threshold: float = _SHM_FREE_THRESHOLD) -> bool:

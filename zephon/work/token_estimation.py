@@ -67,7 +67,6 @@ from zephon._internal.token_counting import (
     TokenCountingSpec as _TokenCountingSpec,
 )
 from zephon._internal.utils.atomic import atomic_write_bytes as _atomic_write_bytes
-from zephon._internal.utils.shm import available_memory_bytes as _available_memory_bytes
 from zephon.io.dataset import Dataset
 from zephon.io.options import StoreOptions
 from zephon.ops.base import OpContext, StageInfo
@@ -746,14 +745,9 @@ def _measure_dataset(
     return _DatasetMeasurement(TokenRatio(ratio, "measured"))
 
 
-# Processes isolate the GIL-bound census; also capped by core count and by
-# available memory at pool construction. Composes with MAX_SCAN_THREADS.
+# Processes isolate the GIL-bound census; also capped by core count at pool
+# construction. Composes with MAX_SCAN_THREADS.
 MAX_PRIME_PROCS = 16
-
-#: Memory one census process needs. Measured over 58 text corpora (Parquet,
-#: up to 632k-row files): up to 4.6 GiB resident before its scan (imports,
-#: catalog), plus up to 3.2 GiB while scanning with MAX_SCAN_THREADS.
-PRIME_PROC_BYTES = 8 << 30
 
 # Built once per worker process in the initializer.
 _prime_worker: dict[str, Any] = {}
@@ -843,25 +837,13 @@ def _run_census(
     order = sorted(
         measured_datasets.items(), key=lambda kv: _scan_cost(kv[1]), reverse=True
     )
-    available = _available_memory_bytes()
-    workers = max(
-        1,
-        min(
-            MAX_PRIME_PROCS,
-            len(order),
-            os.cpu_count() or 1,
-            available // PRIME_PROC_BYTES,
-        ),
-    )
+    workers = min(MAX_PRIME_PROCS, len(order), os.cpu_count() or 1)
     _logger.info(
         "token-aware priming: measuring %d dataset(s) across %d process(es) "
-        "(%.1f GiB available, %.1f GiB per process; "
-        "%d samples, %d-%d scanned shards each) — downloads/decodes calibration "
+        "(%d samples, %d-%d scanned shards each) — downloads/decodes calibration "
         "shards and runs the tokenizer; expect minutes, longer on cold caches",
         len(order),
         workers,
-        available / 2**30,
-        PRIME_PROC_BYTES / 2**30,
         estimation.calibration_samples,
         estimation.calibration_shards_min,
         estimation.calibration_shards_max,
