@@ -23,6 +23,8 @@ from zephon.work import (
     StepMixturePlan,
 )
 
+pytestmark = pytest.mark.integration
+
 # All-a for steps 0-3, all-b from step 4; two records per step and four per
 # chunk round, so the switch is exact at record 8.
 _PLAN = StepMixturePlan(
