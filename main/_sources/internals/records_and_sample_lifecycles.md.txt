@@ -257,7 +257,7 @@ token calibration:
 | `preserves_cursor_order` | Required, no default | Records leave in the same chunk/offset order they arrived. `False` for anything that shuffles, packs, or buffers across chunks. |
 | `calibration_replayable` | `False` | Whether token calibration may replay the operator before tokenization. See {class}`~zephon.ops.OpTraits`. |
 | `requires_serial_state` | `False` | The operator keeps state across invocations. In deterministic mode the runner raises unless its parallelism is 1. |
-| `batch_shape_sensitive` | `False` | Output depends on how inputs were grouped into micro-batches. Intended to disable time-based flushing in deterministic mode, but currently has no effect ([#49](https://github.com/datologyai/zephon/issues/49)). |
+| `batch_shape_sensitive` | `False` | Output depends on how inputs were grouped into micro-batches. Descriptive only; the runtime does not act on it. Deterministic batch boundaries come from the operator's accumulator; the runner drops latency-based flushing from `CountingAccumulator` in deterministic mode (see [Operators and runners](operators_and_runners.md)). |
 | `indexable` | `True` | The operator preserves indexability through the plan. |
 | `parallelism` | `1` | Suggested worker count, used when the plan does not override it. |
 

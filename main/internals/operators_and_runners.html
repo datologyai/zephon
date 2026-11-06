@@ -474,12 +474,12 @@ released as soon as every pre-boundary record has left the buffer, and that defa
 <code class="docutils literal notranslate"><span class="pre">drop_last=True</span></code>. Lane keying lives in <code class="docutils literal notranslate"><span class="pre">CountingAccumulator</span></code> itself, which is what makes a
 per-lane flush sentinel able to reset one lane alone.</p>
 <p><code class="docutils literal notranslate"><span class="pre">CountingAccumulator</span></code> can also flush on a latency bound (<code class="docutils literal notranslate"><span class="pre">max_latency_ms</span></code>), emitting a
-partial micro-batch rather than waiting for a bursty stream to fill one. There is no
-global switch that turns this off in deterministic mode. Each built-in operator passes
-<code class="docutils literal notranslate"><span class="pre">max_latency_ms=None</span></code> from its own <code class="docutils literal notranslate"><span class="pre">accumulator()</span></code> when <code class="docutils literal notranslate"><span class="pre">deterministic</span></code> is set, so its
-micro-batch boundaries depend only on counts and never on the clock. A custom operator
-that builds a <code class="docutils literal notranslate"><span class="pre">CountingAccumulator</span></code> with a latency bound has to do the same: <code class="docutils literal notranslate"><span class="pre">accumulator()</span></code>
-receives <code class="docutils literal notranslate"><span class="pre">deterministic</span></code>, so check it and drop the latency bound when it is <code class="docutils literal notranslate"><span class="pre">True</span></code>.</p>
+partial micro-batch rather than waiting for a bursty stream to fill one. In
+deterministic mode the runner drops that bound from any <code class="docutils literal notranslate"><span class="pre">CountingAccumulator</span></code> an
+operator’s <code class="docutils literal notranslate"><span class="pre">accumulator()</span></code> returns, built-in or custom, so micro-batch boundaries depend
+only on counts and never on the clock. This guard covers <code class="docutils literal notranslate"><span class="pre">CountingAccumulator</span></code> (and its
+subclasses) only: a custom <code class="docutils literal notranslate"><span class="pre">Accumulator</span></code> that flushes on time has to check the
+<code class="docutils literal notranslate"><span class="pre">deterministic</span></code> argument to <code class="docutils literal notranslate"><span class="pre">accumulator()</span></code> and turn that off itself.</p>
 <p>The specialized ones ship with the operators that need them, and you never construct one
 yourself. The accumulator behind <code class="docutils literal notranslate"><span class="pre">pack_sequences</span></code> keeps per-lane bins and emits when a
 bin’s remaining capacity drops below the minimum useful sequence length or when too many

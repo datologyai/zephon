@@ -399,19 +399,18 @@ correctness. Two signatures are supported and auto-detected:</p>
 size-based per-lane batching (it always groups by lane).</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">Callable[*,</span> <span class="pre">deterministic,</span> <span class="pre">ctx],</span> <span class="pre">Accumulator]</span></code> —
 for accumulators whose construction depends on the
-deterministic mode (e.g. enabling latency-based flush
-only when <code class="docutils literal notranslate"><span class="pre">deterministic</span></code> is False) or runtime
-context. Example:</p>
+deterministic mode or runtime context. Example:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">accumulator</span><span class="o">=</span><span class="k">lambda</span> <span class="o">*</span><span class="p">,</span> <span class="n">deterministic</span><span class="p">,</span> <span class="n">ctx</span><span class="p">:</span> <span class="p">(</span>
-    <span class="n">CountingAccumulator</span><span class="p">(</span>
-        <span class="n">max_batch</span><span class="o">=</span><span class="n">N</span><span class="p">,</span>
-        <span class="n">max_latency_ms</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">deterministic</span> <span class="k">else</span> <span class="mi">3</span><span class="p">,</span>
-    <span class="p">)</span>
+    <span class="n">MyAccumulator</span><span class="p">(</span><span class="n">timed_flush</span><span class="o">=</span><span class="ow">not</span> <span class="n">deterministic</span><span class="p">)</span>
 <span class="p">)</span>
 </pre></div>
 </div>
 </li>
 </ul>
+<p>In deterministic mode the runner drops <code class="docutils literal notranslate"><span class="pre">max_latency_ms</span></code>
+from any <cite>CountingAccumulator</cite> either form returns, so
+<code class="docutils literal notranslate"><span class="pre">CountingAccumulator(max_batch=N,</span> <span class="pre">max_latency_ms=3)</span></code> is
+safe to return unconditionally.</p>
 <p>Defaults to a <cite>PassthroughAccumulator</cite> factory — each
 upstream micro-batch becomes one ready batch as-is.</p>
 </p></li>
@@ -448,10 +447,12 @@ plan.  Default False; set True only if the transform is
 the op before tokenization. Default False; see <code class="xref py py-class docutils literal notranslate"><span class="pre">OpTraits</span></code>.</p></li>
 <li><p><strong>batch_shape_sensitive</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a><em> | </em><em>None</em>) – Kwargs form. Set True when <code class="docutils literal notranslate"><span class="pre">process_many</span></code>’s output
 can depend on how inputs are grouped into micro-batches
-(per-batch RNG, statistics, etc.). In deterministic mode
-this disables latency-based accumulator flushing for
-stages containing this op, preserving strong determinism
-at the cost of some throughput.</p></li>
+(per-batch RNG, statistics, etc.). Descriptive only: batch
+boundaries come from the accumulator, and in deterministic
+mode the runner already drops latency-based flushing from
+<cite>CountingAccumulator</cite>. A custom <cite>Accumulator</cite> that flushes
+on time must disable that itself when <code class="docutils literal notranslate"><span class="pre">deterministic</span></code> is
+True.</p></li>
 <li><p><strong>requires_serial_state</strong> (<a class="reference external" href="https://docs.python.org/3/builtins/functions.html#bool" title="(in Python v3.15)"><em>bool</em></a><em> | </em><em>None</em>) – Kwargs form. Set True when the op’s accumulator
 holds cross-invocation state that cannot be sharded
 across parallel worker instances. In deterministic mode

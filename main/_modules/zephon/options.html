@@ -428,11 +428,6 @@
     <span class="n">ipc_buffer_bytes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">DEFAULT_IPC_BUFFER_BYTES</span>
     <span class="n">mixture_config</span><span class="p">:</span> <span class="n">MixtureReadConfig</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
     <span class="n">io_options</span><span class="p">:</span> <span class="n">StoreOptions</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="n">StoreOptions</span><span class="p">)</span>
-    <span class="c1"># Expert knob:</span>
-    <span class="c1"># Keep latency-based flush in deterministic mode when True unless a stage contains</span>
-    <span class="c1"># a batch-shape sensitive operator (in which case we auto-disable it for that stage).</span>
-    <span class="c1"># When False, latency flush is always disabled in deterministic mode.</span>
-    <span class="n">allow_latency_flush_in_deterministic</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
 
     <span class="c1"># === Epoch flush ===</span>
     <span class="c1"># Flush sentinel cadence: inject a flush sentinel every K chunks per lane.</span>

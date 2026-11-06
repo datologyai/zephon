@@ -552,6 +552,9 @@
 
 <span class="sd">        Args:</span>
 <span class="sd">            deterministic: Whether to disable behavior such as timed flushing.</span>
+<span class="sd">                The runner already drops ``max_latency_ms`` from a returned</span>
+<span class="sd">                `CountingAccumulator` when this is True; custom accumulators</span>
+<span class="sd">                that flush on time must check it themselves.</span>
 <span class="sd">            ctx: Runtime services available to the accumulator.</span>
 
 <span class="sd">        Returns:</span>

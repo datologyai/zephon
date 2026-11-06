@@ -1019,16 +1019,16 @@
 <span class="sd">                  size-based per-lane batching (it always groups by lane).</span>
 <span class="sd">                - ``Callable[*, deterministic, ctx], Accumulator]`` —</span>
 <span class="sd">                  for accumulators whose construction depends on the</span>
-<span class="sd">                  deterministic mode (e.g. enabling latency-based flush</span>
-<span class="sd">                  only when ``deterministic`` is False) or runtime</span>
-<span class="sd">                  context. Example::</span>
+<span class="sd">                  deterministic mode or runtime context. Example::</span>
 
 <span class="sd">                      accumulator=lambda *, deterministic, ctx: (</span>
-<span class="sd">                          CountingAccumulator(</span>
-<span class="sd">                              max_batch=N,</span>
-<span class="sd">                              max_latency_ms=None if deterministic else 3,</span>
-<span class="sd">                          )</span>
+<span class="sd">                          MyAccumulator(timed_flush=not deterministic)</span>
 <span class="sd">                      )</span>
+
+<span class="sd">                In deterministic mode the runner drops ``max_latency_ms``</span>
+<span class="sd">                from any `CountingAccumulator` either form returns, so</span>
+<span class="sd">                ``CountingAccumulator(max_batch=N, max_latency_ms=3)`` is</span>
+<span class="sd">                safe to return unconditionally.</span>
 
 <span class="sd">                Defaults to a `PassthroughAccumulator` factory — each</span>
 <span class="sd">                upstream micro-batch becomes one ready batch as-is.</span>
@@ -1065,10 +1065,12 @@
 <span class="sd">                the op before tokenization. Default False; see :class:`OpTraits`.</span>
 <span class="sd">            batch_shape_sensitive: Kwargs form. Set True when ``process_many``'s output</span>
 <span class="sd">                can depend on how inputs are grouped into micro-batches</span>
-<span class="sd">                (per-batch RNG, statistics, etc.). In deterministic mode</span>
-<span class="sd">                this disables latency-based accumulator flushing for</span>
-<span class="sd">                stages containing this op, preserving strong determinism</span>
-<span class="sd">                at the cost of some throughput.</span>
+<span class="sd">                (per-batch RNG, statistics, etc.). Descriptive only: batch</span>
+<span class="sd">                boundaries come from the accumulator, and in deterministic</span>
+<span class="sd">                mode the runner already drops latency-based flushing from</span>
+<span class="sd">                `CountingAccumulator`. A custom `Accumulator` that flushes</span>
+<span class="sd">                on time must disable that itself when ``deterministic`` is</span>
+<span class="sd">                True.</span>
 <span class="sd">            requires_serial_state: Kwargs form. Set True when the op's accumulator</span>
 <span class="sd">                holds cross-invocation state that cannot be sharded</span>
 <span class="sd">                across parallel worker instances. In deterministic mode</span>

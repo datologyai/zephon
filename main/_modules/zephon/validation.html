@@ -1488,11 +1488,14 @@
 
 <span class="sd">    Goes through ``op.accumulator(deterministic=True, ctx={})`` so the</span>
 <span class="sd">    factory-signature detection logic inside the op wrapper is exercised</span>
-<span class="sd">    end-to-end.  Hardcodes ``deterministic=True`` to validate the strict-</span>
-<span class="sd">    mode branch; latency-based flushing is inherently non-deterministic</span>
-<span class="sd">    and can't be tested by this harness anyway.</span>
+<span class="sd">    end-to-end, with the same deterministic-mode enforcement the runners</span>
+<span class="sd">    apply.  Hardcodes ``deterministic=True`` to validate the strict-mode</span>
+<span class="sd">    branch; latency-based flushing is inherently non-deterministic and</span>
+<span class="sd">    can't be tested by this harness anyway.</span>
 <span class="sd">    """</span>
-    <span class="k">return</span> <span class="k">lambda</span><span class="p">:</span> <span class="n">op</span><span class="o">.</span><span class="n">accumulator</span><span class="p">(</span><span class="n">deterministic</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">ctx</span><span class="o">=</span><span class="p">{})</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.runners.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">build_accumulator</span>
+
+    <span class="k">return</span> <span class="k">lambda</span><span class="p">:</span> <span class="n">build_accumulator</span><span class="p">(</span><span class="n">op</span><span class="p">,</span> <span class="n">deterministic</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">ctx</span><span class="o">=</span><span class="p">{})</span>
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">_check_acc_flush_conservation</span><span class="p">(</span>

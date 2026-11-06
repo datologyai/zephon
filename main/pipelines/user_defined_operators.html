@@ -687,8 +687,10 @@ map-style dataset).</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">parallelism</span></code> notes the preference for how many workers should be given to the operator.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">requires_serial_state</span></code> causes the operator to run with parallelism 1 in deterministic
 mode.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">batch_shape_sensitive</span></code> indicates your output depends on how records were grouped, which
-disables latency-based grouping.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">batch_shape_sensitive</span></code> indicates your output depends on how records were grouped. It is
+descriptive only. In deterministic mode the runner already drops <code class="docutils literal notranslate"><span class="pre">max_latency_ms</span></code> from
+any <code class="docutils literal notranslate"><span class="pre">CountingAccumulator</span></code> your operator returns; a custom <code class="docutils literal notranslate"><span class="pre">Accumulator</span></code> that flushes on
+time must turn that off itself when <code class="docutils literal notranslate"><span class="pre">accumulator()</span></code> receives <code class="docutils literal notranslate"><span class="pre">deterministic=True</span></code>.</p></li>
 </ul>
 <p id="splitting-records"><strong>Splitting records.</strong> When an operator turns one record into several, construct each
 child’s metadata with <code class="docutils literal notranslate"><span class="pre">spawn_child</span></code> from <code class="docutils literal notranslate"><span class="pre">zephon.ops.children</span></code>. Give the children

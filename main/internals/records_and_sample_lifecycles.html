@@ -611,7 +611,7 @@ token calibration:</p>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">batch_shape_sensitive</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">False</span></code></p></td>
-<td><p>Output depends on how inputs were grouped into micro-batches. Intended to disable time-based flushing in deterministic mode, but currently has no effect (<a class="reference external" href="https://github.com/datologyai/zephon/issues/49">#49</a>).</p></td>
+<td><p>Output depends on how inputs were grouped into micro-batches. Descriptive only; the runtime does not act on it. Deterministic batch boundaries come from the operator’s accumulator; the runner drops latency-based flushing from <code class="docutils literal notranslate"><span class="pre">CountingAccumulator</span></code> in deterministic mode (see <a class="reference internal" href="operators_and_runners.html"><span class="std std-doc">Operators and runners</span></a>).</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">indexable</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">True</span></code></p></td>

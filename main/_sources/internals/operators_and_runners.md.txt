@@ -149,12 +149,12 @@ released as soon as every pre-boundary record has left the buffer, and that defa
 per-lane flush sentinel able to reset one lane alone.
 
 `CountingAccumulator` can also flush on a latency bound (`max_latency_ms`), emitting a
-partial micro-batch rather than waiting for a bursty stream to fill one. There is no
-global switch that turns this off in deterministic mode. Each built-in operator passes
-`max_latency_ms=None` from its own `accumulator()` when `deterministic` is set, so its
-micro-batch boundaries depend only on counts and never on the clock. A custom operator
-that builds a `CountingAccumulator` with a latency bound has to do the same: `accumulator()`
-receives `deterministic`, so check it and drop the latency bound when it is `True`.
+partial micro-batch rather than waiting for a bursty stream to fill one. In
+deterministic mode the runner drops that bound from any `CountingAccumulator` an
+operator's `accumulator()` returns, built-in or custom, so micro-batch boundaries depend
+only on counts and never on the clock. This guard covers `CountingAccumulator` (and its
+subclasses) only: a custom `Accumulator` that flushes on time has to check the
+`deterministic` argument to `accumulator()` and turn that off itself.
 
 The specialized ones ship with the operators that need them, and you never construct one
 yourself. The accumulator behind `pack_sequences` keeps per-lane bins and emits when a

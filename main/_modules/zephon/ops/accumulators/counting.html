@@ -375,7 +375,9 @@
 
 <span class="sd">    When ``max_latency_ms`` is None, this is a pure count-based accumulator</span>
 <span class="sd">    suitable for deterministic execution.  When set, batches are also flushed</span>
-<span class="sd">    after the timeout expires (per lane).</span>
+<span class="sd">    after the timeout expires (per lane).  In deterministic mode the runtime</span>
+<span class="sd">    drops the latency bound from any ``CountingAccumulator`` an operator</span>
+<span class="sd">    returns, so operators don't need to switch it off themselves.</span>
 
 <span class="sd">    When ``drop_last`` is True, ``flush()`` discards partial batches instead</span>
 <span class="sd">    of emitting them.</span>
@@ -395,6 +397,15 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_drop_last</span> <span class="o">=</span> <span class="n">drop_last</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_buffers</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">T</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_first_ts_ns</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_disable_latency_flush</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Drop the latency bound so batches are emitted by count only.</span>
+
+<span class="sd">        Called by the runtime on accumulators built for deterministic runs,</span>
+<span class="sd">        before any element is pushed.</span>
+<span class="sd">        """</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_max_latency_ms</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_first_ts_ns</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
 
 <div class="viewcode-block" id="CountingAccumulator.has_pending_data">
 <a class="viewcode-back" href="../../../../api/operators.html#zephon.ops.CountingAccumulator.has_pending_data">[docs]</a>
