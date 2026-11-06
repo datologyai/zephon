@@ -1,4 +1,8 @@
-from zephon._internal.world import World
+import re
+
+import pytest
+
+from zephon._internal.world import World, check_step_lane_windows
 
 
 def test_world_defaults() -> None:
@@ -11,3 +15,47 @@ def test_world_defaults() -> None:
     assert w.dp_degree == 1
     assert w.dp_group_id == 0
     assert w.lanes_for_dp_group == {0: [0]}
+
+
+@pytest.mark.parametrize(
+    "records,batch,replicas,dp,hint",
+    [
+        (
+            32,
+            8,
+            8,
+            1,
+            "Use global_batch_size=64, canonical_replicas=4, or an output batch "
+            "size of 4.",
+        ),
+        (
+            48,
+            4,
+            8,
+            2,
+            "Use global_batch_size=32 or 64, canonical_replicas=6 or 12, or an "
+            "output batch size of 3.",
+        ),
+        (12, 4, 2, 2, "Use global_batch_size=8 or 16, or an output batch size of 3."),
+        # No lane count or batch size fits, so only the step size can change.
+        (12, 4, 8, 2, "Use global_batch_size=32."),
+        (
+            192,
+            4,
+            64,
+            16,
+            "Use global_batch_size=256, canonical_replicas=48, or an output batch "
+            "size of 3.",
+        ),
+    ],
+)
+def test_lane_window_check_names_layouts_that_fit(
+    records: int, batch: int, replicas: int, dp: int, hint: str
+) -> None:
+    with pytest.raises(ValueError, match=re.escape(hint)):
+        check_step_lane_windows(records, batch, replicas, dp)
+
+
+def test_lane_window_check_rejects_partial_batches() -> None:
+    with pytest.raises(ValueError, match="global_batch_size=30 must be a multiple"):
+        check_step_lane_windows(30, 4, 1, 1)
