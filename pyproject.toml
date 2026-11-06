@@ -49,10 +49,16 @@ vortex = [
     "vortex-data>=0.90.0; python_version >= '3.11'",
 ]
 array_record = [
-    "array-record>=0.6.0",
+    # Upstream has Linux/macOS wheels, but none for Windows. Keep the 0.6.0 floor
+    # so existing installations need not upgrade. Intel macOS needs the 0.6.x
+    # universal wheels (Python 3.10-3.12); newer releases are Apple Silicon only.
+    # The Intel cap also prevents universal lockfiles selecting ARM-only wheels.
+    # Markers cannot express ABI/libc availability (including 3.14t); the resolver
+    # still decides whether a compatible distribution exists.
+    "array-record>=0.6.0; sys_platform == 'linux' or (sys_platform == 'darwin' and platform_machine == 'arm64')",
+    "array-record>=0.6.0,<0.7.0; sys_platform == 'darwin' and platform_machine == 'x86_64' and python_version < '3.13'",
     "cramjam>=2.8.0",  # ArrayRecord footer codecs (Zstd, Brotli, raw Snappy).
 ]
-
 lance = [
     "pylance>=1.0.0",
     "zephon[parquet]",
