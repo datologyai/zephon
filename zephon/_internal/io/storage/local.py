@@ -54,6 +54,10 @@ class LocalFSBackend(StorageBackend):
     def canonical_root(self, path: str, fmt: str | None = None) -> str:
         return path
 
+    def local_path(self, path: str) -> Path:
+        """Resolve a native reader's path using this backend's local root."""
+        return self._abspath(path)
+
     def open(self, path: str, mode: str = "rb", **kwargs: Any) -> IO[bytes] | IO[str]:
         abspath = self._abspath(path)
         return abspath.open(mode, **kwargs)

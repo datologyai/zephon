@@ -14,6 +14,7 @@ _FORMAT_MODULES: dict[str, str] = {
     "parquet": "zephon._internal.io.formats.parquet",
     "vortex": "zephon._internal.io.formats.vortex",
     "litdata": "zephon._internal.io.formats.litdata",
+    "array_record": "zephon._internal.io.formats.array_record",
 }
 
 

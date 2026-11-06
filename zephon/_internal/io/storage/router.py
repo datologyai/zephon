@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import IO, Any, Mapping, cast
 
 from .azure import AzureBackend
-from .base import StorageBackend
+from .base import LocalPathBackend, StorageBackend
 from .local import LocalFSBackend
 
 
@@ -89,6 +89,13 @@ class RouterStorageBackend(StorageBackend):
 
     def canonical_root(self, path: str, fmt: str | None = None) -> str:
         return self._backend_for(path).canonical_root(path, fmt)
+
+    def local_path(self, path: str) -> Path | None:
+        """Delegate optional native-file access to the selected backend."""
+        backend = self._backend_for(path)
+        return (
+            backend.local_path(path) if isinstance(backend, LocalPathBackend) else None
+        )
 
     def download(self, src: str, dst: str, timeout: float | None = None) -> None:
         return self._backend_for(src).download(src, dst, timeout)

@@ -1,7 +1,21 @@
 """Protocols for IO storage backends."""
 
 from collections.abc import Iterator
-from typing import IO, Any, Mapping, Protocol
+from pathlib import Path
+from typing import IO, Any, Mapping, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class LocalPathBackend(Protocol):
+    """Optional access to an existing local file for native format readers."""
+
+    def local_path(self, path: str) -> Path | None:
+        """Return a directly readable local path, or None for remote content.
+
+        This must not download or materialize a file. Backends without this
+        capability remain readable through the ordinary storage operations.
+        """
+        ...
 
 
 class StorageBackend(Protocol):
@@ -124,4 +138,4 @@ class StorageBackend(Protocol):
         raise NotImplementedError
 
 
-__all__ = ["StorageBackend"]
+__all__ = ["LocalPathBackend", "StorageBackend"]
