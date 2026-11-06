@@ -1088,17 +1088,18 @@ class AllocationStrategy(ABC):
     def _active_weights(
         self, cursors: Mapping[str, _DatasetCursor]
     ) -> Mapping[str, float]:
-        """Normalized weights of components still active per checkpointed cursors.
+        """Normalized weights of components that can still draw.
 
-        Treat the result as read-only: it may share the config's weight mapping.
+        A component drops out while a schedule holds its weight at 0, or once
+        redistribution retires it per the checkpointed cursors. Treat the result
+        as read-only: it may share the config's weight mapping.
         """
         weights = self._config.weights
-        if not self._redistributing:
-            return weights
         active = {
             name: weight
             for name, weight in weights.items()
-            if name not in self._redistributing or cursors[name].remaining > 0
+            if weight > 0.0
+            and (name not in self._redistributing or cursors[name].remaining > 0)
         }
         if len(active) == len(weights):
             return weights
@@ -1425,11 +1426,12 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         saved = dict(self._accumulators)
         if any(
             name not in weights and self._accumulators[name] != 0.0
-            for name in self._redistributing
+            for name in cfg.component_order
         ):
-            # Retiring nonzero fractional debt unbalances the survivors' rounding
-            # ledger, so restart all rounding. Zeroed retired entries prevent
-            # another reset on checkpoint restore.
+            # Dropping a component with nonzero fractional debt unbalances the
+            # survivors' rounding ledger, so restart all rounding. Zeroed entries
+            # prevent another reset on checkpoint restore, and a component that
+            # becomes active again rejoins with no debt.
             self._accumulators = dict.fromkeys(cfg.component_order, 0.0)
         quotas = self._advance_accumulators(weights)
         wrapping: list[str] = []
@@ -1481,7 +1483,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
             return None
         reset_carry = any(
             name not in weights and self._accumulators[name] != 0.0
-            for name in self._redistributing
+            for name in cfg.component_order
         )
 
         # Compute quotas, then verify cursors can fulfill them.
@@ -1490,7 +1492,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         while True:
             saved = dict(self._accumulators)
             if reset_carry:
-                # Retiring nonzero fractional debt unbalances the survivors'
+                # Dropping nonzero fractional debt unbalances the survivors'
                 # rounding ledger. Restart all rounding, survivors included.
                 # Zero retired entries prevent another reset on checkpoint restore.
                 # Each retry saves before clearing so terminal attempts roll back

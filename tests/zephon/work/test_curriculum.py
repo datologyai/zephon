@@ -15,6 +15,7 @@ from zephon.work import (
     PhaseLinearSchedule,
     StaticMixtureWorkSource,
     TokenEstimation,
+    WorkChunk,
 )
 from zephon.work.static_mixture import LegacyFixedStrategy, _AllocationConfig
 
@@ -414,6 +415,64 @@ def test_allocation_tracks_a_moving_schedule_cumulatively() -> None:
         for name, ids in lane.next_chunk().components.items():
             drawn[name] += len(ids)
         assert all(abs(drawn[n] - target[n]) <= 1.0 for n in "abc"), chunk_round
+
+
+def _pause_c(c_samples: int, resume_round: int | None) -> StaticMixtureWorkSource:
+    # Binary fractions keep the rounding exact: round 0 owes c half a sample.
+    c_weights = [(0, 0.5), (1, 0.0)]
+    if resume_round is not None:
+        c_weights.append((resume_round, 0.5))
+    return StaticMixtureWorkSource(
+        [
+            _make_dataset("a", 100),
+            _make_dataset("b", 100),
+            _make_dataset("c", c_samples),
+        ],
+        MixtureSchedule(
+            {
+                "a": PhaseConstantSchedule([(0, 0.25), (1, 0.5)]),
+                "b": PhaseConstantSchedule([(0, 0.25), (1, 0.5)]),
+                "c": PhaseConstantSchedule(c_weights),
+            }
+        ),
+        chunk_size=3,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="stop",
+    )
+
+
+def _counts(chunk: WorkChunk | None) -> dict[str, int]:
+    assert chunk is not None
+    return {name: len(ids) for name, ids in chunk.components.items()}
+
+
+def test_zero_weight_component_takes_no_draws_until_reactivated() -> None:
+    lane = _pause_c(100, resume_round=3).clone_for_lane(0, canonical_replicas=1)
+    counts = [_counts(lane.next_chunk()) for _ in range(5)]
+    assert counts[0] == {"a": 1, "b": 1, "c": 1}
+    assert all("c" not in c and sum(c.values()) == 3 for c in counts[1:3])
+    assert all(c.get("c", 0) >= 1 for c in counts[3:])
+
+
+def test_exhausted_zero_weight_component_does_not_stop_the_source() -> None:
+    lane = _pause_c(1, resume_round=None).clone_for_lane(0, canonical_replicas=1)
+    assert _counts(lane.next_chunk())["c"] == 1
+    for _ in range(10):
+        assert "c" not in _counts(lane.next_chunk())
+
+
+def test_replay_across_zero_weight_transitions() -> None:
+    lane = _pause_c(100, resume_round=3).clone_for_lane(0, canonical_replicas=1)
+    states, chunks = [], []
+    for _ in range(6):
+        states.append(copy.deepcopy(lane.state_dict()))
+        chunks.append(lane.next_chunk())
+    for start, state in enumerate(states):
+        resumed = _pause_c(100, resume_round=3).clone_for_lane(0, canonical_replicas=1)
+        resumed.load_state_dict(state)
+        for expected in chunks[start:]:
+            assert resumed.next_chunk().components == expected.components
 
 
 def test_legacy_fixed_strategy_set_weights_raises() -> None:
