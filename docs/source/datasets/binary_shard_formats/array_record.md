@@ -8,9 +8,7 @@ ArrayRecord has no schema: each record is an opaque byte string, usually a seria
 `tf.train.Example`, a msgpack or pickle payload, or an encoded image.
 
 **Preparing ArrayRecord shards.** To use ArrayRecord with Zephon, install the project with
-the `array_record` extra, which includes the `array-record` dependency. Its wheels cover
-Python 3.11 and newer on Linux and Apple-silicon macOS; free-threaded Python builds are
-not supported.
+the `array_record` extra:
 
 ```{literalinclude} ../../../../examples/guide/datasets/array_record_install.sh
 :language: bash
@@ -28,9 +26,9 @@ The writer's `group_size` option sets how many records share a compressed chunk.
 single record decompresses its whole chunk, so `group_size:1` gives the fastest random
 access, and larger groups trade read speed for a smaller file.
 
-ArrayRecord files are self-describing, so an index is optional. Without one, Zephon opens
-every shard during discovery to count its records, and a remote shard has to be downloaded
-in full to do that. Build an `index.json` once for any large or remote dataset:
+An index is optional. Zephon can count records in remote ArrayRecord shards without
+downloading the entire files. For large or remote datasets, build an `index.json` to
+speed up discovery:
 
 ```{literalinclude} ../../../../examples/guide/datasets/array_record_index.sh
 :language: bash

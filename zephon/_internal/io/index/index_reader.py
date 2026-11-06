@@ -98,7 +98,7 @@ def warn_missing_index(path: str, fmt: str, *, num_shards: int | None = None) ->
 ================================ SLOW DATASET DISCOVERY ================================
   No usable index.json found for %s dataset at:
     %s
-  Falling back to opening %s to read metadata (one read per shard).
+  Falling back to inspecting %s to determine row counts.
   This can be VERY slow for large datasets.%s
 =======================================================================================""",
         fmt,

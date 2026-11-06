@@ -1,3 +1,3 @@
-# Install Zephon with the array_record extra (Python 3.11+, Linux or Apple-silicon macOS).
+# Install Zephon with ArrayRecord support.
 
 pip install "zephon[array_record]"

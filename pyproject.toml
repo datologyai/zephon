@@ -49,9 +49,10 @@ vortex = [
     "vortex-data>=0.90.0; python_version >= '3.11'",
 ]
 array_record = [
-    # Wheels exist only for CPython 3.11+ (GIL builds) on Linux and Apple-silicon macOS.
-    "array-record>=0.8.0; python_version >= '3.11' and (sys_platform == 'linux' or (sys_platform == 'darwin' and platform_machine == 'arm64'))",
+    "array-record>=0.8.0",
+    "cramjam>=2.8.0",  # ArrayRecord footer codecs (Zstd, Brotli, raw Snappy).
 ]
+
 lance = [
     "pylance>=1.0.0",
     "zephon[parquet]",

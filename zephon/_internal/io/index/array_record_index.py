@@ -23,7 +23,7 @@ class ArrayRecordIndexBuilder(IndexBuilder):
 
     def extract_shard_info(self, path: str, file_size: int) -> ShardInfo:
         """Extract the record count from an ArrayRecord file."""
-        count = _read_array_record_row_count(path, self._storage)
+        count = _read_array_record_row_count(path, self._storage, file_size)
         return ShardInfo(
             basename=path.rsplit("/", 1)[-1],
             bytes=file_size,

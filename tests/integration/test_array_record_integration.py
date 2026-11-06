@@ -5,14 +5,20 @@
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import msgpack
 import pytest
 
 from zephon import Pipeline
+from zephon._internal.io.formats.array_record import ArrayRecordFormat
+from zephon._internal.io.index.array_record_index import ArrayRecordIndexBuilder
+from zephon._internal.io.storage.local import LocalFSBackend
 from zephon.build_index import build_index
+from zephon.debug import DatasetInspector
 from zephon.io.dataset import Dataset
 from zephon.types import SampleRecord
 from zephon.work.base import MixtureReadConfig, MixtureReadMode
@@ -50,6 +56,7 @@ def _run(
     runner: str,
     workers: int,
     cache_root: Path | None,
+    fetch_max_batch: int = 64,
     exhausted_policy: str | None = None,
 ) -> list[tuple[str, int]]:
     work = StaticMixtureWorkSource(
@@ -63,6 +70,7 @@ def _run(
     )
     pipe = (
         Pipeline(work)
+        .fetch(max_batch=fetch_max_batch)
         .map_transform(_decode, parallelism=4)
         .options(
             deterministic=True,
@@ -88,9 +96,17 @@ def _run(
     return out
 
 
-@pytest.mark.parametrize("runner", ["inline", "threads", "process"])
-@pytest.mark.parametrize("cached", [False, True], ids=["direct", "cached"])
-def test_reads_every_record_once(tmp_path: Path, runner: str, cached: bool) -> None:
+@pytest.mark.parametrize(
+    ("runner", "cached", "fetch_max_batch"),
+    [
+        pytest.param("inline", False, 1, id="inline-singleton"),
+        pytest.param("threads", True, 64, id="threads-cached-bulk"),
+        pytest.param("process", False, 64, id="process-bulk"),
+    ],
+)
+def test_reads_every_record_once(
+    tmp_path: Path, runner: str, cached: bool, fetch_max_batch: int
+) -> None:
     values = list(range(250))
     _write_dataset(tmp_path / "ds", values, shards=4, index=False)
     dataset = Dataset.from_path("ds", str(tmp_path / "ds"))
@@ -102,6 +118,7 @@ def test_reads_every_record_once(tmp_path: Path, runner: str, cached: bool) -> N
         runner=runner,
         workers=2,
         cache_root=tmp_path / "cache" if cached else None,
+        fetch_max_batch=fetch_max_batch,
         # Read the dataset once, including the short final chunk.
         exhausted_policy="redistribute",
     )
@@ -126,3 +143,43 @@ def test_mixture_order_is_independent_of_worker_count(tmp_path: Path) -> None:
     assert runs[0], "pipeline produced no samples"
     assert runs[0] == runs[1] == runs[2]
     assert all((v % 2 == 0) == (name == "even") for name, v in runs[0])
+
+
+def test_index_build_discovery_and_inspector(tmp_path: Path) -> None:
+    root = tmp_path / "ds"
+    _write_dataset(root, list(range(6)), shards=2, index=True)
+    storage = mock.Mock(wraps=LocalFSBackend(root))
+    storage.read_range.side_effect = AssertionError("opened shard metadata")
+    assert ArrayRecordFormat().discover(".", storage)[0] == {0: 3, 1: 3}
+    assert ArrayRecordFormat().discover_counts(".", storage)[1].tolist() == [3, 3]
+    dataset = Dataset.from_path("ds", str(root))
+    assert dataset.counts().tolist() == [3, 3]
+    with DatasetInspector(dataset) as inspector:
+        assert _decode(inspector.read(shard_id=1, sample_index=2)) == {"value": 5}
+
+
+def test_discovery_and_indexing_use_only_metadata_ranges(tmp_path: Path) -> None:
+    path = tmp_path / "s.array_record"
+    rng = random.Random(10)
+    writer = array_record_module.ArrayRecordWriter(
+        str(path), "group_size:1,uncompressed"
+    )
+    for _ in range(100):
+        writer.write(rng.randbytes(8192))
+    writer.close()
+    storage = mock.Mock(wraps=LocalFSBackend(tmp_path))
+    size = path.stat().st_size
+    # A complete user-data chunk lives before the metadata tail. No request may touch it.
+    for action in (
+        lambda: ArrayRecordFormat().discover(".", storage)[0][0],
+        lambda: ArrayRecordIndexBuilder(storage).build(".", progress=False)["shards"][
+            0
+        ]["num_rows"],
+    ):
+        storage.reset_mock()
+        assert action() == 100
+        calls = storage.read_range.call_args_list
+        assert calls and all(call.args[1] > size // 2 for call in calls)
+        assert sum(call.kwargs["length"] for call in calls) <= 2 * 65536
+        storage.download.assert_not_called()
+        storage.open.assert_not_called()

@@ -32,10 +32,9 @@ AUTO_DETECT_ORDER: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("array_record", ARRAY_RECORD_SUFFIXES),
 )
 
-# Formats whose index-less discovery works through any StorageBackend. Vortex
-# is absent: its discovery opens ``file://`` paths, so it only works locally.
-# ArrayRecord is absent: counting a remote shard's records downloads it whole.
-REMOTE_SCAN_FORMATS: frozenset[str] = frozenset({"jsonl", "parquet"})
+# Formats enabled for index-less remote source discovery. ArrayRecord reads
+# only postscript/footer ranges, without staging whole shards locally.
+REMOTE_SCAN_FORMATS: frozenset[str] = frozenset({"jsonl", "parquet", "array_record"})
 
 
 def format_of(name: str) -> str | None:

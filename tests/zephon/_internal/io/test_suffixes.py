@@ -53,4 +53,4 @@ def test_format_of(name: str, expected: str | None) -> None:
 def test_remote_scan_formats_are_detectable() -> None:
     assert REMOTE_SCAN_FORMATS <= {kind for kind, _ in AUTO_DETECT_ORDER}
     assert "vortex" not in REMOTE_SCAN_FORMATS
-    assert "array_record" not in REMOTE_SCAN_FORMATS
+    assert "array_record" in REMOTE_SCAN_FORMATS
