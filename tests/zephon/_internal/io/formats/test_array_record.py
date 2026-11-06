@@ -3,6 +3,7 @@
 
 """ArrayRecord native reader adaptation and format-specific wiring."""
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from zephon._internal.io.formats.array_record import (
     ArrayRecordFormat,
     ArrayRecordShard,
 )
+from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.types import LocalShardFile, LocalShardRef
 
 
@@ -183,3 +185,95 @@ def test_singleton_native_range_boundary(
         reader.read.assert_called_once_with(*expected_args)
     finally:
         shard.close()
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"basename": "wrong.jsonl"},
+        {"extra": {"length": 2}},
+        {"extra": {"length": True}},
+    ],
+)
+def test_index_rejects_format_specific_metadata(
+    tmp_path: Path, update: dict[str, Any]
+) -> None:
+    (tmp_path / "index.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "shards": [
+                    {"basename": "a.array_record", "bytes": 10, "num_rows": 3, **update}
+                ],
+            }
+        )
+    )
+    handler = ArrayRecordFormat()
+    for discover in (handler.discover, handler.discover_counts):
+        with pytest.raises(ValueError, match="index"):
+            discover(".", LocalFSBackend(tmp_path))
+
+
+def test_index_preserves_extra_without_reading_shards(tmp_path: Path) -> None:
+    (tmp_path / "index.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "shards": [
+                    {
+                        "basename": "a.array_record",
+                        "bytes": 10,
+                        "num_rows": 3,
+                        "extra": {"source": "test"},
+                    }
+                ],
+            }
+        )
+    )
+    storage = mock.Mock(wraps=LocalFSBackend(tmp_path))
+    handler = ArrayRecordFormat()
+    counts, metadata = handler.discover(".", storage)
+    assert counts == {0: 3}
+    assert handler.discover_counts(".", storage)[1].tolist() == [3]
+    assert metadata[0]["extra"] == {"source": "test", "length": 3}
+    storage.read_range.assert_not_called()
+    storage.listdir.assert_not_called()
+
+
+def test_scan_sorts_shards_and_passes_backend_paths_and_sizes(tmp_path: Path) -> None:
+    (tmp_path / "b.array_record").write_bytes(b"bb")
+    (tmp_path / "a.array_record").write_bytes(b"a")
+    (tmp_path / "notes.txt").write_text("ignored")
+    storage = LocalFSBackend(tmp_path)
+    with mock.patch.object(
+        array_record_format,
+        "_read_array_record_row_count",
+        side_effect=lambda path, backend, size: size + 2,
+    ) as read:
+        counts, metadata = ArrayRecordFormat().discover(".", storage)
+    assert counts == {0: 3, 1: 4}
+    assert metadata[0]["raw"]["basename"] == "a.array_record"
+    assert metadata[0]["extra"] == {"length": 3}
+    assert sorted(call.args[0] for call in read.call_args_list) == [
+        "./a.array_record",
+        "./b.array_record",
+    ]
+    assert all(call.args[1] is storage for call in read.call_args_list)
+    assert sorted(call.args[2] for call in read.call_args_list) == [1, 2]
+
+
+def test_scan_rejects_empty_directory(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="No .array_record shards"):
+        ArrayRecordFormat().discover(".", LocalFSBackend(tmp_path))
+
+
+def test_scan_preserves_metadata_error_context(tmp_path: Path) -> None:
+    (tmp_path / "a.array_record").touch()
+    with mock.patch.object(
+        array_record_format,
+        "_read_array_record_row_count",
+        side_effect=OSError("missing"),
+    ):
+        with pytest.raises(ValueError, match="a.array_record: missing") as error:
+            ArrayRecordFormat().discover(".", LocalFSBackend(tmp_path))
+    assert isinstance(error.value.__cause__, OSError)

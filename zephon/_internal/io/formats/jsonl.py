@@ -15,12 +15,18 @@ from typing import TYPE_CHECKING, BinaryIO, Mapping, cast
 import numpy as np
 
 from zephon._internal.io.formats.base import FormatHandler, register_format
+from zephon._internal.io.formats.locators import build_file_locators
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
+from zephon._internal.io.index.shard_index import (
+    is_nonnegative_int64,
+    shard_index_counts,
+    validate_shard_index,
+)
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.suffixes import JSONL_SUFFIXES
-from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.io.types import LocalShardRef, ShardLocator
 from zephon._internal.utils.compression import compression_for_name, open_decompressed
 
 if TYPE_CHECKING:
@@ -110,11 +116,6 @@ def _count_records(stream: BinaryIO) -> int:
         text.detach()  # leave ``stream`` open for the caller
 
 
-def _is_nonnegative_int64(value: object) -> bool:
-    """Accept counts and sizes representable by the catalog's int64 columns."""
-    return type(value) is int and 0 <= value < 1 << 63
-
-
 class JsonlFormat(FormatHandler):
     """Format handler for JSON Lines datasets, optionally compressed per shard."""
 
@@ -130,34 +131,18 @@ class JsonlFormat(FormatHandler):
 
         return self._discover_from_files(path, storage)
 
-    def _is_valid_jsonl_index(self, data: Mapping[str, object]) -> bool:
-        """Return whether an index describes a non-empty JSONL dataset."""
-        # The shared index reader checks only the outer keys.
-        shards = data.get("shards")
-        if not isinstance(shards, list) or not shards:
+    def _is_valid_jsonl_index(self, data: ShardIndex) -> bool:
+        """Check JSONL suffixes and decoded sizes in a Zephon shard index."""
+        try:
+            validate_shard_index(data)
+        except ValueError:
             return False
-        for shard in shards:
-            if not isinstance(shard, dict):
-                return False
-            name = shard.get("basename")
-            if (
-                not isinstance(name, str)
-                or not name.endswith(JSONL_SUFFIXES)
-                or not _is_nonnegative_int64(shard.get("num_rows"))
-                or not _is_nonnegative_int64(shard.get("bytes"))
-            ):
-                return False
-            hashes = shard.get("hashes", {})
-            if not isinstance(hashes, dict) or not all(
-                isinstance(key, str) and isinstance(value, str)
-                for key, value in hashes.items()
-            ):
+        for shard in data["shards"]:
+            name = shard["basename"]
+            if not name.endswith(JSONL_SUFFIXES):
                 return False
             if compression_for_name(name) is not None:
-                extra = shard.get("extra")
-                if not isinstance(extra, dict) or not _is_nonnegative_int64(
-                    extra.get("raw_bytes")
-                ):
+                if not is_nonnegative_int64(shard.get("extra", {}).get("raw_bytes")):
                     return False
         return True
 
@@ -256,92 +241,16 @@ class JsonlFormat(FormatHandler):
         """Read per-shard row counts directly from an index when available."""
         result = find_and_load_index(path, storage)
         if is_shard_index(result) and self._is_valid_jsonl_index(result):
-            counts = np.fromiter(
-                (shard["num_rows"] for shard in result["shards"]),
-                dtype=np.int64,
-                count=len(result["shards"]),
-            )
-        else:
-            counts = np.fromiter(
-                (count for count, _ in self._scan_files(path, storage)),
-                dtype=np.int64,
-            )
+            return shard_index_counts(result)
+        counts = np.fromiter(
+            (count for count, _ in self._scan_files(path, storage)),
+            dtype=np.int64,
+        )
         return np.arange(counts.size, dtype=np.int64), counts
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
-        backend = dataset.backend
-        path = backend.get("path")
-        if not isinstance(path, str):
-            raise ValueError("JSONL dataset missing 'path' in backend metadata")
-        shards = backend.get("shards")
-        if not isinstance(shards, Mapping):
-            raise ValueError("JSONL dataset missing 'shards' metadata")
-
-        locators: dict[int, ShardLocator] = {}
-        for shard_id_obj, shard_meta in shards.items():
-            shard_id = int(shard_id_obj)
-            if not isinstance(shard_meta, Mapping):
-                raise ValueError(f"Invalid shard metadata for shard {shard_id}")
-            raw_meta = shard_meta.get("raw")
-            if not isinstance(raw_meta, Mapping):
-                raise ValueError(f"Shard {shard_id} missing JSONL raw metadata")
-            basename = raw_meta.get("basename")
-            if not isinstance(basename, str):
-                raise ValueError(f"Shard {shard_id} missing basename for JSONL shard")
-            bytes_value = raw_meta.get("bytes")
-            if isinstance(bytes_value, Integral):
-                raw_bytes = int(bytes_value)
-            elif isinstance(bytes_value, str):
-                raw_bytes = int(bytes_value)
-            else:
-                raise ValueError(
-                    f"Shard {shard_id} missing or invalid byte size for JSONL shard"
-                )
-            raw = ShardFile(
-                basename=basename,
-                bytes=raw_bytes,
-                hashes={
-                    str(k): str(v) for k, v in dict(raw_meta.get("hashes", {})).items()
-                },
-            )
-            zip_meta = shard_meta.get("zip")
-            zip_file = None
-            if isinstance(zip_meta, Mapping):
-                zip_basename = zip_meta.get("basename")
-                if not isinstance(zip_basename, str):
-                    raise ValueError(
-                        f"Shard {shard_id} missing basename for compressed JSONL shard"
-                    )
-                zip_bytes = zip_meta.get("bytes")
-                if isinstance(zip_bytes, Integral):
-                    compressed_bytes = int(zip_bytes)
-                elif isinstance(zip_bytes, str):
-                    compressed_bytes = int(zip_bytes)
-                else:
-                    raise ValueError(
-                        f"Shard {shard_id} missing or invalid byte size for compressed JSONL shard"
-                    )
-                zip_file = ShardFile(
-                    basename=zip_basename,
-                    bytes=compressed_bytes,
-                    hashes={
-                        str(k): str(v)
-                        for k, v in dict(zip_meta.get("hashes", {})).items()
-                    },
-                )
-            compression = shard_meta.get("compression")
-            extra = shard_meta.get("extra")
-            locators[shard_id] = ShardLocator(
-                dataset=dataset.name,
-                shard_id=shard_id,
-                format=self.kind,
-                root=path,
-                raw=raw,
-                zip=zip_file,
-                compression=str(compression) if compression else None,
-                extra=extra if isinstance(extra, Mapping) else None,
-            )
-        return locators
+        """Build locators from normalized shard metadata."""
+        return build_file_locators(dataset, format_kind=self.kind)
 
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef

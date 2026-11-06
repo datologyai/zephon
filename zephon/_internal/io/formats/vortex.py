@@ -3,11 +3,15 @@
 
 """Vortex shard discovery and indexed sample reads."""
 
+import posixpath
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping
+
+import numpy as np
 
 from zephon._internal.io.formats.arrow_rows import (
     arrow_array_to_samples,
@@ -16,9 +20,20 @@ from zephon._internal.io.formats.arrow_rows import (
     require_pyarrow,
     samples_from_columns,
 )
-from zephon._internal.io.formats.base import ShardOpener, register_format
+from zephon._internal.io.formats.base import FormatHandler, ShardOpener, register_format
+from zephon._internal.io.formats.locators import build_file_locators, shard_length
 from zephon._internal.io.formats.metadata_cache import MetadataCache, file_cache_key
-from zephon._internal.io.formats.single_file import SingleFileFormat, shard_length
+from zephon._internal.io.index import find_and_load_index, warn_missing_index
+from zephon._internal.io.index.index_types import (
+    ShardIndex,
+    ShardInfoDict,
+    is_shard_index,
+)
+from zephon._internal.io.index.shard_index import (
+    shard_index_counts,
+    shard_index_metadata,
+    validate_shard_index,
+)
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.suffixes import VORTEX_SUFFIXES
@@ -28,6 +43,7 @@ from zephon.types import SamplePayload
 
 if TYPE_CHECKING:
     from zephon._internal.io.catalog import CatalogSet
+    from zephon.io.dataset import Dataset
     from zephon.io.options import StoreOptions
 
 try:
@@ -315,12 +331,10 @@ class VortexShardOpener:
             self._segment_cache.clear()
 
 
-class VortexFormat(SingleFileFormat):
+class VortexFormat(FormatHandler):
     """Format handler for Vortex datasets."""
 
     kind = "vortex"
-    label = "Vortex"
-    suffixes = VORTEX_SUFFIXES
 
     @contextmanager
     def create_opener(
@@ -336,14 +350,66 @@ class VortexFormat(SingleFileFormat):
         finally:
             opener.close()
 
-    def _read_row_count(self, path: str, storage: StorageBackend, size: int) -> int:
-        return _read_vortex_row_count(path, storage, size)
+    def _load_index(self, path: str, storage: StorageBackend) -> ShardIndex | None:
+        index = find_and_load_index(path, storage)
+        if not is_shard_index(index):
+            return None
+        validate_shard_index(index)
+        for i, shard in enumerate(index["shards"]):
+            if not shard["basename"].endswith(VORTEX_SUFFIXES):
+                raise ValueError(f"Invalid Vortex index basename for shard {i}")
+            length = shard.get("extra", {}).get("length", shard["num_rows"])
+            if type(length) is not int or length != shard["num_rows"]:
+                raise ValueError(f"Inconsistent Vortex index length for shard {i}")
+        return index
 
-    def _discover_by_scanning(
+    def discover(
         self, path: str, storage: StorageBackend
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, Any]]]:
+        """Read the index, or inspect each shard's metadata."""
+        index = self._load_index(path, storage)
+        if index is None:
+            index = self._scan_files(path, storage)
+        return shard_index_metadata(index)
+
+    def discover_counts(
+        self, path: str, storage: StorageBackend
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Read counts without constructing locator metadata."""
+        index = self._load_index(path, storage)
+        if index is None:
+            index = self._scan_files(path, storage)
+        return shard_index_counts(index)
+
+    def _scan_files(self, path: str, storage: StorageBackend) -> ShardIndex:
         _require_vortex()
-        return super()._discover_by_scanning(path, storage)
+        entries = sorted(
+            name for name in storage.listdir(path) if name.endswith(VORTEX_SUFFIXES)
+        )
+        if not entries:
+            raise ValueError(f"No .vortex shards found under {path}")
+        warn_missing_index(path, self.kind, num_shards=len(entries))
+
+        def read_metadata(name: str) -> ShardInfoDict:
+            full = posixpath.join(path, name)
+            try:
+                size = int(storage.stat(full)["size"])
+                count = _read_vortex_row_count(full, storage, size)
+                return ShardInfoDict(
+                    basename=name, bytes=size, num_rows=count, hashes={}, extra={}
+                )
+            except Exception as exc:
+                raise ValueError(f"Failed to read Vortex shard {full}: {exc}") from exc
+
+        with ThreadPoolExecutor(
+            max_workers=min(32, (len(entries) + 4) // 5)
+        ) as executor:
+            shards = list(executor.map(read_metadata, entries))
+        return ShardIndex(format_version=1, shards=shards)
+
+    def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
+        """Build locators from discovered shard metadata."""
+        return build_file_locators(dataset, format_kind=self.kind)
 
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
