@@ -749,6 +749,9 @@ def _measure_dataset(
 # construction. Composes with MAX_SCAN_THREADS.
 MAX_PRIME_PROCS = 16
 
+#: Replaces MAX_PRIME_PROCS when set, so a caller can bound census memory.
+PRIME_WORKERS_ENV = "ZEPHON_PRIME_WORKERS"
+
 # Built once per worker process in the initializer.
 _prime_worker: dict[str, Any] = {}
 
@@ -837,7 +840,11 @@ def _run_census(
     order = sorted(
         measured_datasets.items(), key=lambda kv: _scan_cost(kv[1]), reverse=True
     )
-    workers = min(MAX_PRIME_PROCS, len(order), os.cpu_count() or 1)
+    workers = min(
+        int(os.environ.get(PRIME_WORKERS_ENV, MAX_PRIME_PROCS)),
+        len(order),
+        os.cpu_count() or 1,
+    )
     _logger.info(
         "token-aware priming: measuring %d dataset(s) across %d process(es) "
         "(%d samples, %d-%d scanned shards each) — downloads/decodes calibration "

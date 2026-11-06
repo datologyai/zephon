@@ -29,6 +29,7 @@ from zephon._internal.token_counting import (
 )
 from zephon._internal.utils.tokenizer import fallback_tokenizer
 from zephon.io import Dataset, InMemoryShard
+from zephon.io.options import StoreOptions
 from zephon.types import SampleId, SampleRecord
 from zephon.work import token_estimation
 from zephon.work.token_estimation import (
@@ -1304,3 +1305,28 @@ def test_prime_token_ratios_measure_callable_skips_replay(
     )
     assert ratios["b"].source == "measured"
     assert seen["pre_tokenize_replay"] is None
+
+
+@pytest.mark.parametrize("env, expected", [(None, 3), ("2", 2)])
+def test_census_pool_size_follows_prime_workers_env(monkeypatch, env, expected):
+    datasets = {
+        i: Dataset.from_dict(name, {0: InMemoryShard([{"text": "x"}])})
+        for i, name in enumerate("abc")
+    }
+    if env is not None:
+        monkeypatch.setenv(token_estimation.PRIME_WORKERS_ENV, env)
+    monkeypatch.setattr(token_estimation.os, "cpu_count", lambda: 64)
+    sizes: list[int] = []
+
+    class Pool:
+        def __init__(self, max_workers, **kwargs):
+            sizes.append(max_workers)
+            raise RuntimeError("stop after sizing")
+
+    monkeypatch.setattr(
+        token_estimation.concurrent.futures, "ProcessPoolExecutor", Pool
+    )
+    token_estimation._run_census(
+        datasets, StoreOptions(), TokenEstimation(), None, 0, None
+    )
+    assert sizes == [expected]
