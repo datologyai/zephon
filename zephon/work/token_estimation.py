@@ -259,9 +259,15 @@ class PerShardTokenCost:
         self._cost_by_shard: dict[str, dict[int, float]] = {}
         self._mean_cost: dict[str, float] = {}
         missing: list[str] = []
-        for name, dataset in datasets.items():
+        # A dataset's first byte read builds its catalog, which on a remote root waits
+        # on listing and per-shard metadata reads: every dataset builds at once.
+        with concurrent.futures.ThreadPoolExecutor(max(1, len(datasets))) as pool:
+            sources = dict(
+                zip(datasets, pool.map(_build_byte_source, datasets.values()))
+            )
+        for name in datasets:
             ratio = ratios[name].tokens_per_byte
-            source = _build_byte_source(dataset)
+            source = sources[name]
             if source is None:
                 missing.append(name)
                 self._cost_by_shard[name] = {}

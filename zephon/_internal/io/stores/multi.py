@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Iterator, Mapping, cast
@@ -78,10 +79,10 @@ def finalize_dataset_catalogs(
     ``fingerprint`` onto the shared handle that ships in ctx.
     """
     set_catalog_dir(StoreOptions.from_any(options))
-    for dataset in datasets.values():
-        if dataset._catalog_handle is None:
-            continue  # in-memory dataset
-        _ensure_attached(dataset)
+    file_backed = [d for d in datasets.values() if d._catalog_handle is not None]
+    # A first-contact build waits on remote listing and metadata reads: all at once.
+    with ThreadPoolExecutor(max(1, len(file_backed))) as pool:
+        list(pool.map(_ensure_attached, file_backed))
 
 
 def _attached_entries(

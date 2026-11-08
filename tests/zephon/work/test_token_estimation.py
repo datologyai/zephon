@@ -1304,3 +1304,36 @@ def test_prime_token_ratios_measure_callable_skips_replay(
     )
     assert ratios["b"].source == "measured"
     assert seen["pre_tokenize_replay"] is None
+
+
+def test_per_shard_token_cost_builds_every_datasets_catalog_at_once(
+    tmp_path, monkeypatch
+):
+    """A first byte read builds the dataset's catalog, which on a remote root waits
+    on listing and metadata reads; eight such builds overlap instead of queuing."""
+    import time
+
+    import zephon._internal.io.catalog.handle as handle_mod
+
+    real_build = handle_mod.build_catalog
+
+    def slow_build(header):
+        time.sleep(0.5)  # a remote root's listing and metadata reads
+        return real_build(header)
+
+    monkeypatch.setattr(handle_mod, "build_catalog", slow_build)
+    datasets = {}
+    for i in range(8):
+        root = tmp_path / f"ds{i}"
+        root.mkdir()
+        (root / "a.jsonl").write_text(
+            "".join(json.dumps({"text": "x" * (i + 1)}) + "\n" for _ in range(4))
+        )
+        datasets[f"ds{i}"] = Dataset.from_path(f"ds{i}", str(root))
+    ratios = {name: TokenRatio(1.0, "pinned") for name in datasets}
+    started = time.monotonic()
+    costs = PerShardTokenCost(datasets, ratios)
+    assert time.monotonic() - started < 2.0  # one after another: 4 s
+    assert [costs.mean_cost(name) for name in datasets] == [
+        pytest.approx(len(json.dumps({"text": "x" * (i + 1)})) + 1) for i in range(8)
+    ]

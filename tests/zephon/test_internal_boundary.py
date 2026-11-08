@@ -237,6 +237,8 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     # Census and calibration coverage needs internal plans and oracles.
     "tests/zephon/work/test_token_estimation.py": frozenset(
         {
+            # Slow every catalog build to see the cost table build them at once.
+            "zephon._internal.io.catalog.handle",
             # Verify format dependency initialization before worker measurement.
             "zephon._internal.io.formats:litdata_support",
             "zephon._internal.io.stores.multi:build_multi_dataset_store",
