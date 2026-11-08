@@ -62,6 +62,11 @@ class ShardCatalog:
     name is bound by the caller at ``locator_at``.
     """
 
+    def file_bytes(self) -> bytes:
+        """The whole catalog file this view maps, to publish it elsewhere."""
+        assert self._loaded._mmap is not None
+        return self._loaded._mmap[:]
+
     def __init__(self, loaded: LoadedCatalog) -> None:
         self._loaded = loaded
         self._header = loaded.header

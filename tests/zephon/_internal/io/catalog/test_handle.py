@@ -10,6 +10,7 @@ took.
 
 import json
 import logging
+import pickle
 import re
 from pathlib import Path
 
@@ -96,3 +97,32 @@ def test_only_discovery_inputs_key_a_scan_catalog(
     _make_jsonl(root, {"c": 2})  # a new shard does change the dataset
     finalize(ShardCatalogHandle(dataset=_header(root)))
     assert len(builds) == 2
+
+
+def test_a_catalog_built_before_the_dir_changes_reaches_a_fresh_worker_without_a_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A work source can build a catalog before the Engine resolves the catalog dir
+    from the pipeline's io_options; the Engine's finalize must leave the file in the
+    new dir, where a spawned worker (an empty registry, the pickled handle) attaches
+    it instead of rebuilding from source."""
+    first, second = tmp_path / "first", tmp_path / "second"
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 3, "b": 5})
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(first))
+    set_catalog_dir(None)
+    clear_registry()
+    handle = ShardCatalogHandle(dataset=_header(root))
+    finalize(handle)
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(second))
+    set_catalog_dir(None)
+    finalize(handle)  # the Engine, after resolving its dir
+
+    clear_registry()
+    monkeypatch.setattr(
+        handle_mod, "build_catalog", lambda header: pytest.fail("rebuilt from source")
+    )
+    worker = pickle.loads(pickle.dumps(handle))
+    assert sorted(worker.attach().num_rows().tolist()) == [3, 5]
+    clear_registry()

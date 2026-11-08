@@ -329,9 +329,36 @@ def _load_and_register(fp: str) -> ShardCatalog:
         return _REGISTRY.setdefault((SCHEMA_VERSION, fp), catalog)
 
 
+def _publish_into_catalog_dir(handle: ShardCatalogHandle) -> None:
+    """Publish a finalized handle's mapped catalog into the current catalog dir.
+
+    Writes the file and its source-key pointer when the dir lacks them. The dir is process-global and can change after a build: a work source can
+    build before the Engine resolves the dir from the pipeline's io_options. A
+    spawned worker knows only the dir, so without this it rebuilds the catalog
+    from source.
+    """
+    assert handle.fingerprint is not None
+    sdir = _schema_dir(_catalog_dir())
+    path = sdir / handle.fingerprint
+    if catalog_io.is_valid(path, schema_version=SCHEMA_VERSION):
+        return
+    catalog = _REGISTRY.get((SCHEMA_VERSION, handle.fingerprint))
+    if catalog is None:
+        return  # not mapped here: attach() rebuilds it, the cross-node path
+    pointer_path = sdir / ".bykey" / f"{_source_key(handle.dataset)}.fp"
+    pointer_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_io.write_atomic(path, catalog.file_bytes())
+    catalog_io.write_pointer(pointer_path, handle.fingerprint)
+
+
 def finalize(handle: ShardCatalogHandle) -> str:
-    """Build-or-load the catalog under the per-source lock; bake the fingerprint."""
+    """Build-or-load the catalog under the per-source lock; bake the fingerprint.
+
+    A handle finalized under an earlier catalog dir publishes its file into the
+    current one, so workers that read the current dir attach it.
+    """
     if handle.fingerprint is not None:
+        _publish_into_catalog_dir(handle)
         attach(handle)
         return handle.fingerprint
     fp = _ensure_catalog_file(handle.dataset)
