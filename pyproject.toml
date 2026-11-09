@@ -50,8 +50,8 @@ vortex = [
 ]
 array_record = [
     # Skip platforms without wheels (e.g. Windows) so uv sync --all-extras works.
-    # Keep the 0.6.0 floor to avoid forced upgrades; cap Intel macOS at 0.6.x
-    # (Python 3.10-3.12) so universal locks don't select ARM-only releases.
+    # Intel macOS needs 0.6.x (Python 3.10-3.12); the cap prevents universal locks
+    # from selecting newer ARM-only wheels.
     # Markers cannot express ABI/libc support (e.g. 3.14t); uv still checks it.
     "array-record>=0.6.0; sys_platform == 'linux' or (sys_platform == 'darwin' and platform_machine == 'arm64')",
     "array-record>=0.6.0,<0.7.0; sys_platform == 'darwin' and platform_machine == 'x86_64' and python_version < '3.13'",
