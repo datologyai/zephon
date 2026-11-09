@@ -455,7 +455,7 @@ class TestParallelismValidation:
 
         with w.catch_warnings():
             w.simplefilter("error")
-            with pytest.raises(ValueError, match="Use canonical_replicas=4 or 6"):
+            with pytest.raises(ValueError, match="Use canonical_replicas=4 or 8."):
                 _mk_engine_with_opts(
                     world_size=4,
                     global_rank=0,

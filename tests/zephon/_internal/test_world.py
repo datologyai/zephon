@@ -47,6 +47,24 @@ def test_world_defaults() -> None:
             "Use global_batch_size=256, canonical_replicas=48, or an output batch "
             "size of 3.",
         ),
+        # Uneven lane ownership: only lane counts that also split the step.
+        (40, 1, 5, 2, "Use canonical_replicas=4 or 8."),
+        (
+            48,
+            8,
+            6,
+            4,
+            "Use canonical_replicas=4 with global_batch_size=32 or 64, or "
+            "canonical_replicas=8 with global_batch_size=64.",
+        ),
+        (
+            24,
+            4,
+            6,
+            4,
+            "Use canonical_replicas=4 with global_batch_size=16 or 32, or "
+            "canonical_replicas=8 with global_batch_size=32.",
+        ),
     ],
 )
 def test_lane_window_check_names_layouts_that_fit(
@@ -54,6 +72,52 @@ def test_lane_window_check_names_layouts_that_fit(
 ) -> None:
     with pytest.raises(ValueError, match=re.escape(hint)):
         check_step_lane_windows(records, batch, replicas, dp)
+
+
+def test_lane_window_check_rejects_uneven_lane_ownership_even_if_the_step_splits() -> (
+    None
+):
+    with pytest.raises(ValueError, match="not a multiple of dp_degree=4"):
+        check_step_lane_windows(48, 8, 6, 4)
+
+
+def _suggested_layouts(
+    message: str, records: int, batch: int, replicas: int
+) -> list[tuple[int, int, int]]:
+    hint = message.split(" Use ", 1)[1].removesuffix(".")
+    layouts = []
+    for option in re.split(r", or |, ", hint):
+        if match := re.fullmatch(r"an output batch size of (\d+)", option):
+            layouts.append((records, int(match[1]), replicas))
+        elif match := re.fullmatch(
+            r"canonical_replicas=(\d+) with global_batch_size=(.+)", option
+        ):
+            layouts += [
+                (int(size), batch, int(match[1])) for size in match[2].split(" or ")
+            ]
+        elif match := re.fullmatch(r"canonical_replicas=(.+)", option):
+            layouts += [(records, batch, int(r)) for r in match[1].split(" or ")]
+        elif match := re.fullmatch(r"global_batch_size=(.+)", option):
+            layouts += [(int(size), batch, replicas) for size in match[1].split(" or ")]
+        else:
+            raise AssertionError(f"unparsed option {option!r} in {message!r}")
+    return layouts
+
+
+def test_every_suggested_layout_passes_the_check() -> None:
+    for dp in range(1, 7):
+        for replicas in range(dp, 17):
+            for batch in range(1, 9):
+                for records in range(batch, 97, batch):
+                    try:
+                        check_step_lane_windows(records, batch, replicas, dp)
+                    except ValueError as exc:
+                        layouts = _suggested_layouts(str(exc), records, batch, replicas)
+                    else:
+                        continue
+                    assert layouts
+                    for layout in layouts:
+                        check_step_lane_windows(*layout, dp)
 
 
 def test_lane_window_check_rejects_partial_batches() -> None:

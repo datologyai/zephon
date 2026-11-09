@@ -46,10 +46,9 @@ def check_step_lane_windows(
 ) -> None:
     """Raise unless every lane contributes the same whole batches to each step.
 
-    Elastic resume keeps global batches identical only when an optimizer step
-    takes an equal number of batches from every canonical lane. The engine
-    checks first that every DP group owns the same number of lanes;
-    ``dp_degree`` only limits the suggested lane counts.
+    Elastic resume keeps global batches identical only when every DP group owns
+    the same number of lanes and an optimizer step takes an equal number of
+    batches from every lane. Every suggested fix satisfies both.
     """
     batches, remainder = divmod(records_per_step, batch_size)
     if remainder:
@@ -57,14 +56,15 @@ def check_step_lane_windows(
             f"global_batch_size={records_per_step} must be a multiple of the "
             f"pipeline's output batch size ({batch_size})."
         )
-    if batches % canonical_replicas == 0:
+    owned_evenly = canonical_replicas % dp_degree == 0
+    if owned_evenly and batches % canonical_replicas == 0:
         return
-    # Keeping the layout is listed first: canonical_replicas is often chosen
-    # for future DP degrees and the batch size for GPU memory.
-    unit = canonical_replicas * batch_size
-    lower = records_per_step // unit * unit
-    sizes = [size for size in (lower, lower + unit) if size > 0]
-    options = ["global_batch_size=" + " or ".join(str(size) for size in sizes)]
+
+    def step_sizes(replicas: int) -> str:
+        unit = replicas * batch_size
+        lower = records_per_step // unit * unit
+        return " or ".join(str(size) for size in (lower, lower + unit) if size > 0)
+
     fits = [
         replicas
         for replicas in range(dp_degree, batches + 1, dp_degree)
@@ -72,22 +72,51 @@ def check_step_lane_windows(
     ]
     below = [replicas for replicas in fits if replicas <= canonical_replicas][-1:]
     above = [replicas for replicas in fits if replicas >= canonical_replicas][:1]
-    if replicas_fit := sorted(set(below + above)):
-        options.append(
-            "canonical_replicas=" + " or ".join(str(r) for r in replicas_fit)
+    replicas_fit = sorted(set(below + above))
+    options = []
+    if owned_evenly:
+        problem = (
+            f"An optimizer step of {records_per_step} records is {batches} batches "
+            f"of {batch_size}, which does not split evenly over canonical_replicas="
+            f"{canonical_replicas} lanes: every lane must take an equal share."
         )
-    if records_per_step % canonical_replicas == 0:
-        per_lane = records_per_step // canonical_replicas
-        batch = max(d for d in range(1, batch_size + 1) if per_lane % d == 0)
-        options.append(f"an output batch size of {batch}")
+        # Keeping the layout is listed first: canonical_replicas is often chosen
+        # for future DP degrees and the batch size for GPU memory.
+        options.append(f"global_batch_size={step_sizes(canonical_replicas)}")
+        if replicas_fit:
+            options.append(
+                "canonical_replicas=" + " or ".join(str(r) for r in replicas_fit)
+            )
+        if records_per_step % canonical_replicas == 0:
+            per_lane = records_per_step // canonical_replicas
+            batch = max(d for d in range(1, batch_size + 1) if per_lane % d == 0)
+            options.append(f"an output batch size of {batch}")
+    else:
+        problem = (
+            f"canonical_replicas={canonical_replicas} is not a multiple of "
+            f"dp_degree={dp_degree}: every DP group must own the same number of "
+            "lanes for optimizer steps to stay identical across elastic resumes."
+        )
+        if replicas_fit:
+            options.append(
+                "canonical_replicas=" + " or ".join(str(r) for r in replicas_fit)
+            )
+        else:
+            problem += (
+                f" No multiple of {dp_degree} lanes splits the {batches} batches "
+                f"of {batch_size} in a step evenly, so global_batch_size must "
+                "change too."
+            )
+            lower = canonical_replicas // dp_degree * dp_degree
+            options.extend(
+                f"canonical_replicas={replicas} with global_batch_size="
+                f"{step_sizes(replicas)}"
+                for replicas in (lower, lower + dp_degree)
+                if replicas > 0
+            )
     hint = (
         options[0]
         if len(options) == 1
         else ", ".join(options[:-1]) + ", or " + options[-1]
     )
-    raise ValueError(
-        f"An optimizer step of {records_per_step} records is {batches} batches of "
-        f"{batch_size}, which does not split evenly over canonical_replicas="
-        f"{canonical_replicas} lanes: every lane must take an equal share. "
-        f"Use {hint}."
-    )
+    raise ValueError(f"{problem} Use {hint}.")

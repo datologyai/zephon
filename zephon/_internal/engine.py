@@ -602,16 +602,9 @@ class Engine:
                 stacklevel=4,
             )
 
-        if opts.canonical_replicas % opts.dp_degree != 0:
-            if global_batch_size is not None:
-                lower = opts.canonical_replicas // opts.dp_degree * opts.dp_degree
-                raise ValueError(
-                    f"canonical_replicas ({opts.canonical_replicas}) must be divisible "
-                    f"by dp_degree ({opts.dp_degree}) when global_batch_size is set: "
-                    "every DP group must own the same number of lanes for optimizer "
-                    "steps to stay identical across elastic resumes. Use "
-                    f"canonical_replicas={lower} or {lower + opts.dp_degree}."
-                )
+        # With global_batch_size set, check_step_lane_windows raises instead:
+        # it knows the batch size, so its suggestions also fit the step.
+        if opts.canonical_replicas % opts.dp_degree != 0 and global_batch_size is None:
             warnings.warn(
                 f"[zephon] canonical_replicas ({opts.canonical_replicas}) is not divisible by "
                 + f"dp_degree ({opts.dp_degree}). This will result in uneven lane distribution "
