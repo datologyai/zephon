@@ -235,12 +235,30 @@ class DeficitRoundRobin:
                 best_deficit = deficits[i]
         return best
 
-    def charge(self, chosen: int, cost: float) -> None:
-        """Record a draw of ``cost`` from component ``chosen``."""
+    def charge_and_select(self, chosen: int, cost: float) -> int:
+        """Record a draw of ``cost`` from ``chosen`` and return the next pick.
+
+        One scan instead of a charge followed by :meth:`select`, since this runs
+        once per drawn record. Each deficit is credited and then, if chosen,
+        debited, in the same order as two separate passes, so the deficits match
+        bit for bit; ties still go to the earliest index.
+        """
         deficits = self.deficits
-        for i, weight in enumerate(self._weights):
-            deficits[i] += weight * cost
-        deficits[chosen] -= cost
+        weights = self._weights
+        best_deficit = deficits[0] + weights[0] * cost
+        if chosen == 0:
+            best_deficit -= cost
+        deficits[0] = best_deficit
+        best = 0
+        for i in range(1, len(deficits)):
+            deficit = deficits[i] + weights[i] * cost
+            if i == chosen:
+                deficit -= cost
+            deficits[i] = deficit
+            if deficit > best_deficit:
+                best = i
+                best_deficit = deficit
+        return best
 
 
 def swrr_iterate(

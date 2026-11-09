@@ -1894,8 +1894,8 @@ class TokenAwareStrategy(AllocationStrategy):
 
         # Every draw consumes a record, so wrapping as often as the carried
         # deficit demands still ends within chunk_size draws.
+        best = rr.select()
         for _ in range(cfg.chunk_size):
-            best = rr.select()
             sample_id = cursor_list[best].next_one()
             if sample_id is None:
                 name = order[best]
@@ -1921,8 +1921,8 @@ class TokenAwareStrategy(AllocationStrategy):
                 sample_id = cursor_list[best].next_one()
                 assert sample_id is not None
 
-            rr.charge(best, cost(order[best], sample_id))
             drawn[best].append(sample_id)
+            best = rr.charge_and_select(best, cost(order[best], sample_id))
 
         # Checkpoint validation requires deficit keys for retired components too.
         self._deficits.update(zip(order, rr.deficits))
@@ -1954,8 +1954,8 @@ class TokenAwareStrategy(AllocationStrategy):
             drawn: list[list[SampleId]] = [[] for _ in order]
             retry = False
 
+            best = rr.select()
             for _ in range(cfg.chunk_size):
-                best = rr.select()
                 sample_id = cursor_list[best].next_one()
                 if sample_id is None:
                     name = order[best]
@@ -1999,8 +1999,8 @@ class TokenAwareStrategy(AllocationStrategy):
                         break
                     return None  # "stop" policy; snapshot already restored
 
-                rr.charge(best, cost(order[best], sample_id))
                 drawn[best].append(sample_id)
+                best = rr.charge_and_select(best, cost(order[best], sample_id))
 
             if retry:
                 continue
