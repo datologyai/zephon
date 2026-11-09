@@ -503,6 +503,11 @@
     <span class="c1"># - 'contiguous': dp groups own contiguous blocks of replicas (locality-friendly)</span>
     <span class="c1"># - 'interleaved': replicas are round-robin across dp groups (balanced progress)</span>
     <span class="n">mapping_strategy</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">"contiguous"</span><span class="p">,</span> <span class="s2">"interleaved"</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="c1"># Records the trainer consumes per optimizer step across all data-parallel</span>
+    <span class="c1"># ranks (its global batch size). When set, Zephon checks that every step</span>
+    <span class="c1"># takes whole batches from every lane and raises otherwise. Leave it unset</span>
+    <span class="c1"># if the run does not need steps to stay identical across elastic resumes.</span>
+    <span class="n">global_batch_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
 
     <span class="c1"># === IPC serialization ===</span>
     <span class="c1"># Disable Zephon SHM preparation for process-worker outputs. Ordinary</span>
