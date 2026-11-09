@@ -1531,7 +1531,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         Uses ``weight * chunk_size`` (the long-run average quota) as the
         divisor for each component. Quota rounding decides on which chunk a
         bounded component's draw first fails, so the estimate can be high or
-        low by a few chunks. Actual termination is governed by ``compute_quotas``.
+        low. Actual termination is governed by ``compute_quotas``.
 
         Repeating datasets with no ``max_repeats`` cap contribute infinitely
         and are skipped from the ``min``.  Repeating datasets with a finite
