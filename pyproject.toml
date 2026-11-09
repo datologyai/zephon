@@ -48,6 +48,15 @@ parquet = [
 vortex = [
     "vortex-data>=0.90.0; python_version >= '3.11'",
 ]
+array_record = [
+    # Skip platforms without wheels (e.g. Windows) so uv sync --all-extras works.
+    # Intel macOS needs 0.6.x (Python 3.10-3.12); the cap prevents universal locks
+    # from selecting newer ARM-only wheels.
+    # Markers cannot express ABI/libc support (e.g. 3.14t); uv still checks it.
+    "array-record>=0.6.0; sys_platform == 'linux' or (sys_platform == 'darwin' and platform_machine == 'arm64')",
+    "array-record>=0.6.0,<0.7.0; sys_platform == 'darwin' and platform_machine == 'x86_64' and python_version < '3.13'",
+    "cramjam>=2.8.0",  # ArrayRecord footer codecs (Zstd, Brotli, raw Snappy).
+]
 lance = [
     "pylance>=1.0.0",
     "zephon[parquet]",

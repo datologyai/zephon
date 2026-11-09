@@ -56,10 +56,11 @@ from zephon._internal.io.formats.lance_support.manifest import (
     latest_manifest_path,
     read_manifest,
 )
+from zephon._internal.io.formats.locators import build_file_locators
 from zephon._internal.io.formats.metadata_cache import MetadataCache, file_cache_key
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import RouterStorageBackend, StorageBackend
-from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.io.types import LocalShardRef, ShardLocator
 from zephon._internal.utils.thread_utils import configure_lance_threads
 from zephon.types import SamplePayload
 
@@ -519,35 +520,11 @@ class LanceFormat(FormatHandler):
         path = dataset.backend.get("path")
         if not isinstance(path, str):
             raise ValueError("Lance dataset missing 'path' in backend metadata")
-        shards = dataset.backend.get("shards")
-        if not isinstance(shards, Mapping):
-            raise ValueError("Lance dataset missing 'shards' metadata")
-        data_root = os.path.join(dataset_root_of(path), DATA_DIR)
-
-        locators: dict[int, ShardLocator] = {}
-        for shard_id_obj, shard_meta in shards.items():
-            shard_id = int(shard_id_obj)
-            if not isinstance(shard_meta, Mapping):
-                raise ValueError(f"Invalid shard metadata for shard {shard_id}")
-            raw_meta = shard_meta.get("raw")
-            if not isinstance(raw_meta, Mapping):
-                raise ValueError(f"Shard {shard_id} missing Lance raw metadata")
-            extra = shard_meta.get("extra")
-            locators[shard_id] = ShardLocator(
-                dataset=dataset.name,
-                shard_id=shard_id,
-                format=self.kind,
-                root=data_root,
-                raw=ShardFile(
-                    basename=str(raw_meta["basename"]),
-                    bytes=int(raw_meta["bytes"]),
-                    hashes={},
-                ),
-                zip=None,
-                compression=None,
-                extra=extra if isinstance(extra, Mapping) else None,
-            )
-        return locators
+        return build_file_locators(
+            dataset,
+            format_kind=self.kind,
+            root=os.path.join(dataset_root_of(path), DATA_DIR),
+        )
 
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef

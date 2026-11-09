@@ -800,6 +800,24 @@ def test_discover_counts_agrees_with_discover_on_empty_index(
         handler.discover_counts(str(tmp_path), storage)
 
 
+@pytest.mark.parametrize(
+    "update",
+    [{"basename": "wrong.parquet"}, {"extra": {"length": 2}}],
+)
+def test_index_rejects_format_specific_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, update: dict[str, Any]
+) -> None:
+    monkeypatch.setattr(vortex_format, "_vortex", None)
+    _write_index(
+        tmp_path,
+        [{"basename": "a.vortex", "bytes": 10, "num_rows": 3, **update}],
+    )
+    handler = VortexFormat()
+    for discover in (handler.discover, handler.discover_counts):
+        with pytest.raises(ValueError, match="index"):
+            discover(".", LocalFSBackend(tmp_path))
+
+
 @pytest.mark.parametrize("metadata_entries", [0, 1])
 @pytest.mark.parametrize("segment_bytes", [0, 4096])
 def test_opener_retains_only_enabled_caches(

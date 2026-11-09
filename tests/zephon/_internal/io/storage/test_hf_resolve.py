@@ -172,8 +172,9 @@ def test_readable_uploaded_files_win(uploaded) -> None:
     assert not any(call.startswith("parquet_export") for call in hub.calls)
 
 
-def test_compressed_jsonl_uploads_are_readable(uploaded) -> None:
-    uploaded(_Uploaded("default", ("shard_0.jsonl.zst",), None))
+@pytest.mark.parametrize("filename", ["shard_0.jsonl.zst", "shard_0.array_record"])
+def test_readable_original_uploads(uploaded, filename: str) -> None:
+    uploaded(_Uploaded("default", (filename,), None))
     result = resolve(
         _FakeHub(), parse_hf_uri("hf://org/repo/train"), None, allow_partial=False
     )

@@ -120,6 +120,21 @@ class TestParquetIndexCreation:
 class TestParquetFormatDiscovery:
     """Tests for Parquet format discovery."""
 
+    def test_rescans_when_a_later_index_shard_lacks_row_groups(
+        self, parquet_dataset_with_index: Path
+    ) -> None:
+        path = parquet_dataset_with_index / "index.json"
+        index = json.loads(path.read_text())
+        del index["shards"][1]["extra"]["row_groups"]
+        index["shards"][1]["num_rows"] = 999
+        path.write_text(json.dumps(index))
+        handler = ParquetFormat()
+        storage = LocalFSBackend(parquet_dataset_with_index)
+        counts, metadata = handler.discover(".", storage)
+        assert counts[1] == 8000
+        assert len(metadata[1]["extra"]["row_groups"]) == 4
+        assert handler.discover_counts(".", storage)[1].tolist() == [10000, 8000, 12000]
+
     def test_discover_from_index(self, parquet_dataset_with_index):
         """Test fast discovery from index.json."""
         format_handler = ParquetFormat()

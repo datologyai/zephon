@@ -16,11 +16,12 @@ from zephon._internal.io.catalog.extra_codec import (
     unpackb,
 )
 from zephon._internal.io.formats.base import FormatHandler, register_format
+from zephon._internal.io.formats.locators import build_file_locators
 from zephon._internal.io.index import find_and_load_index
 from zephon._internal.io.index.index_types import is_mds_index
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
-from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.io.types import LocalShardRef, ShardLocator
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
@@ -138,42 +139,8 @@ class MDSFormat(FormatHandler):
         return super().discover_counts(path, storage)
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
-        backend = dataset.backend
-        path = backend.get("path")
-        if not isinstance(path, str):
-            raise ValueError("MDS dataset missing 'path' metadata")
-        shards = backend.get("shards")
-        if not isinstance(shards, Mapping):
-            raise ValueError("MDS dataset missing 'shards' metadata")
-
-        locators: dict[int, ShardLocator] = {}
-        for shard_id_obj, meta in shards.items():
-            shard_id = int(shard_id_obj)
-            if not isinstance(meta, Mapping):
-                raise ValueError(f"Invalid MDS shard metadata for shard {shard_id}")
-            raw_meta = meta.get("raw")
-            if not isinstance(raw_meta, Mapping):
-                raise ValueError(f"Shard {shard_id} missing raw metadata")
-            raw = _build_file(raw_meta, shard_id, "raw")
-            zip_meta = meta.get("zip")
-            zip_file = None
-            if isinstance(zip_meta, Mapping):
-                zip_file = _build_file(zip_meta, shard_id, "zip")
-            compression = meta.get("compression")
-            extra = (
-                meta.get("extra") if isinstance(meta.get("extra"), Mapping) else None
-            )
-            locators[shard_id] = ShardLocator(
-                dataset=dataset.name,
-                shard_id=shard_id,
-                format=self.kind,
-                root=path,
-                raw=raw,
-                zip=zip_file,
-                compression=str(compression) if compression else None,
-                extra=extra,
-            )
-        return locators
+        """Build locators from normalized shard metadata."""
+        return build_file_locators(dataset, format_kind=self.kind)
 
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
@@ -220,30 +187,6 @@ class MDSFormat(FormatHandler):
                 "Unsupported mosaicml-streaming version; please upgrade to a recent release"
             ) from exc
         return _PassthroughMDSShard(cast(_UnderlyingMDSShard, streaming_shard))
-
-
-def _build_file(meta: Mapping[str, object], shard_id: int, kind: str) -> ShardFile:
-    basename = meta.get("basename")
-    if not isinstance(basename, str):
-        raise ValueError(f"Shard {shard_id} missing basename for {kind} file")
-    bytes_value = meta.get("bytes")
-    if bytes_value is None:
-        raise ValueError(f"Shard {shard_id} missing byte size for {kind} file")
-    if not isinstance(bytes_value, (int, str)):
-        raise ValueError(
-            f"Shard {shard_id} invalid byte size for {kind} file: {bytes_value}"
-        )
-    try:
-        bytes_int = int(bytes_value)
-    except ValueError as exc:
-        raise ValueError(
-            f"Shard {shard_id} invalid byte size for {kind} file: {bytes_value}"
-        ) from exc
-    hashes_obj = meta.get("hashes") or {}
-    if not isinstance(hashes_obj, Mapping):
-        raise ValueError(f"Shard {shard_id} invalid hashes for {kind} file")
-    hashes = {str(k): str(v) for k, v in hashes_obj.items()}
-    return ShardFile(basename=basename, bytes=bytes_int, hashes=hashes)
 
 
 def _normalize_shard(entry: Mapping[str, object], shard_id: int) -> dict[str, object]:

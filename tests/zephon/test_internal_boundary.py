@@ -189,6 +189,14 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.io.types:ShardLocator",
         }
     ),
+    # Assert discovery and index construction transfer only ArrayRecord metadata.
+    "tests/integration/test_array_record_integration.py": frozenset(
+        {
+            "zephon._internal.io.formats.array_record:ArrayRecordFormat",
+            "zephon._internal.io.index.array_record_index:ArrayRecordIndexBuilder",
+            "zephon._internal.io.storage.local:LocalFSBackend",
+        }
+    ),
     # Inspector lifecycle coverage verifies its internal cache owner is closed.
     "tests/zephon/debug/test_inspector.py": frozenset(
         {"zephon._internal.io.resolvers:CacheManager"}

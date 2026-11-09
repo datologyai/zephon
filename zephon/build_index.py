@@ -15,8 +15,10 @@ from pathlib import Path
 from zephon._internal.io.index.index_builder import create_index as _create_index
 
 # A format's index module registers its builder on import but pulls an optional
-# dep (pyarrow / vortex), so import it on demand to keep this module dep-free.
+# dep (pyarrow / vortex / array-record), so import it on demand to keep this
+# module dep-free.
 _FORMAT_INDEX_MODULES = {
+    "array_record": "zephon._internal.io.index.array_record_index",
     "jsonl": "zephon._internal.io.index.jsonl_index",
     "parquet": "zephon._internal.io.index.parquet_index",
     "vortex": "zephon._internal.io.index.vortex_index",
@@ -31,7 +33,7 @@ def build_index(
     progress: bool = True,
     max_workers: int = 8,
 ) -> str:
-    """Build an ``index.json`` for a JSONL, Parquet, or Vortex dataset.
+    """Build an ``index.json`` for a JSONL, Parquet, Vortex, or ArrayRecord dataset.
 
     Writes to ``dataset_dir/index.json`` unless *output_path* is given, printing
     progress when *progress* is true. Local paths and remote roots supported by

@@ -23,7 +23,6 @@ from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
@@ -40,15 +39,20 @@ from zephon._internal.io.formats.base import (
     ShardOpener,
     register_format,
 )
+from zephon._internal.io.formats.locators import build_file_locators
 from zephon._internal.io.formats.metadata_cache import MetadataCache, file_cache_key
 from zephon._internal.io.formats.parquet_cache.cache import ParquetRGCache
 from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
+from zephon._internal.io.index.shard_index import (
+    shard_index_counts,
+    validate_shard_index,
+)
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage.base import StorageBackend
 from zephon._internal.io.suffixes import PARQUET_SUFFIXES
-from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.io.types import LocalShardRef, ShardLocator
 from zephon.types import SamplePayload
 
 if TYPE_CHECKING:
@@ -320,12 +324,16 @@ class ParquetFormat(FormatHandler):
         return self._discover_from_files(path, storage)
 
     def _is_valid_parquet_index(self, data: ShardIndex) -> bool:
-        """Check if data is a valid Parquet index (has shards with row_groups)."""
-        if not data["shards"]:
+        """Check common fields and Parquet's per-shard row-group metadata."""
+        try:
+            validate_shard_index(data)
+        except ValueError:
             return False
-        first_shard = data["shards"][0]
-        extra = first_shard.get("extra", {})
-        return isinstance(extra, dict) and "row_groups" in extra
+        return all(
+            shard["basename"].endswith(PARQUET_SUFFIXES)
+            and isinstance(shard.get("extra", {}).get("row_groups"), list)
+            for shard in data["shards"]
+        )
 
     def _discover_from_index_data(
         self, data: ShardIndex
@@ -451,73 +459,12 @@ class ParquetFormat(FormatHandler):
         """
         result = find_and_load_index(path, storage)
         if is_shard_index(result) and self._is_valid_parquet_index(result):
-            counts = [shard.get("num_rows", 0) for shard in result["shards"]]
-            return (
-                np.arange(len(counts), dtype=np.int64),
-                np.array(counts, dtype=np.int64),
-            )
+            return shard_index_counts(result)
         return super().discover_counts(path, storage)
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
-        """Convert discovered metadata into ShardLocators.
-
-        Args:
-            dataset: Dataset instance with backend metadata
-
-        Returns:
-            Mapping from shard_id to ShardLocator
-        """
-        backend = dataset.backend
-        path = backend.get("path")
-        if not isinstance(path, str):
-            raise ValueError("Parquet dataset missing 'path' in backend metadata")
-        shards = backend.get("shards")
-        if not isinstance(shards, Mapping):
-            raise ValueError("Parquet dataset missing 'shards' metadata")
-
-        locators: dict[int, ShardLocator] = {}
-        for shard_id_obj, shard_meta in shards.items():
-            shard_id = int(shard_id_obj)
-            if not isinstance(shard_meta, Mapping):
-                raise ValueError(f"Invalid shard metadata for shard {shard_id}")
-
-            raw_meta = shard_meta.get("raw")
-            if not isinstance(raw_meta, Mapping):
-                raise ValueError(f"Shard {shard_id} missing raw metadata")
-
-            basename = raw_meta.get("basename")
-            if not isinstance(basename, str):
-                raise ValueError(f"Shard {shard_id} missing basename")
-
-            bytes_value = raw_meta.get("bytes")
-            if isinstance(bytes_value, Integral):
-                raw_bytes = int(bytes_value)
-            elif isinstance(bytes_value, str):
-                raw_bytes = int(bytes_value)
-            else:
-                raise ValueError(f"Shard {shard_id} missing or invalid byte size")
-
-            raw = ShardFile(
-                basename=basename,
-                bytes=raw_bytes,
-                hashes={
-                    str(k): str(v) for k, v in dict(raw_meta.get("hashes", {})).items()
-                },
-            )
-
-            extra = shard_meta.get("extra")
-            locators[shard_id] = ShardLocator(
-                dataset=dataset.name,
-                shard_id=shard_id,
-                format=self.kind,
-                root=path,
-                raw=raw,
-                zip=None,
-                compression=None,
-                extra=extra if isinstance(extra, Mapping) else None,
-            )
-
-        return locators
+        """Build locators from normalized shard metadata."""
+        return build_file_locators(dataset, format_kind=self.kind)
 
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
