@@ -7,7 +7,7 @@ import math
 import random
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, ClassVar, Literal
@@ -18,9 +18,10 @@ from zephon._internal.checkpoint import (
     CursorStateV1 as _CursorStateV1,
 )
 from zephon._internal.checkpoint import (
-    StaticMixtureStateV5 as _StaticMixtureStateV5,
+    StaticMixtureStateV6 as _StaticMixtureStateV6,
 )
 from zephon._internal.token_counting import TokenCountingSpec as _TokenCountingSpec
+from zephon._internal.utils.swrr import DeficitRoundRobin as _DeficitRoundRobin
 from zephon.io.dataset import Dataset
 from zephon.types import SampleId
 from zephon.work.base import WorkChunk, WorkSource
@@ -135,6 +136,11 @@ class _AllocationConfig:
     ``stop_after_passes`` (when set) is a global termination floor: every dataset
     repeats and the stream ends once the slowest has completed that many
     passes. Mutually exclusive with per-dataset ``"stop"`` and ``max_repeats``.
+
+    ``_legacy_repeat_skip_tail`` exists only to resume v5 checkpoints, whose
+    streams skipped the rest of a pass when a repeating dataset wrapped. Only
+    the v5 -> v6 migration turns it on and v6 checkpoints carry it forward;
+    fresh sources always drain the tail.
     """
 
     component_order: tuple[str, ...]
@@ -144,6 +150,7 @@ class _AllocationConfig:
     reshuffle_on_repeat: Mapping[str, bool]
     max_repeats: Mapping[str, int | None]
     stop_after_passes: int | None = None
+    _legacy_repeat_skip_tail: bool = field(default=False, kw_only=True)
     redistributing: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -194,13 +201,13 @@ def _effective_remaining_samples(
 def _stop_after_passes_reached(
     cfg: _AllocationConfig,
     cursors: Mapping[str, "_DatasetCursor"],
-    exhausting: str | None = None,
+    exhausting: Collection[str] = (),
 ) -> bool:
     """True when every dataset has completed at least ``stop_after_passes`` passes.
 
     A dataset has finished its current pass when its cursor sits at
-    ``remaining == 0`` (consumed cleanly) or it is ``exhausting`` (about to be
-    reset because it can't fill this chunk's quota); either counts as
+    ``remaining == 0`` (consumed cleanly) or it is in ``exhausting`` (about to
+    be reset because it can't fill this chunk's quota); either counts as
     ``_epoch + 1``, others are mid-pass at ``_epoch``. Checking ``remaining == 0``
     — not only ``exhausting`` — is what catches a sparse dataset that finishes on
     a chunk boundary without tripping ``remaining < quota``.
@@ -208,7 +215,7 @@ def _stop_after_passes_reached(
     assert cfg.stop_after_passes is not None
     for name in cfg.component_order:
         cursor = cursors[name]
-        done_current = name == exhausting or cursor.remaining == 0
+        done_current = name in exhausting or cursor.remaining == 0
         completed = cursor._epoch + (1 if done_current else 0)
         if completed < cfg.stop_after_passes:
             return False
@@ -1095,7 +1102,10 @@ class AllocationStrategy(ABC):
 
     @abstractmethod
     def estimate_remaining_samples(self, cursors: dict[str, _DatasetCursor]) -> int:
-        """Estimate the number of samples still available (for ``__len__``)."""
+        """Estimate the number of samples still available (for ``__len__``).
+
+        Mixed-policy estimates can be high or low; ``produce`` is the exact stop.
+        """
 
     @abstractmethod
     def clone(self) -> "AllocationStrategy":
@@ -1115,7 +1125,7 @@ class AllocationStrategy(ABC):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: _StaticMixtureStateV5,
+        ckpt: _StaticMixtureStateV6,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -1175,7 +1185,7 @@ class AllocationStrategy(ABC):
         return dict(self._active_weights(cursors)) if self._redistributing else None
 
     def validate_liveness(self, cursors: dict[str, _DatasetCursor]) -> None:
-        """Guard the repeat retry loop against datasets too small to refill a chunk.
+        """Reject repeat datasets too small to fill their largest per-chunk quota.
 
         A no-op by default. Strategies with a closed-form per-chunk demand
         override. Safe to call eagerly: a strategy that cannot check yet (token
@@ -1223,7 +1233,11 @@ class QuotaAllocationStrategy(AllocationStrategy):
             if quota <= 0:
                 continue
             cursor = cursors[name]
+            # Drain the pass tail before wrapping so no record is skipped.
             samples = cursor.next_many(quota)
+            if len(samples) < quota and self._config.exhausted_policy[name] == "repeat":
+                cursor.reset(reshuffle=self._config.reshuffle_on_repeat[name])
+                samples.extend(cursor.next_many(quota - len(samples)))
             if len(samples) != quota:
                 raise RuntimeError(
                     f"Cursor for component '{name}' returned {len(samples)}"
@@ -1354,6 +1368,74 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         self, cursors: dict[str, _DatasetCursor]
     ) -> dict[str, int] | None:
         """Accumulator-based chunk production (default)."""
+        if self._config._legacy_repeat_skip_tail:
+            return self._compute_quotas_legacy_skip_tail(cursors)
+        return self._compute_quotas_draining(cursors)
+
+    def _compute_quotas_draining(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> dict[str, int] | None:
+        """Allocate quotas that ``produce`` fills by draining pass tails first."""
+        cfg = self._config
+        weights = self._active_weights(cursors)
+        if not weights:
+            return None
+
+        # Every terminal None rolls back the accumulator advance, so a checkpoint
+        # taken after a prefetched None never stores unfulfilled debits.
+        saved = dict(self._accumulators)
+        if any(
+            name not in weights and self._accumulators[name] != 0.0
+            for name in self._redistributing
+        ):
+            # Retiring nonzero fractional debt unbalances the survivors' rounding
+            # ledger, so restart all rounding. Zeroed retired entries prevent
+            # another reset on checkpoint restore.
+            self._accumulators = dict.fromkeys(cfg.component_order, 0.0)
+        quotas = self._advance_accumulators(weights)
+        wrapping: list[str] = []
+        for name in cfg.component_order:
+            quota = quotas.get(name, 0)
+            cursor = cursors[name]
+            if cursor.remaining >= quota:
+                continue
+            self._last_failed_component = name
+            if cfg.exhausted_policy[name] == "redistribute":
+                # Clamp only this quota; the short chunk keeps the old target and
+                # the next one renormalizes without this component.
+                quotas[name] = cursor.remaining
+                continue
+            # ``produce`` drains the tail before resetting: stop only when the
+            # tail plus any remaining passes cannot fill the quota.
+            available = _effective_remaining_samples(cfg, name, cursor)
+            if available is not None and available < quota:
+                self._accumulators = saved
+                return None
+            wrapping.append(name)
+        # Judge the floor with every wrap in this chunk at once: each wrapping
+        # dataset alone still sees the others mid-pass. With no wraps this also
+        # catches a sparse component that finished its pass with quota 0.
+        if cfg.stop_after_passes is not None and _stop_after_passes_reached(
+            cfg, cursors, wrapping
+        ):
+            self._accumulators = saved
+            return None
+        for name in wrapping:
+            if quotas[name] > cursors[name]._total_samples:
+                # ``produce`` resets at most once per chunk.
+                self._accumulators = saved
+                raise RuntimeError(
+                    f"Dataset '{name}' ({cursors[name]._total_samples} samples) "
+                    f"drew a quota of {quotas[name]} for one chunk "
+                    f"(chunk_size={cfg.chunk_size}): more than a full pass "
+                    "(repeat liveness bound violated; zephon bug)."
+                )
+        return quotas
+
+    def _compute_quotas_legacy_skip_tail(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> dict[str, int] | None:
+        """Allocate as v5 did: a repeat dataset short of its quota skips its tail."""
         cfg = self._config
         weights = self._active_weights(cursors)
         if not weights:
@@ -1402,7 +1484,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
                             return None
                         if (
                             cfg.stop_after_passes is not None
-                            and _stop_after_passes_reached(cfg, cursors, name)
+                            and _stop_after_passes_reached(cfg, cursors, (name,))
                         ):
                             self._accumulators = saved
                             return None
@@ -1447,10 +1529,9 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         """Estimate of remaining samples using average per-chunk quota.
 
         Uses ``weight * chunk_size`` (the long-run average quota) as the
-        divisor for each component. This may slightly overestimate because a
-        component could receive a larger-than-average quota in the very next
-        chunk, but it is close to correct and consistent with accumulator
-        convergence. Actual termination is governed by ``compute_quotas``.
+        divisor for each component. Quota rounding decides on which chunk a
+        bounded component's draw first fails, so the estimate can be high or
+        low. Actual termination is governed by ``compute_quotas``.
 
         Repeating datasets with no ``max_repeats`` cap contribute infinitely
         and are skipped from the ``min``.  Repeating datasets with a finite
@@ -1482,7 +1563,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: _StaticMixtureStateV5,
+        ckpt: _StaticMixtureStateV6,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -1646,7 +1727,7 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: _StaticMixtureStateV5,
+        ckpt: _StaticMixtureStateV6,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -1667,14 +1748,11 @@ class TokenAwareStrategy(AllocationStrategy):
     allocation_mode: ClassVar[str] = "token_aware"
 
     #: Heuristic cushion over the average per-chunk draws (share * chunk_size):
-    #: carried deficits let a single chunk draw well above its average. A false
-    #: pass ends in _MAX_CHUNK_RESETS' "cannot converge" error, not a hang.
+    #: carried deficits let a single chunk draw well above its average.
     _TOKEN_LIVENESS_SAFETY: ClassVar[float] = 2.0
 
-    #: Filling a chunk needs at most one reset per repeat dataset (the retry
-    #: restarts it from the top of a fresh epoch); repeated re-exhaustion means
-    #: the carried deficit demands more than a full pass within one chunk, so
-    #: deterministic retrying cannot converge. Small slack for reshuffled order.
+    #: Legacy-stream retries allowed per dataset within one chunk. Draining
+    #: streams need no bound: every draw consumes a record.
     _MAX_CHUNK_RESETS: ClassVar[int] = 3
 
     def __init__(
@@ -1786,17 +1864,83 @@ class TokenAwareStrategy(AllocationStrategy):
         self, cursors: dict[str, _DatasetCursor]
     ) -> dict[str, list[SampleId]] | None:
         """Draw one chunk with token-cost weighted SWRR deficits."""
+        if self._config._legacy_repeat_skip_tail:
+            return self._produce_legacy_skip_tail(cursors)
+        return self._produce_draining(cursors)
+
+    def _produce_draining(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> dict[str, list[SampleId]] | None:
+        """Draw a chunk; a dry repeat cursor wraps and keeps its drained tail."""
         cfg = self._config
         active_weights = self._active_weights(cursors)
         if not active_weights:
             return None
-        cost_table = self._ensure_cost_table()
+        # A dataset may satisfy the pass floor on an earlier chunk boundary.
+        if cfg.stop_after_passes is not None and _stop_after_passes_reached(
+            cfg, cursors
+        ):
+            return None
+        cost = self._ensure_cost_table().cost  # bound once; called per draw
 
         order = self._active_order(active_weights)
-        n = len(order)
+        cursor_list = [cursors[name] for name in order]
+        snapshot = self._snapshot(cursors)
+        rr = _DeficitRoundRobin(
+            [active_weights[name] for name in order],
+            [self._deficits[name] for name in order],
+        )
+        drawn: list[list[SampleId]] = [[] for _ in order]
+
+        # Every draw consumes a record, so wrapping as often as the carried
+        # deficit demands still ends within chunk_size draws.
+        best = rr.select()
+        for _ in range(cfg.chunk_size):
+            sample_id = cursor_list[best].next_one()
+            if sample_id is None:
+                name = order[best]
+                self._last_failed_component = name
+                if cfg.exhausted_policy[name] == "redistribute":
+                    # Commit this tail; the next chunk's target drops the
+                    # component.
+                    break
+                ds_max = cfg.max_repeats[name]
+                if (
+                    cfg.exhausted_policy[name] != "repeat"
+                    or (ds_max is not None and cursors[name]._epoch >= ds_max)
+                    or (
+                        cfg.stop_after_passes is not None
+                        and _stop_after_passes_reached(cfg, cursors, (name,))
+                    )
+                ):
+                    # Terminal: the chunk cannot be completed. Roll back so the
+                    # None is side-effect-free.
+                    self._restore(cursors, snapshot)
+                    return None
+                cursors[name].reset(reshuffle=cfg.reshuffle_on_repeat[name])
+                sample_id = cursor_list[best].next_one()
+                assert sample_id is not None
+
+            drawn[best].append(sample_id)
+            best = rr.charge_and_select(best, cost(order[best], sample_id))
+
+        # Checkpoint validation requires deficit keys for retired components too.
+        self._deficits.update(zip(order, rr.deficits))
+        return {name: samples for name, samples in zip(order, drawn) if samples}
+
+    def _produce_legacy_skip_tail(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> dict[str, list[SampleId]] | None:
+        """Draw as v5 did: a dry repeat cursor restarts the chunk from its next pass."""
+        cfg = self._config
+        active_weights = self._active_weights(cursors)
+        if not active_weights:
+            return None
+        cost = self._ensure_cost_table().cost  # bound once; called per draw
+
+        order = self._active_order(active_weights)
         weights = [active_weights[name] for name in order]
         cursor_list = [cursors[name] for name in order]
-        cost = cost_table.cost  # bound once; called per draw
         snapshot = self._snapshot(cursors)
         resets: dict[str, int] = {}
 
@@ -1806,19 +1950,12 @@ class TokenAwareStrategy(AllocationStrategy):
                 cfg, cursors
             ):
                 return None
-            deficits = [self._deficits[name] for name in order]
+            rr = _DeficitRoundRobin(weights, [self._deficits[name] for name in order])
             drawn: list[list[SampleId]] = [[] for _ in order]
             retry = False
 
+            best = rr.select()
             for _ in range(cfg.chunk_size):
-                # Ties break to the earliest component, like the quota strategies.
-                best = 0
-                best_deficit = deficits[0]
-                for i in range(1, n):
-                    if deficits[i] > best_deficit:
-                        best = i
-                        best_deficit = deficits[i]
-
                 sample_id = cursor_list[best].next_one()
                 if sample_id is None:
                     name = order[best]
@@ -1836,19 +1973,21 @@ class TokenAwareStrategy(AllocationStrategy):
                             return None
                         # Count the just-exhausted pass without consuming this chunk.
                         if cfg.stop_after_passes is not None and (
-                            _stop_after_passes_reached(cfg, cursors, exhausting=name)
+                            _stop_after_passes_reached(cfg, cursors, (name,))
                         ):
                             return None
                         resets[name] = resets.get(name, 0) + 1
+                        # Each retry restarts the chunk, so a deficit above a
+                        # full pass would retry forever.
                         if resets[name] > self._MAX_CHUNK_RESETS:
                             raise RuntimeError(
                                 f"Dataset '{name}' "
                                 f"({cursors[name]._total_samples} samples) was "
                                 f"exhausted {resets[name]} times while filling "
-                                f"one chunk: its carried token deficit "
-                                f"({self._deficits[name]:.0f}) demands more "
-                                f"than a full pass per attempt, so retrying "
-                                f"cannot converge. Increase the dataset, lower "
+                                f"one chunk: its token deficit reached "
+                                f"{rr.deficits[best]:.0f} within the attempt, "
+                                f"more than a full pass, so retrying cannot "
+                                f"converge. Increase the dataset, lower "
                                 f"chunk_size, or bound the run via "
                                 f"max_repeats/stop_after_passes."
                             )
@@ -1860,13 +1999,8 @@ class TokenAwareStrategy(AllocationStrategy):
                         break
                     return None  # "stop" policy; snapshot already restored
 
-                est = cost(order[best], sample_id)
-                # Mirrors utils/swrr.py SmoothWeightedRoundRobin's update rule;
-                # inlined because rollback + checkpointed deficits need raw state.
-                for i in range(n):
-                    deficits[i] += weights[i] * est
-                deficits[best] -= est
                 drawn[best].append(sample_id)
+                best = rr.charge_and_select(best, cost(order[best], sample_id))
 
             if retry:
                 continue
@@ -1874,7 +2008,7 @@ class TokenAwareStrategy(AllocationStrategy):
             # Argmax only depends on relative deficits, so unlike sample quota
             # rounding it needs no zero-sum reset. Checkpoint validation requires
             # deficit keys to match component_order, including retired components.
-            self._deficits.update({name: deficits[i] for i, name in enumerate(order)})
+            self._deficits.update(zip(order, rr.deficits))
             return {name: samples for name, samples in zip(order, drawn) if samples}
 
     def target_mixture(
@@ -1969,7 +2103,7 @@ class TokenAwareStrategy(AllocationStrategy):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: _StaticMixtureStateV5,
+        ckpt: _StaticMixtureStateV6,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -2564,7 +2698,11 @@ class StaticMixtureWorkSource(WorkSource):
     # ------------------------------------------------------------------
 
     def __len__(self) -> int:
-        """Returns the number of available samples across all chunks that can be yielded."""
+        """Estimated number of samples left to yield across all chunks.
+
+        Exact only when every dataset redistributes; otherwise quota rounding
+        and token costs can make it high or low.
+        """
         if hasattr(self, "_alloc_config"):
             cfg = self._alloc_config
             if _is_unbounded(cfg):
@@ -2603,7 +2741,7 @@ class StaticMixtureWorkSource(WorkSource):
         cursor_block_sizes = {
             name: self._knobs_by_name[name].shuffle_block_size for name in self._cursors
         }
-        state = _StaticMixtureStateV5(
+        state = _StaticMixtureStateV6(
             lane_id=base["lane_id"],
             canonical_replicas=base["canonical_replicas"],
             chunk_size_hint=base["chunk_size_hint"],
@@ -2639,10 +2777,11 @@ class StaticMixtureWorkSource(WorkSource):
             accumulators=strategy_state.get("accumulators"),
             token_deficits=strategy_state.get("token_deficits"),
             token_ratios=strategy_state.get("token_ratios"),
+            _legacy_repeat_skip_tail=cfg._legacy_repeat_skip_tail,
         )
         return state.to_dict()
 
-    def _reject_policy_override(self, ckpt: _StaticMixtureStateV5) -> None:
+    def _reject_policy_override(self, ckpt: _StaticMixtureStateV6) -> None:
         """Fail a resume whose explicit policy args contradict the checkpoint.
 
         A resume restores the policy frozen in the checkpoint, so an explicit
@@ -2675,7 +2814,7 @@ class StaticMixtureWorkSource(WorkSource):
             )
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        ckpt = _StaticMixtureStateV5.load(state)
+        ckpt = _StaticMixtureStateV6.load(state)
 
         self._verify_base_state(int(ckpt.lane_id), int(ckpt.canonical_replicas))
 
@@ -2744,8 +2883,8 @@ class StaticMixtureWorkSource(WorkSource):
             )
 
         shared_seed = self._seed
-        shared_shuffle_shards = bool(ckpt.knobs["shuffle_shards"])
-        shared_shuffle_within_shard = bool(ckpt.knobs["shuffle_within_shard"])
+        shared_shuffle_shards = ckpt.knobs["shuffle_shards"]
+        shared_shuffle_within_shard = ckpt.knobs["shuffle_within_shard"]
 
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
@@ -2786,6 +2925,7 @@ class StaticMixtureWorkSource(WorkSource):
             reshuffle_on_repeat=ckpt.reshuffle_on_repeat,
             max_repeats=ckpt.max_repeats,
             stop_after_passes=ckpt.stop_after_passes,
+            _legacy_repeat_skip_tail=ckpt._legacy_repeat_skip_tail,
         )
         self._weights = dict(ckpt.weights)
 

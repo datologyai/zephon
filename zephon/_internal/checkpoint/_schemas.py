@@ -33,6 +33,7 @@ import math
 import re
 import types
 import typing
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Union, cast, get_args, get_origin
 
@@ -51,16 +52,56 @@ def _is_optional(annotation: Any) -> bool:
     return annotation is type(None)
 
 
-def _auto_coerce(annotation: Any) -> type | None:
+#: Shuffle toggles in static-mixture ``knobs``; required from v2 on.
+_SHUFFLE_KNOB_KEYS = frozenset({"shuffle_shards", "shuffle_within_shard"})
+
+
+def _parse_bool(value: Any) -> bool:
+    """Parse a bool without truth-testing: ``bool("false")`` is True."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    raise ValueError(f"expected a bool, 0/1 or 'true'/'false', got {value!r}")
+
+
+def _parse_bool_values(value: Any) -> Any:
+    """Parse every value of a ``dict[K, bool]`` field with :func:`_parse_bool`."""
+    if not isinstance(value, dict):
+        # Left for the schema's invariants, which report the wrong shape.
+        return value
+    parsed = {}
+    for key, item in value.items():
+        try:
+            parsed[key] = _parse_bool(item)
+        except ValueError as exc:
+            raise ValueError(f"[{key!r}]: {exc}") from None
+    return parsed
+
+
+def _parse_knob_bools(knobs: Any) -> Any:
+    """Parse the shuffle toggles in ``knobs``; other keys keep their values."""
+    if not isinstance(knobs, dict):
+        return knobs
+    toggles = {k: v for k, v in knobs.items() if k in _SHUFFLE_KNOB_KEYS}
+    return {**knobs, **_parse_bool_values(toggles)}
+
+
+def _auto_coerce(annotation: Any) -> Callable[[Any], Any] | None:
     """Return a coercion callable for primitive type annotations, else None."""
     origin = get_origin(annotation)
     if origin is Union or isinstance(annotation, types.UnionType):
         args = [a for a in get_args(annotation) if a is not type(None)]
         if len(args) == 1:
             annotation = args[0]
+            origin = get_origin(annotation)
+    if origin is dict and get_args(annotation)[1:] == (bool,):
+        return _parse_bool_values
     # bool before int: bool is a subclass of int, so check it first.
     if annotation is bool:
-        return bool
+        return _parse_bool
     if annotation is int:
         return int
     if annotation is float:
@@ -327,7 +368,7 @@ class WorkChunkStateV3(WorkChunkStateV2):
 # Component: StaticMixtureWorkSource
 # ---------------------------------------------------------------------------
 
-STATIC_MIXTURE_VERSION = 5
+STATIC_MIXTURE_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -357,6 +398,7 @@ class StaticMixtureStateV1(CheckpointMixin):
     """
 
     _COMPONENT: ClassVar[str] = "static_mixture"
+    _COERCE: ClassVar[dict[str, Any]] = {"knobs": _parse_knob_bools}
     # Always written by every historical v1 producer.
     lane_id: int
     canonical_replicas: int
@@ -389,7 +431,6 @@ class StaticMixtureStateV1(CheckpointMixin):
 _VALID_ALLOCATION_MODES = frozenset({"accumulator", "legacy_fixed"})
 #: v5 adds "token_aware"; earlier schemas reject it as corrupt.
 _VALID_ALLOCATION_MODES_V5 = _VALID_ALLOCATION_MODES | {"token_aware"}
-_REQUIRED_V2_KNOB_KEYS = frozenset({"shuffle_shards", "shuffle_within_shard"})
 
 #: Provenance tags a primed tokens/byte ratio may carry in v5 checkpoints.
 VALID_TOKEN_RATIO_SOURCES = frozenset({"measured", "pinned", "fallback"})
@@ -439,7 +480,7 @@ def _static_mixture_block_invariant_errors(
     if not isinstance(knobs, dict):
         errors.append(f"knobs must be a dict, got {type(knobs).__name__}")
     else:
-        missing_knobs = _REQUIRED_V2_KNOB_KEYS - set(knobs)
+        missing_knobs = _SHUFFLE_KNOB_KEYS - set(knobs)
         if missing_knobs:
             errors.append(f"knobs missing required keys {sorted(missing_knobs)}")
         if "shuffle_block_size" in knobs:
@@ -499,6 +540,7 @@ class StaticMixtureStateV2(CheckpointMixin):
     """
 
     _COMPONENT: ClassVar[str] = "static_mixture"
+    _COERCE: ClassVar[dict[str, Any]] = {"knobs": _parse_knob_bools}
     lane_id: int
     canonical_replicas: int
     chunk_size_hint: int | None
@@ -590,6 +632,7 @@ class StaticMixtureStateV3(CheckpointMixin):
     """
 
     _COMPONENT: ClassVar[str] = "static_mixture"
+    _COERCE: ClassVar[dict[str, Any]] = {"knobs": _parse_knob_bools}
     lane_id: int
     canonical_replicas: int
     chunk_size_hint: int | None
@@ -781,6 +824,15 @@ class StaticMixtureStateV5(StaticMixtureStateV4):
                 "StaticMixtureStateV5 invariants violated:\n  - "
                 + "\n  - ".join(errors)
             )
+
+
+@dataclass(frozen=True, kw_only=True)
+class StaticMixtureStateV6(StaticMixtureStateV5):
+    """StaticMixture checkpoint schema that marks streams resumed from v5 checkpoints."""
+
+    # Compatibility state, not a user knob: only the v5 -> v6 migration sets it.
+    _legacy_repeat_skip_tail: bool
+    version: int = 6
 
 
 # ---------------------------------------------------------------------------

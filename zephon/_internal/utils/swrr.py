@@ -205,6 +205,62 @@ class SmoothWeightedRoundRobin(Generic[K]):
         return {k: v / self._total for k, v in self._emitted.items() if v > 0}
 
 
+class DeficitRoundRobin:
+    """Classic SWRR over raw per-component deficits.
+
+    Each draw credits every component ``weight * cost`` and debits the chosen
+    one by ``cost``. Unlike :class:`SmoothWeightedRoundRobin`, the deficits are
+    plain floats the caller seeds and reads back, so they can be rolled back,
+    checkpointed and carried across target changes unchanged.
+
+    Args:
+        weights: Normalized target weight per component index.
+        deficits: Starting deficit per component index (copied).
+    """
+
+    __slots__ = ("_weights", "deficits")
+
+    def __init__(self, weights: Sequence[float], deficits: Sequence[float]) -> None:
+        self._weights = list(weights)
+        self.deficits = list(deficits)
+
+    def select(self) -> int:
+        """Return the index with the highest deficit; ties go to the earliest."""
+        deficits = self.deficits
+        best = 0
+        best_deficit = deficits[0]
+        for i in range(1, len(deficits)):
+            if deficits[i] > best_deficit:
+                best = i
+                best_deficit = deficits[i]
+        return best
+
+    def charge_and_select(self, chosen: int, cost: float) -> int:
+        """Record a draw of ``cost`` from ``chosen`` and return the next pick.
+
+        One scan instead of a charge followed by :meth:`select`, since this runs
+        once per drawn record. Each deficit is credited and then, if chosen,
+        debited, in the same order as two separate passes, so the deficits match
+        bit for bit; ties still go to the earliest index.
+        """
+        deficits = self.deficits
+        weights = self._weights
+        best_deficit = deficits[0] + weights[0] * cost
+        if chosen == 0:
+            best_deficit -= cost
+        deficits[0] = best_deficit
+        best = 0
+        for i in range(1, len(deficits)):
+            deficit = deficits[i] + weights[i] * cost
+            if i == chosen:
+                deficit -= cost
+            deficits[i] = deficit
+            if deficit > best_deficit:
+                best = i
+                best_deficit = deficit
+        return best
+
+
 def swrr_iterate(
     components: dict[K, Sequence[T]],
     weights: dict[K, float],

@@ -4,11 +4,16 @@
 """Comprehensive unit tests for Smooth Weighted Round Robin (SWRR) implementation."""
 
 import math
+import random
 from collections import Counter
 
 import pytest
 
-from zephon._internal.utils.swrr import SmoothWeightedRoundRobin, swrr_iterate
+from zephon._internal.utils.swrr import (
+    DeficitRoundRobin,
+    SmoothWeightedRoundRobin,
+    swrr_iterate,
+)
 
 # ----------------------------
 # SmoothWeightedRoundRobin Tests
@@ -659,3 +664,59 @@ class TestSWRRTargetRemoval:
             counts[chosen] += 1
             swrr.record(chosen)
         assert counts == {"b": 60, "c": 40}
+
+
+def _charge_then_select(rr: DeficitRoundRobin, chosen: int, cost: float) -> int:
+    # The two-pass reference charge_and_select must match bit for bit.
+    for i, weight in enumerate(rr._weights):
+        rr.deficits[i] += weight * cost
+    rr.deficits[chosen] -= cost
+    return rr.select()
+
+
+class TestDeficitRoundRobin:
+    def test_ties_go_to_the_earliest_index(self) -> None:
+        assert DeficitRoundRobin([0.5, 0.5], [1.0, 1.0]).select() == 0
+        # Charging 0 leaves every deficit equal.
+        assert DeficitRoundRobin([0.5, 0.5], [1.0, 1.0]).charge_and_select(1, 0.0) == 0
+
+    def test_charge_credits_weights_and_debits_the_chosen_cost(self) -> None:
+        rr = DeficitRoundRobin([0.75, 0.25], [0.0, 0.0])
+        assert rr.charge_and_select(0, 4.0) == 1
+        assert rr.deficits == [-1.0, 1.0]
+
+    def test_seed_deficits_are_copied(self) -> None:
+        seed = [0.0, 0.0]
+        DeficitRoundRobin([0.5, 0.5], seed).charge_and_select(0, 2.0)
+        assert seed == [0.0, 0.0]
+
+    @pytest.mark.parametrize("components", [1, 2, 3, 8])
+    def test_charge_and_select_matches_charging_then_selecting(
+        self, components: int
+    ) -> None:
+        rng = random.Random(components)
+        # Coarse weights and costs produce exact ties as well as rounding.
+        weights = [rng.choice([0.1, 0.25, 1 / 3]) for _ in range(components)]
+        total = sum(weights)
+        weights = [w / total for w in weights]
+        start = [rng.choice([0.0, -1.5, 2.0]) for _ in range(components)]
+        fused = DeficitRoundRobin(weights, start)
+        reference = DeficitRoundRobin(weights, start)
+        chosen = fused.select()
+        assert reference.select() == chosen
+        for _ in range(2_000):
+            cost = rng.choice([0.0, 1.0, 4.0, rng.uniform(0, 1e4)])
+            expected = _charge_then_select(reference, chosen, cost)
+            chosen = fused.charge_and_select(chosen, cost)
+            assert chosen == expected
+            assert fused.deficits == reference.deficits
+
+    def test_weighted_costs_converge_to_the_token_target(self) -> None:
+        rr = DeficitRoundRobin([0.5, 0.5], [0.0, 0.0])
+        tokens = [0.0, 0.0]
+        costs = [1.0, 4.0]
+        chosen = rr.select()
+        for _ in range(500):
+            tokens[chosen] += costs[chosen]
+            chosen = rr.charge_and_select(chosen, costs[chosen])
+        assert tokens[0] / sum(tokens) == pytest.approx(0.5, abs=0.01)
