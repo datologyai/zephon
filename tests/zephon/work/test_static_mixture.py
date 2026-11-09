@@ -6,6 +6,7 @@ import pickle
 import random
 import warnings
 from collections import Counter
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from zephon.work import (
     MixtureSpec,
     StaticMixtureWorkSource,
     WorkChunk,
+    WorkSource,
 )
 from zephon.work.static_mixture import (
     _AUTO_BLOCK_SIZE_FACTOR,
@@ -256,6 +258,40 @@ def test_state_dict_knobs_serialization(
     assert "shuffle_block_size" not in knobs
     assert st["shuffle_block_size_spec"] == block_size
     assert st["cursor_block_sizes"] == {ds.name: block_size}
+
+
+def test_restore_parses_string_bools_in_nested_settings() -> None:
+    # Truth-testing would read each "false" below as True: shard shuffling
+    # would reorder the resumed stream, and reshuffling would change it after
+    # the wrap. The restored source leaves the policy to the checkpoint.
+    def lane(**policy: Any) -> WorkSource:
+        shards = {
+            shard: InMemoryShard([{"text": f"a-{shard}-{i}"} for i in range(4)])
+            for shard in range(4)
+        }
+        return StaticMixtureWorkSource(
+            [Dataset.from_dict("a", shards), make_dataset("b", 16)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=4,
+            seed=0,
+            shuffle_shards=False,
+            shuffle_within_shard=True,
+            exhausted_policy="repeat",
+            **policy,
+        ).clone_for_lane(0, canonical_replicas=1)
+
+    source = lane(reshuffle_on_repeat=False)
+    assert source.next_chunk() is not None
+    state = copy.deepcopy(source.state_dict())
+    expected = [c.state_dict() for c in islice(iter(source.next_chunk, None), 12)]
+    assert len(expected) == 12
+
+    state["knobs"] = {"shuffle_shards": "false", "shuffle_within_shard": "true"}
+    state["reshuffle_on_repeat"] = {"a": "false", "b": "false"}
+    restored = lane()
+    restored.load_state_dict(state)
+    resumed = [c.state_dict() for c in islice(iter(restored.next_chunk, None), 12)]
+    assert resumed == expected
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,8 @@
 """Tests for checkpoint dataclass schemas and CheckpointMixin.from_dict()."""
 
 import dataclasses
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -15,6 +17,8 @@ from zephon._internal.checkpoint import (
     StaticMixtureStateV2,
     StaticMixtureStateV3,
     StaticMixtureStateV4,
+    StaticMixtureStateV5,
+    StaticMixtureStateV6,
     WorkChunkStateV1,
 )
 from zephon._internal.checkpoint._migrations import (
@@ -1390,3 +1394,73 @@ def test_static_mixture_v2_rejects_token_aware_allocation_mode():
         StaticMixtureStateV2.from_dict(
             _minimal_static_mixture_v2_raw(allocation_mode="token_aware")
         )
+
+
+# -- Nested bools ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(False, False), (0, False), ("false", False), ("FALSE", False), ("true", True)],
+)
+def test_dict_bool_fields_parse_each_value(raw: object, expected: bool):
+    sm = StaticMixtureStateV3.from_dict(
+        _minimal_static_mixture_v3_raw(reshuffle_on_repeat={"a": raw})
+    )
+    assert sm.reshuffle_on_repeat == {"a": expected}
+    assert type(sm.reshuffle_on_repeat["a"]) is bool
+
+
+@pytest.mark.parametrize("raw", [2, "yes", "", 0.0, None, [False]])
+def test_dict_bool_fields_reject_ambiguous_values(raw: object):
+    with pytest.raises(ValueError, match=r"reshuffle_on_repeat: .*\['a'\]"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(reshuffle_on_repeat={"a": raw})
+        )
+
+
+def test_dict_bool_fields_keep_the_shape_error_for_non_dicts():
+    with pytest.raises(ValueError, match="reshuffle_on_repeat must be a per-dataset"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(reshuffle_on_repeat="false")
+        )
+
+
+@pytest.mark.parametrize(
+    "schema,raw",
+    [
+        (StaticMixtureStateV1, _minimal_static_mixture_raw),
+        (StaticMixtureStateV2, _minimal_static_mixture_v2_raw),
+        (StaticMixtureStateV3, _minimal_static_mixture_v3_raw),
+        (StaticMixtureStateV4, _minimal_static_mixture_v4_raw),
+        (StaticMixtureStateV5, _minimal_static_mixture_v5_raw),
+    ],
+)
+def test_shuffle_knobs_parse_instead_of_truth_testing(
+    schema: Any, raw: Callable[..., dict[str, Any]]
+):
+    knobs: dict[str, Any] = {"shuffle_shards": "false", "shuffle_within_shard": "True"}
+    if schema is StaticMixtureStateV1:
+        knobs["shuffle_block_size"] = 4
+    sm = schema.from_dict(raw(knobs=knobs))
+    expected = {"shuffle_shards": False, "shuffle_within_shard": True}
+    assert {k: sm.knobs[k] for k in expected} == expected
+    assert all(type(sm.knobs[k]) is bool for k in expected)
+    if schema is StaticMixtureStateV1:
+        assert sm.knobs["shuffle_block_size"] == 4
+
+
+def test_shuffle_knobs_reject_ambiguous_values():
+    knobs = {"shuffle_shards": "no", "shuffle_within_shard": False}
+    with pytest.raises(ValueError, match=r"knobs: .*\['shuffle_shards'\]"):
+        StaticMixtureStateV3.from_dict(_minimal_static_mixture_v3_raw(knobs=knobs))
+
+
+def test_string_bools_survive_the_migration_chain():
+    raw = _minimal_static_mixture_v3_raw(
+        knobs={"shuffle_shards": "false", "shuffle_within_shard": "false"},
+        reshuffle_on_repeat={"a": "false"},
+    )
+    sm = StaticMixtureStateV6.load(raw)
+    assert sm.knobs == {"shuffle_shards": False, "shuffle_within_shard": False}
+    assert sm.reshuffle_on_repeat == {"a": False}

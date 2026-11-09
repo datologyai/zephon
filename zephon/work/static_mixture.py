@@ -2883,8 +2883,8 @@ class StaticMixtureWorkSource(WorkSource):
             )
 
         shared_seed = self._seed
-        shared_shuffle_shards = bool(ckpt.knobs["shuffle_shards"])
-        shared_shuffle_within_shard = bool(ckpt.knobs["shuffle_within_shard"])
+        shared_shuffle_shards = ckpt.knobs["shuffle_shards"]
+        shared_shuffle_within_shard = ckpt.knobs["shuffle_within_shard"]
 
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
