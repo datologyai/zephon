@@ -257,6 +257,7 @@
 <li class="toctree-l3"><a class="reference internal" href="binary_shard_formats/litdata.html">litData</a></li>
 <li class="toctree-l3"><a class="reference internal" href="binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="binary_shard_formats/array_record.html">ArrayRecord</a></li>
 <li class="toctree-l3"><a class="reference internal" href="binary_shard_formats/lance.html">Lance</a></li>
 </ul>
 </li>
@@ -384,11 +385,12 @@ format specification; for others, such as <a class="reference internal" href="pa
 during data preparation. We recommend always including an index so Zephon can gather the
 metadata needed for planning without inspecting each shard individually. Without one,
 Zephon will have to scan the shards to construct it before training can start.</p>
-<p>You can build an index for JSONL, Parquet, or Vortex at a local path or a remote
+<p>You can build an index for JSONL, Parquet, Vortex, or ArrayRecord at a local path or a remote
 storage root using the same command:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>zephon.build_index<span class="w"> </span>parquet<span class="w"> </span>s3://my-bucket/dataset
 python<span class="w"> </span>-m<span class="w"> </span>zephon.build_index<span class="w"> </span>jsonl<span class="w"> </span>gs://my-bucket/dataset
 python<span class="w"> </span>-m<span class="w"> </span>zephon.build_index<span class="w"> </span>vortex<span class="w"> </span>/data/dataset
+python<span class="w"> </span>-m<span class="w"> </span>zephon.build_index<span class="w"> </span>array_record<span class="w"> </span>/data/dataset
 </pre></div>
 </div>
 <p>The command indexes matching files directly under that root, in filename order,
@@ -438,6 +440,7 @@ are using object storage (S3, GCS, etc.) or Hugging Face as the storage backend.
 <li class="toctree-l2"><a class="reference internal" href="binary_shard_formats/litdata.html">litData</a></li>
 <li class="toctree-l2"><a class="reference internal" href="binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
 <li class="toctree-l2"><a class="reference internal" href="binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l2"><a class="reference internal" href="binary_shard_formats/array_record.html">ArrayRecord</a></li>
 <li class="toctree-l2"><a class="reference internal" href="binary_shard_formats/lance.html">Lance</a></li>
 </ul>
 </li>

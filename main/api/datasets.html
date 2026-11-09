@@ -257,6 +257,7 @@
 <li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/litdata.html">litData</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/array_record.html">ArrayRecord</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/lance.html">Lance</a></li>
 </ul>
 </li>
@@ -510,8 +511,8 @@ catalog (set by <code class="docutils literal notranslate"><span class="pre">fro
 <a class="reference internal" href="#zephon.io.Dataset.counts" title="zephon.io.Dataset.counts"><code class="xref py py-meth docutils literal notranslate"><span class="pre">counts()</span></code></a> / <a class="reference internal" href="#zephon.io.Dataset.total" title="zephon.io.Dataset.total"><code class="xref py py-meth docutils literal notranslate"><span class="pre">total()</span></code></a> / <a class="reference internal" href="#zephon.io.Dataset.max_count" title="zephon.io.Dataset.max_count"><code class="xref py py-meth docutils literal notranslate"><span class="pre">max_count()</span></code></a> / <a class="reference internal" href="#zephon.io.Dataset.shard_count" title="zephon.io.Dataset.shard_count"><code class="xref py py-meth docutils literal notranslate"><span class="pre">shard_count()</span></code></a>.</p>
 <p>Backend kinds used by the internal store builder:</p>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">litdata</span></code>/<code class="docutils literal notranslate"><span class="pre">mds</span></code>/<code class="docutils literal notranslate"><span class="pre">jsonl</span></code>/<code class="docutils literal notranslate"><span class="pre">parquet</span></code>/<code class="docutils literal notranslate"><span class="pre">vortex</span></code>/<code class="docutils literal notranslate"><span class="pre">lance</span></code>: <code class="docutils literal notranslate"><span class="pre">kind</span></code> and
-<code class="docutils literal notranslate"><span class="pre">path</span></code> (no per-shard <code class="docutils literal notranslate"><span class="pre">shards</span></code> graph — that lives in the catalog now)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">litdata</span></code>/<code class="docutils literal notranslate"><span class="pre">mds</span></code>/<code class="docutils literal notranslate"><span class="pre">jsonl</span></code>/<code class="docutils literal notranslate"><span class="pre">parquet</span></code>/<code class="docutils literal notranslate"><span class="pre">vortex</span></code>/<code class="docutils literal notranslate"><span class="pre">array_record</span></code>/<code class="docutils literal notranslate"><span class="pre">lance</span></code>:
+<code class="docutils literal notranslate"><span class="pre">kind</span></code> and <code class="docutils literal notranslate"><span class="pre">path</span></code> (no per-shard <code class="docutils literal notranslate"><span class="pre">shards</span></code> graph — that lives in the catalog now)</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">inmem</span></code>: <code class="docutils literal notranslate"><span class="pre">kind</span></code> and <code class="docutils literal notranslate"><span class="pre">shards</span></code> (<code class="docutils literal notranslate"><span class="pre">dict[int,</span> <span class="pre">InMemoryShard]</span></code>)</p></li>
 </ul>
 <p>Note: this class does not expose any method to fetch rows; IO is delegated
@@ -630,6 +631,10 @@ builder for Engine-less use).</p>
 <code class="docutils literal notranslate"><span class="pre">shards</span></code></p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">jsonl</span></code> directories where <code class="docutils literal notranslate"><span class="pre">*.jsonl</span></code> files act as shards, with an
 optional Zephon <code class="docutils literal notranslate"><span class="pre">index.json</span></code> for fast discovery</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">array_record</span></code> directories where <code class="docutils literal notranslate"><span class="pre">*.array_record</span></code> files act as
+shards, with an optional Zephon <code class="docutils literal notranslate"><span class="pre">index.json</span></code> for fast discovery.
+Each sample is the record’s bytes; use <code class="docutils literal notranslate"><span class="pre">Pipeline.map_transform</span></code>
+to decode them with the serializer used when writing the dataset.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">lance</span></code> dataset directories, one shard per fragment. Discovery pins
 the dataset to its latest version and <code class="docutils literal notranslate"><span class="pre">path</span></code> becomes that version’s
 manifest; pass a <code class="docutils literal notranslate"><span class="pre">_versions/*.manifest</span></code> path to pin an earlier one.</p></li>

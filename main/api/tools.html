@@ -257,6 +257,7 @@
 <li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/litdata.html">litData</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/array_record.html">ArrayRecord</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../datasets/binary_shard_formats/lance.html">Lance</a></li>
 </ul>
 </li>
@@ -348,7 +349,7 @@
 <dl class="py function">
 <dt class="sig sig-object py" id="zephon.build_index.build_index">
 <span class="sig-name descname"><span class="pre">build_index</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">format_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dataset_dir</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">progress</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_workers</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">8</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/build_index.html#build_index"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.build_index.build_index" title="Link to this definition">¶</a></dt>
-<dd><p>Build an <code class="docutils literal notranslate"><span class="pre">index.json</span></code> for a JSONL, Parquet, or Vortex dataset.</p>
+<dd><p>Build an <code class="docutils literal notranslate"><span class="pre">index.json</span></code> for a JSONL, Parquet, Vortex, or ArrayRecord dataset.</p>
 <p>Writes to <code class="docutils literal notranslate"><span class="pre">dataset_dir/index.json</span></code> unless <em>output_path</em> is given, printing
 progress when <em>progress</em> is true. Local paths and remote roots supported by
 Zephon’s storage backend are accepted. Returns the output path or URL as a

@@ -256,6 +256,7 @@
 <li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/litdata.html">litData</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/mosaic.html">Mosaic (MDS)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/vortex.html">Vortex</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/array_record.html">ArrayRecord</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../datasets/binary_shard_formats/lance.html">Lance</a></li>
 </ul>
 </li>
@@ -374,8 +375,8 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.storage</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">StorageBackend</span> <span class="k">as</span> <span class="n">_StorageBackend</span><span class="p">,</span>
 <span class="p">)</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.suffixes</span><span class="w"> </span><span class="kn">import</span> <span class="n">JSONL_SUFFIXES</span> <span class="k">as</span> <span class="n">_JSONL_SUFFIXES</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.suffixes</span><span class="w"> </span><span class="kn">import</span> <span class="n">detect_format</span> <span class="k">as</span> <span class="n">_detect_format</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">zephon._internal.io.suffixes</span><span class="w"> </span><span class="kn">import</span> <span class="n">format_of</span> <span class="k">as</span> <span class="n">_format_of</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">zephon.io.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">InMemoryShard</span>
 
 
@@ -401,8 +402,8 @@
 
 <span class="sd">    Backend kinds used by the internal store builder:</span>
 
-<span class="sd">    - ``litdata``/``mds``/``jsonl``/``parquet``/``vortex``/``lance``: ``kind`` and</span>
-<span class="sd">      ``path`` (no per-shard ``shards`` graph — that lives in the catalog now)</span>
+<span class="sd">    - ``litdata``/``mds``/``jsonl``/``parquet``/``vortex``/``array_record``/``lance``:</span>
+<span class="sd">      ``kind`` and ``path`` (no per-shard ``shards`` graph — that lives in the catalog now)</span>
 <span class="sd">    - ``inmem``: ``kind`` and ``shards`` (``dict[int, InMemoryShard]``)</span>
 
 <span class="sd">    Note: this class does not expose any method to fetch rows; IO is delegated</span>
@@ -531,6 +532,10 @@
 <span class="sd">          ``shards``</span>
 <span class="sd">        - ``jsonl`` directories where ``*.jsonl`` files act as shards, with an</span>
 <span class="sd">          optional Zephon ``index.json`` for fast discovery</span>
+<span class="sd">        - ``array_record`` directories where ``*.array_record`` files act as</span>
+<span class="sd">          shards, with an optional Zephon ``index.json`` for fast discovery.</span>
+<span class="sd">          Each sample is the record's bytes; use ``Pipeline.map_transform``</span>
+<span class="sd">          to decode them with the serializer used when writing the dataset.</span>
 <span class="sd">        - ``lance`` dataset directories, one shard per fragment. Discovery pins</span>
 <span class="sd">          the dataset to its latest version and ``path`` becomes that version's</span>
 <span class="sd">          manifest; pass a ``_versions/*.manifest`` path to pin an earlier one.</span>
@@ -677,7 +682,7 @@
         <span class="k">if</span> <span class="s2">"chunks"</span> <span class="ow">in</span> <span class="n">data</span> <span class="ow">and</span> <span class="s2">"config"</span> <span class="ow">in</span> <span class="n">data</span><span class="p">:</span>
             <span class="k">return</span> <span class="s2">"litdata"</span>
         <span class="k">if</span> <span class="s2">"shards"</span> <span class="ow">in</span> <span class="n">data</span><span class="p">:</span>
-            <span class="c1"># Could be MDS, JSONL, Parquet, or Vortex index.</span>
+            <span class="c1"># Could be MDS, JSONL, Parquet, Vortex, or ArrayRecord index.</span>
             <span class="c1"># Check if shards have Parquet-specific fields in extra</span>
             <span class="n">shards</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"shards"</span><span class="p">,</span> <span class="p">[])</span>
             <span class="k">if</span> <span class="n">shards</span><span class="p">:</span>
@@ -686,9 +691,12 @@
                     <span class="n">extra</span> <span class="o">=</span> <span class="n">first_shard</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extra"</span><span class="p">,</span> <span class="p">{})</span>
                     <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">extra</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">and</span> <span class="s2">"row_groups"</span> <span class="ow">in</span> <span class="n">extra</span><span class="p">:</span>
                         <span class="k">return</span> <span class="s2">"parquet"</span>
+                    <span class="c1"># Zephon-built indexes name the data file; MDS shards</span>
+                    <span class="c1"># (``*.mds``) match no auto-detected suffix.</span>
                     <span class="n">basename</span> <span class="o">=</span> <span class="n">first_shard</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"basename"</span><span class="p">)</span>
-                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">basename</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">and</span> <span class="n">basename</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="n">_JSONL_SUFFIXES</span><span class="p">):</span>
-                        <span class="k">return</span> <span class="s2">"jsonl"</span>
+                    <span class="n">kind</span> <span class="o">=</span> <span class="n">_format_of</span><span class="p">(</span><span class="n">basename</span><span class="p">)</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">basename</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">else</span> <span class="kc">None</span>
+                    <span class="k">if</span> <span class="n">kind</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="k">return</span> <span class="n">kind</span>
             <span class="k">return</span> <span class="s2">"mds"</span>
     <span class="k">return</span> <span class="s2">"mds"</span>
 </pre></div>
