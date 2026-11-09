@@ -78,7 +78,7 @@ from zephon._internal.runners.threads import ThreadStageRunner
 from zephon._internal.runtime_spec import RuntimeSpec
 from zephon._internal.stream import EngineSample, LanePtr, RunnerStageOut
 from zephon._internal.utils.rank import rank_ctx
-from zephon._internal.world import World
+from zephon._internal.world import World, check_step_lane_windows
 from zephon.observability import ExecutionTrackingMode
 from zephon.observability.stats import (
     FetchTimingSummary,
@@ -272,6 +272,17 @@ class Engine:
         self._runtime_spec = runtime_spec
         self._plan = plan
         self._preserves_cursor_order = bool(plan.preserves_cursor_order)
+        self._opts = opts
+        self._mp_context = self._resolve_mp_context(self._opts.mp_context)
+        # Option-only checks run before disk preflight and catalog builds.
+        self._world = self._build_world()
+        if self._opts.global_batch_size is not None:
+            check_step_lane_windows(
+                self._opts.global_batch_size,
+                self._plan.batch_size_hint or 1,
+                self._world.canonical_replicas,
+                self._world.dp_degree,
+            )
         base_ctx: dict[str, Any] = {
             "datasets_by_id": work.datasets_by_id,
             "io_options": opts.io_options,
@@ -292,9 +303,6 @@ class Engine:
         # metadata copy.
         if datasets_by_id := self._ctx["datasets_by_id"]:
             finalize_dataset_catalogs(datasets_by_id, opts.io_options)
-        self._opts = opts
-        self._mp_context = self._resolve_mp_context(self._opts.mp_context)
-        self._world = self._build_world()
         self.inflight_chunks_per_lane: dict[LaneId, dict[ChunkId, Any]] = defaultdict(
             dict
         )
@@ -524,6 +532,16 @@ class Engine:
         if opts.world_size < 1:
             raise ValueError(f"world_size ({opts.world_size}) must be >= 1")
 
+        global_batch_size = opts.global_batch_size
+        if global_batch_size is not None and (
+            isinstance(global_batch_size, bool)
+            or not isinstance(global_batch_size, int)
+            or global_batch_size <= 0
+        ):
+            raise ValueError(
+                f"global_batch_size must be a positive integer, got {global_batch_size!r}"
+            )
+
         # Default dp params to 1D parallelism if not specified
         if opts.dp_degree is None:
             opts.dp_degree = opts.world_size
@@ -584,7 +602,9 @@ class Engine:
                 stacklevel=4,
             )
 
-        if opts.canonical_replicas % opts.dp_degree != 0:
+        # With global_batch_size set, check_step_lane_windows raises instead:
+        # it knows the batch size, so its suggestions also fit the step.
+        if opts.canonical_replicas % opts.dp_degree != 0 and global_batch_size is None:
             warnings.warn(
                 f"[zephon] canonical_replicas ({opts.canonical_replicas}) is not divisible by "
                 + f"dp_degree ({opts.dp_degree}). This will result in uneven lane distribution "

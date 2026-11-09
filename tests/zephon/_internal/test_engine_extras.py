@@ -450,6 +450,21 @@ class TestParallelismValidation:
                 canonical_replicas=5,
             )
 
+    def test_raises_instead_of_warning_when_global_batch_size_is_set(self) -> None:
+        import warnings as w
+
+        with w.catch_warnings():
+            w.simplefilter("error")
+            with pytest.raises(ValueError, match="Use canonical_replicas=4 or 8."):
+                _mk_engine_with_opts(
+                    world_size=4,
+                    global_rank=0,
+                    dp_degree=2,
+                    dp_group_id=0,
+                    canonical_replicas=5,
+                    global_batch_size=40,
+                )
+
     def test_no_warning_when_canonical_replicas_divisible(self) -> None:
         # canonical_replicas=8, dp_degree=2 -> even distribution
         import warnings as w
