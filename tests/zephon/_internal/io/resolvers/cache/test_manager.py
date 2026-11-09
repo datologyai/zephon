@@ -2342,7 +2342,9 @@ def test_close_defers_only_after_lock_wait_budget_expires(
         release.set()
         holder.join(5)
         survivor.close()
-    assert _owner_instances(cache_root, first._owner_key) == 0
+    # Observing the first decrement does not mean its worker has unlocked yet;
+    # the survivor's close may also defer under the patched cleanup budget.
+    _wait_for_instances(cache_root, first._owner_key, 0)
 
 
 @pytest.mark.parametrize("timeout_error", [False, True])
