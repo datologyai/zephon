@@ -13,13 +13,13 @@
   <a href="https://pypi.org/project/zephon/"><img src="https://img.shields.io/pypi/v/zephon.svg?color=096361" alt="PyPI" /></a>
   <a href="https://github.com/datologyai/zephon/actions/workflows/pytest.yaml"><img src="https://github.com/datologyai/zephon/actions/workflows/pytest.yaml/badge.svg" alt="Unit Tests" /></a>
   <a href="https://github.com/datologyai/zephon/actions/workflows/pytest-integration.yaml"><img src="https://github.com/datologyai/zephon/actions/workflows/pytest-integration.yaml/badge.svg" alt="Integration Tests" /></a>
-  <a href="https://datologyai.github.io/zephon/"><img src="https://img.shields.io/badge/docs-user%20guide-096361.svg" alt="Docs" /></a>
+  <a href="https://docs.zephon.io/"><img src="https://img.shields.io/badge/docs-user%20guide-096361.svg" alt="Docs" /></a>
   <a href="https://github.com/datologyai/zephon/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-096361.svg" alt="License" /></a>
 </p>
 
 <p align="center">
   <a href="https://zephon.io">zephon.io</a> ·
-  <a href="https://datologyai.github.io/zephon/">User Guide</a> ·
+  <a href="https://docs.zephon.io/">User Guide</a> ·
   <a href="https://www.datologyai.com/blog/zephon">Launch blog post</a> ·
   <a href="https://arxiv.org/abs/2610.03087">Paper</a> ·
   <a href="https://pypi.org/project/zephon/">PyPI</a>
@@ -118,7 +118,7 @@ ws = StaticMixtureWorkSource(
 ```
 
 Note that running a pipeline with a cloud storage backend requires enabling the
-[shard cache](https://datologyai.github.io/zephon/datasets/storage_backends_and_shard_cache.html).
+[shard cache](https://docs.zephon.io/datasets/storage_backends_and_shard_cache.html).
 
 A `Pipeline` is a plain Python iterable, so it works with whatever training loop you
 have. It will also run inside a PyTorch `DataLoader` or torchdata `StatefulDataLoader` if
@@ -157,7 +157,7 @@ a README, launch commands, and smoke tests:
 - **TorchTitan**: [datologyai/torchtitan-zephon](https://github.com/datologyai/torchtitan-zephon/tree/main/examples/zephon)
 - **Megatron-LM**: [datologyai/Megatron-LM-zephon](https://github.com/datologyai/Megatron-LM-zephon/tree/main/examples/zephon)
 
-The [Training Integrations](https://datologyai.github.io/zephon/training_integrations.html)
+The [Training Integrations](https://docs.zephon.io/training_integrations.html)
 chapter of the User Guide explains the decisions behind them, which is the place to start
 if you want to connect Zephon to a different framework.
 
@@ -185,16 +185,16 @@ up with, `pipeline.explain()` will show you the compiled plan.
 
 ## Documentation
 
-The [Zephon User Guide](https://datologyai.github.io/zephon/) covers all of this in much
+The [Zephon User Guide](https://docs.zephon.io/) covers all of this in much
 more detail:
 
-- [Why Zephon?](https://datologyai.github.io/zephon/why_zephon.html): elastic determinism and why it matters for experiments
-- [Basic Concepts](https://datologyai.github.io/zephon/basic_concepts.html): Datasets, WorkSources, and Pipelines
-- [Working with Datasets](https://datologyai.github.io/zephon/datasets/index.html): shard formats, storage backends, and the shard cache
-- [WorkSources](https://datologyai.github.io/zephon/worksources/index.html): mixing, shuffling, and repeating samples
-- [Pipelines](https://datologyai.github.io/zephon/pipelines/index.html): operators, packing, distributed training, and checkpointing
-- [Training Integrations](https://datologyai.github.io/zephon/training_integrations.html): the TorchTitan and Megatron-LM reference integrations
-- [API Reference](https://datologyai.github.io/zephon/api/pipeline.html)
+- [Why Zephon?](https://docs.zephon.io/why_zephon.html): elastic determinism and why it matters for experiments
+- [Basic Concepts](https://docs.zephon.io/basic_concepts.html): Datasets, WorkSources, and Pipelines
+- [Working with Datasets](https://docs.zephon.io/datasets/index.html): shard formats, storage backends, and the shard cache
+- [WorkSources](https://docs.zephon.io/worksources/index.html): mixing, shuffling, and repeating samples
+- [Pipelines](https://docs.zephon.io/pipelines/index.html): operators, packing, distributed training, and checkpointing
+- [Training Integrations](https://docs.zephon.io/training_integrations.html): the TorchTitan and Megatron-LM reference integrations
+- [API Reference](https://docs.zephon.io/api/pipeline.html)
 
 ## Status
 

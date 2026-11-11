@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import shutil
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -120,3 +122,149 @@ def test_republishing_changes_nothing(tmp_path: Path) -> None:
     assert before == after
     for page in site.rglob("*.html"):
         assert page.read_text().count("data-zephon-versions") == 1
+
+
+class _Metadata(HTMLParser):
+    def __init__(self, page: Path) -> None:
+        super().__init__()
+        self.values: dict[str, str] = {}
+        self._head = False
+        self._title = False
+        self.feed(page.read_text())
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "head":
+            self._head = True
+        if not self._head:
+            return
+        values = dict(attrs)
+        key = ""
+        value = ""
+        if tag == "meta":
+            key = values.get("name") or values.get("property") or ""
+            value = values.get("content") or ""
+        elif tag == "link" and values.get("rel") == "canonical":
+            key, value = "canonical", values.get("href") or ""
+        elif tag == "title":
+            self._title = True
+            key = "title"
+        if key:
+            assert key not in self.values, f"Duplicate {key} in page"
+            self.values[key] = value
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "head":
+            self._head = False
+        if tag == "title":
+            self._title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._head and self._title:
+            self.values["title"] += data
+
+
+def test_publish_retrofits_all_existing_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Stand in for releases published before metadata support existed.
+    site = tmp_path / "site"
+    for version in ("v0.1.0", "v0.2.1"):
+        shutil.copytree(_build(tmp_path, version), site / version)
+    _publish(tmp_path, "main")
+
+    indexes = [site / "index.html"] + [
+        site / version / "index.html" for version in ("main", "v0.1.0", "v0.2.1")
+    ]
+    for page in indexes:
+        meta = _Metadata(page).values
+        assert meta["title"] == pd.HOME_TITLE
+        assert meta["description"] == pd.HOME_DESCRIPTION
+        assert meta["og:title"] == meta["twitter:title"] == meta["title"]
+        assert (
+            meta["og:description"] == meta["twitter:description"] == meta["description"]
+        )
+        assert meta["og:url"] == meta["canonical"]
+        assert meta["og:image"] == meta["twitter:image"] == pd.SOCIAL_IMAGE_URL
+        assert meta["twitter:card"] == "summary_large_image"
+    assert (
+        site / "_static/og-image.jpg"
+    ).read_bytes() == pd.SOCIAL_IMAGE_SRC.read_bytes()
+
+    # A later policy change reaches the stable root and untouched releases too.
+    monkeypatch.setattr(
+        pd, "HOME_DESCRIPTION", "Updated Zephon documentation description."
+    )
+    _publish(tmp_path, "main")
+    assert all(
+        _Metadata(page).values["description"] == pd.HOME_DESCRIPTION for page in indexes
+    )
+
+
+def test_canonicals_change_when_a_new_release_becomes_stable(tmp_path: Path) -> None:
+    for version in ("v0.1.0", "main", "v0.2.1"):
+        _publish(tmp_path, version, "datasets/index.html", "api/pipeline.html")
+    site = tmp_path / "site"
+    for prefix, canonical_prefix in (
+        ("", ""),
+        ("v0.2.1/", ""),
+        ("v0.1.0/", "v0.1.0/"),
+        ("main/", "main/"),
+    ):
+        for page, canonical_page in (
+            ("index.html", ""),
+            ("datasets/index.html", "datasets/"),
+            ("api/pipeline.html", "api/pipeline.html"),
+        ):
+            meta = _Metadata(site / prefix / page).values
+            assert meta["canonical"] == pd.DOCS_URL + canonical_prefix + canonical_page
+            assert meta["og:url"] == meta["canonical"]
+
+
+def test_page_metadata_uses_article_content_and_escapes_html(tmp_path: Path) -> None:
+    build = _build(tmp_path, "main", "guide.html")
+    page = build / "guide.html"
+    page.write_text(
+        """<html><head><title>Old title - Zephon</title>
+<meta name="description" content="">
+<link href="https://old.example/" rel="canonical">
+<meta property="og:title" content="Old preview">
+<meta name="custom" content="keep this">
+<script>const example = '<meta name="description" content="example">';</script>
+</head><body><nav><p>Ignore navigation</p></nav><article role="main">
+<h1>Datasets &amp; <code>"mixtures"</code><a class="headerlink">¶</a></h1>
+<p>Keep <strong>global batches</strong> stable &amp; reproducible.</p>
+</article></body></html>"""
+    )
+    pd.publish(tmp_path / "site", build, "main")
+    output = tmp_path / "site/main/guide.html"
+    meta = _Metadata(output).values
+    assert meta["title"] == 'Datasets & "mixtures" | Zephon Docs'
+    assert meta["description"] == "Keep global batches stable & reproducible."
+    assert meta["og:description"] == meta["description"]
+    assert meta["custom"] == "keep this"
+    assert "<h1>Datasets &amp;" in output.read_text()
+    assert 'content="example">\';</script>' in output.read_text()
+
+
+def test_redirects_keep_their_targets_and_embeds_are_untouched(tmp_path: Path) -> None:
+    build = _build(tmp_path, "v0.1.0", "api/old.html", "_static/embeds/demo.html")
+    redirect = (
+        "<html><head><title>Moved to Pipeline</title>"
+        '<link rel="canonical" href="pipeline.html">'
+        '<meta http-equiv="refresh" content="0; url=pipeline.html">'
+        '<script>location.replace("pipeline.html" + location.hash);</script>'
+        "</head><body>Moved</body></html>"
+    )
+    (build / "api/old.html").write_text(redirect)
+    pd.publish(tmp_path / "site", build, "v0.1.0")
+    _publish(tmp_path, "v0.2.1")
+    site = tmp_path / "site"
+    output = site / "v0.1.0/api/old.html"
+    meta = _Metadata(output).values
+    assert meta["canonical"] == pd.DOCS_URL + "v0.1.0/api/pipeline.html"
+    assert meta["title"] == "Moved to Pipeline"
+    assert 'content="0; url=pipeline.html"' in output.read_text()
+    assert 'location.replace("pipeline.html" + location.hash)' in output.read_text()
+    assert (site / "v0.1.0/_static/embeds/demo.html").read_bytes() == (
+        build / "_static/embeds/demo.html"
+    ).read_bytes()
