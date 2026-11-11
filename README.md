@@ -22,7 +22,8 @@
   <a href="https://datologyai.github.io/zephon/">User Guide</a> ·
   <a href="https://www.datologyai.com/blog/zephon">Launch blog post</a> ·
   <a href="https://arxiv.org/abs/2610.03087">Paper</a> ·
-  <a href="https://pypi.org/project/zephon/">PyPI</a>
+  <a href="https://pypi.org/project/zephon/">PyPI</a> ·
+  <a href="https://huggingface.co/docs/hub/main/en/datasets-zephon">🤗 Docs</a>
 </p>
 
 ---
