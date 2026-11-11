@@ -134,7 +134,7 @@ test = [
 
 [project.urls]
 Homepage = "https://github.com/datologyai/zephon"
-Documentation = "https://datologyai.github.io/zephon/"
+Documentation = "https://docs.zephon.io/"
 Repository = "https://github.com/datologyai/zephon"
 Issues = "https://github.com/datologyai/zephon/issues"
 

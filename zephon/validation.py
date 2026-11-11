@@ -9,7 +9,7 @@ type system cannot enforce: ``process_many`` must be stateless across
 calls, the accumulator must drain on ``flush()`` and reset on
 ``flush(reset=True)``, and so on.  This module runs a synthetic-sample
 smoke test that catches the most common violations before the engine
-starts.  See the "Accumulators and Operators" page in the published
+starts.  See the "User-defined operators" page in the published
 documentation for the contracts being checked.
 
 The harness is intentionally a smoke test, not a proof: it cannot catch
@@ -49,10 +49,10 @@ if TYPE_CHECKING:
     from zephon.pipeline import Pipeline
 
 
-_DOC_LINK = (
-    "https://datologyai.github.io/zephon/understanding/accumulators_operators.html"
+_DOC_LINK = "https://docs.zephon.io/pipelines/user_defined_operators.html"
+_PREFLIGHT_DOC_LINK = (
+    "https://docs.zephon.io/api/pipeline.html#zephon.Pipeline.preflight_tokenizers"
 )
-_PREFLIGHT_DOC_LINK = "https://datologyai.github.io/zephon/api/zephon_api.html"
 
 
 @dataclass(frozen=True)

@@ -1194,8 +1194,7 @@ def test_report_format_includes_doc_link_and_op_name() -> None:
     report = pipe.validate()
     text = report.format()
     assert "dropper" in text
-    assert "datologyai.github.io/zephon" in text
-    assert "accumulators_operators" in text
+    assert "https://docs.zephon.io/pipelines/user_defined_operators.html" in text
 
 
 # ---------------------------------------------------------------------------
