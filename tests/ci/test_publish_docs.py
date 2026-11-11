@@ -246,7 +246,57 @@ def test_page_metadata_uses_article_content_and_escapes_html(tmp_path: Path) -> 
     assert 'content="example">\';</script>' in output.read_text()
 
 
-def test_redirects_keep_their_targets_and_embeds_are_untouched(tmp_path: Path) -> None:
+@pytest.mark.parametrize("classes", ["admonition-title", "custom admonition-title"])
+def test_page_description_ignores_admonition_titles(
+    tmp_path: Path, classes: str
+) -> None:
+    build = _build(tmp_path, "main", "guide.html")
+    (build / "guide.html").write_text(
+        f"""<html><head><title>Guide - Zephon</title></head><body>
+<article role="main"><h1>Guide</h1><div class="admonition note">
+<p class="{classes}"><strong>Note</strong></p>
+<p>Zephon preserves global batches across elastic resumes.</p>
+</div><p>A later paragraph.</p></article></body></html>"""
+    )
+    pd.publish(tmp_path / "site", build, "main")
+    meta = _Metadata(tmp_path / "site/main/guide.html").values
+    description = "Zephon preserves global batches across elastic resumes."
+    assert meta["description"] == description
+    assert meta["og:description"] == meta["twitter:description"] == description
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        "_modules/zephon/pipeline.html",
+        "_sources/guide.html",
+        "_static/embeds/demo.html",
+    ],
+)
+def test_auxiliary_html_keeps_version_script_without_seo_metadata(
+    tmp_path: Path, page: str
+) -> None:
+    build = _build(tmp_path, "v0.1.0", page)
+    pd.publish(tmp_path / "site", build, "v0.1.0")
+    _publish(tmp_path, "v0.2.1")
+    output = tmp_path / "site/v0.1.0" / page
+    text = output.read_text()
+    assert text.count("data-zephon-versions") == 1
+    tag = pd._SCRIPT_TAG.search(text)
+    assert tag is not None
+    depth = len(Path(page).parts)
+    assert f'src="{"../" * depth}_versions/switcher.js"' in tag[0]
+    assert f'data-version="v0.1.0" data-page="{page}"' in tag[0]
+    assert pd._SCRIPT_TAG.sub("", text) == (build / page).read_text()
+
+    before = output.read_bytes()
+    _publish(tmp_path, "v0.2.1")
+    assert output.read_bytes() == before
+
+
+def test_redirects_keep_their_targets_and_embeds_skip_seo_metadata(
+    tmp_path: Path,
+) -> None:
     build = _build(tmp_path, "v0.1.0", "api/old.html", "_static/embeds/demo.html")
     redirect = (
         "<html><head><title>Moved to Pipeline</title>"
@@ -265,6 +315,8 @@ def test_redirects_keep_their_targets_and_embeds_are_untouched(tmp_path: Path) -
     assert meta["title"] == "Moved to Pipeline"
     assert 'content="0; url=pipeline.html"' in output.read_text()
     assert 'location.replace("pipeline.html" + location.hash)' in output.read_text()
-    assert (site / "v0.1.0/_static/embeds/demo.html").read_bytes() == (
-        build / "_static/embeds/demo.html"
-    ).read_bytes()
+    embed = site / "v0.1.0/_static/embeds/demo.html"
+    assert (
+        pd._SCRIPT_TAG.sub("", embed.read_text())
+        == (build / "_static/embeds/demo.html").read_text()
+    )

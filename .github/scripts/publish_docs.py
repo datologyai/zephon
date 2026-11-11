@@ -146,8 +146,10 @@ class _MainContent(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "article":
             self._article = True
+        classes = (dict(attrs).get("class") or "").split()
         if self._article and (
-            (tag == "h1" and not self.heading) or (tag == "p" and not self.paragraph)
+            (tag == "h1" and not self.heading)
+            or (tag == "p" and not self.paragraph and "admonition-title" not in classes)
         ):
             self._capture = tag
 
@@ -275,7 +277,7 @@ def _inject(
     """
     for page in tree.rglob("*.html"):
         rel_page = page.relative_to(tree)
-        if rel_page.parts[0] in skip | _AUXILIARY_DIRS:
+        if rel_page.parts[0] in skip:
             continue
         text = page.read_text(encoding="utf-8")
         if "</head>" not in text:
@@ -290,7 +292,10 @@ def _inject(
         # The latest release also lives at the root; older releases and main
         # have distinct content and retain their own versioned canonicals.
         prefix = "" if tree == site or version == latest else f"{version}/"
-        text = _metadata(_SCRIPT_TAG.sub("", text), rel_page, prefix)
+        text = _SCRIPT_TAG.sub("", text)
+        # Auxiliary HTML keeps the version picker/banner, but not SEO metadata.
+        if rel_page.parts[0] not in _AUXILIARY_DIRS:
+            text = _metadata(text, rel_page, prefix)
         text = text.replace("</head>", tag + "</head>", 1)
         page.write_text(text, encoding="utf-8")
 
