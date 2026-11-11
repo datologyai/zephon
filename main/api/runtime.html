@@ -8,7 +8,7 @@
         <link rel="prefetch" href="../_static/zephon-wordmark-mint.png" as="image">
 
     <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
-        <title>Runtime and tuning - Zephon</title>
+        
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
@@ -86,7 +86,26 @@
       }
     }
   }
-</style><script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="main" data-page="api/runtime.html"></script>
+</style>
+<title>Runtime and tuning | Zephon Docs</title>
+<link rel="canonical" href="https://docs.zephon.io/main/api/runtime.html">
+<meta name="description" content="How a pipeline executes, what it reports while running, and what it checks before it starts. The guide covers these in Inspecting and tuning pipelines and…">
+<meta property="og:title" content="Runtime and tuning | Zephon Docs">
+<meta property="og:description" content="How a pipeline executes, what it reports while running, and what it checks before it starts. The guide covers these in Inspecting and tuning pipelines and…">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Zephon Docs">
+<meta property="og:url" content="https://docs.zephon.io/main/api/runtime.html">
+<meta property="og:image" content="https://docs.zephon.io/_static/og-image.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Zephon, open-source data loader. Same batches. Any GPU count.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Runtime and tuning | Zephon Docs">
+<meta name="twitter:description" content="How a pipeline executes, what it reports while running, and what it checks before it starts. The guide covers these in Inspecting and tuning pipelines and…">
+<meta name="twitter:image" content="https://docs.zephon.io/_static/og-image.jpg">
+<meta name="twitter:image:alt" content="Zephon, open-source data loader. Same batches. Any GPU count.">
+<script data-zephon-versions="1" defer src="../../_versions/switcher.js" data-version="main" data-page="api/runtime.html"></script>
 </head>
   <body>
     
@@ -1685,7 +1704,7 @@ type system cannot enforce: <code class="docutils literal notranslate"><span cla
 calls, the accumulator must drain on <code class="docutils literal notranslate"><span class="pre">flush()</span></code> and reset on
 <code class="docutils literal notranslate"><span class="pre">flush(reset=True)</span></code>, and so on.  This module runs a synthetic-sample
 smoke test that catches the most common violations before the engine
-starts.  See the “Accumulators and Operators” page in the published
+starts.  See the “User-defined operators” page in the published
 documentation for the contracts being checked.</p>
 <p>The harness is intentionally a smoke test, not a proof: it cannot catch
 violations that only surface after many iterations or under specific data
@@ -1698,7 +1717,7 @@ problem in their op at once; the tradeoff is identification by string
 equality on <code class="docutils literal notranslate"><span class="pre">issue.code</span></code> rather than by <code class="docutils literal notranslate"><span class="pre">isinstance</span></code>.</p>
 <dl class="py class">
 <dt class="sig sig-object py" id="zephon.validation.Issue">
-<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">Issue</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">severity</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">code</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">message</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">doc_link</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'https://datologyai.github.io/zephon/understanding/accumulators_operators.html'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/validation.html#Issue"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.validation.Issue" title="Link to this definition">¶</a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">Issue</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">severity</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">code</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">message</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">doc_link</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'https://docs.zephon.io/pipelines/user_defined_operators.html'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/zephon/validation.html#Issue"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zephon.validation.Issue" title="Link to this definition">¶</a></dt>
 <dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/builtins/functions.html#object" title="(in Python v3.15)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
 <p>A single validation finding.</p>
 <dl class="field-list simple">
@@ -1725,7 +1744,7 @@ equality on <code class="docutils literal notranslate"><span class="pre">issue.c
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="zephon.validation.Issue.doc_link">
-<span class="sig-name descname"><span class="pre">doc_link</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'https://datologyai.github.io/zephon/understanding/accumulators_operators.html'</span></span><a class="headerlink" href="#zephon.validation.Issue.doc_link" title="Link to this definition">¶</a></dt>
+<span class="sig-name descname"><span class="pre">doc_link</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/builtins/stdtypes.html#str" title="(in Python v3.15)"><span class="pre">str</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'https://docs.zephon.io/pipelines/user_defined_operators.html'</span></span><a class="headerlink" href="#zephon.validation.Issue.doc_link" title="Link to this definition">¶</a></dt>
 <dd></dd></dl>
 
 </dd></dl>
