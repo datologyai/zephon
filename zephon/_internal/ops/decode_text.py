@@ -40,6 +40,7 @@ class DecodeText(BaseOp):
             calibration_replayable=True,
             indexable=True,
             preserves_cursor_order=True,
+            one_to_one_records=True,
             parallelism=2,
         )
 
