@@ -58,8 +58,10 @@ def _read_exact(sock: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def read_frame(sock: socket.socket, *, nonblocking_start: bool = False) -> bytes | None:
-    """Read one complete native multiprocessing frame from a socket.
+def read_frame(
+    sock: socket.socket, *, nonblocking_start: bool = False, fd_frame: Any = None
+) -> Any:
+    """Read one native frame, optionally delegating an FD extension to its decoder.
 
     nonblocking_start returns None only if the first read consumes no bytes.
     After any progress the reader must finish the frame or fail the stream;
@@ -76,6 +78,8 @@ def read_frame(sock: socket.socket, *, nonblocking_start: bool = False) -> bytes
     if len(header) < 4:
         header += _read_exact(sock, 4 - len(header))
     size = _LENGTH.unpack(header)[0]
+    if size == -2 and fd_frame is not None:
+        return fd_frame(sock)
     if size == -1:
         size = struct.unpack("!Q", _read_exact(sock, 8))[0]
     if size < 0 or size > sys.maxsize:
