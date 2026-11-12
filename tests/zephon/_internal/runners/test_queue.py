@@ -19,8 +19,10 @@ from typing import Any, cast
 
 import pytest
 
+from tests.helpers.ipc import SocketSendFaults
 from zephon._internal.runners import queue
 from zephon._internal.runners.queue import NamedQueue
+from zephon._internal.utils import fd_transport as wire
 from zephon._internal.utils import ipc
 from zephon.options import IpcTransport
 
@@ -113,7 +115,7 @@ class TestStagedBytes:
 
 @pytest.fixture
 def framed_queue(monkeypatch):
-    # Exercise Linux socket lifecycle handling on macOS as well.
+    # Exercise framing on macOS too; Torch's FD reducer tests remain Linux-only.
     monkeypatch.setattr(queue, "_use_socket_transport", lambda transport: True)
     q = queue.NamedQueue("framed-test", maxsize=2, ctx=mp.get_context("spawn"))
     yield q
@@ -144,9 +146,41 @@ def test_idle_feeder_releases_original_payload(framed_queue):
 def test_uses_unmodified_stdlib_feeder(framed_queue):
     value = _Counted()
     framed_queue.put(value)
-    assert framed_queue._thread._target is queue.mp_queues.Queue._feed
+    assert framed_queue._thread._target.__code__ is queue.mp_queues.Queue._feed.__code__
+    assert (
+        framed_queue._thread._target.__globals__["_ForkingPickler"]
+        is framed_queue._frame_writer
+    )
     assert framed_queue.get(timeout=5) == "payload"
     assert value.calls == 1
+
+
+class _ReducerFailure:
+    def __init__(self, error):
+        self.error = error
+
+    def __reduce__(self):
+        raise self.error
+
+
+def test_index_error_in_reducer_is_reported(framed_queue):
+    framed_queue.put(_ReducerFailure(IndexError("injected reducer failure")))
+    with pytest.raises(queue.QueueFeederError, match="injected reducer failure"):
+        framed_queue.get(timeout=5)
+    framed_queue.put("after-error")
+    assert framed_queue.get(timeout=5) == "after-error"
+
+
+def test_epipe_in_reducer_aborts_instead_of_leaving_a_dead_feeder(framed_queue):
+    framed_queue.put(
+        _ReducerFailure(BrokenPipeError(errno.EPIPE, "injected reducer failure"))
+    )
+    with pytest.raises(queue.QueueTransportError):
+        framed_queue.get(timeout=5)
+    framed_queue._thread.join(3)
+    assert not framed_queue._thread.is_alive()
+    with pytest.raises(queue.QueueTransportError):
+        framed_queue.put("after-abort")
 
 
 def test_pickler_isolation_for_unrelated_and_nested_pickles(framed_queue):
@@ -184,6 +218,20 @@ def test_registered_reducers_are_refreshed_between_messages(framed_queue, monkey
     framed_queue.put([value, value])
     assert framed_queue.get(timeout=5) == ["override", "override"]
     assert value.calls == 0
+
+
+def test_no_fd_messages_use_native_framing_without_fd_bookkeeping(
+    framed_queue, monkeypatch
+):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Zero-FD message entered the FD path")
+
+    monkeypatch.setattr(wire, "_FdTable", unexpected)
+    monkeypatch.setattr(wire, "register_after_fork", unexpected)
+    monkeypatch.setattr(wire, "ReceivedMessage", unexpected)
+    for value in [None, [], {"data": [1, "two", b"three"]}, b"x" * 65536]:
+        framed_queue.put(value)
+        assert framed_queue.get(timeout=5) == value
 
 
 def test_framed_queue_capacity_and_feeder_error(framed_queue):
@@ -228,6 +276,7 @@ def test_shm_retry_preserves_message_and_capacity(framed_queue, monkeypatch):
     framed_queue.put(value)
     assert framed_queue.get(timeout=5) == "retried"
     assert value.calls == 2 and waits == [1]
+    assert framed_queue._frame_writer.pending is None
     framed_queue.put("after-retry")
     assert framed_queue.get(timeout=5) == "after-retry"
 
@@ -295,13 +344,13 @@ def test_broken_pipe_drops_buffered_roots_and_stops_stdlib_feeder(
 ):
     entered, proceed = threading.Event(), threading.Event()
 
-    def fail_send(payload):
+    def fail_send(message, sock):
         entered.set()
         assert proceed.wait(3)
         raise BrokenPipeError(errno.EPIPE, "injected peer loss")
 
     q = framed_queue
-    monkeypatch.setattr(q._writer, "send_bytes", fail_send)
+    monkeypatch.setattr(wire.EncodedMessage, "send", fail_send)
     q.put("sending")
     assert entered.wait(3)
     value = _Counted()
@@ -648,6 +697,64 @@ def test_multiple_consumers(framed_queue):
             control.close()
 
 
+def _produce_mixed(q, producer):
+    import torch
+
+    storage = torch.arange(4).share_memory_()
+    for index in range(18):
+        value = storage if index % 2 else {"plain": b"x" * 70000}
+        q.put((producer, index, value))
+    q.close()
+    q.join_thread()
+
+
+def _consume_mixed(q, control):
+    import torch
+
+    seen = []
+    for _ in range(18):
+        producer, index, value = q.get(timeout=15)
+        if index % 2:
+            assert torch.equal(value, torch.arange(4)) and value.is_shared()
+        else:
+            assert value == {"plain": b"x" * 70000}
+        seen.append((producer, index))
+    control.send(seen)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Torch FD storage is Linux-only")
+def test_native_and_fd_frames_with_multiple_producers_and_consumers(framed_queue):
+    ctx = mp.get_context("spawn")
+    producers = [
+        ctx.Process(target=_produce_mixed, args=(framed_queue, i)) for i in range(3)
+    ]
+    consumers = []
+    for _ in range(3):
+        parent, child = ctx.Pipe()
+        proc = ctx.Process(target=_consume_mixed, args=(framed_queue, child))
+        proc.start()
+        child.close()
+        consumers.append((proc, parent))
+    for proc in producers:
+        proc.start()
+    try:
+        seen = []
+        for proc, control in consumers:
+            assert control.poll(30)
+            seen.extend(control.recv())
+        assert sorted(seen) == [(i, j) for i in range(3) for j in range(18)]
+        for proc in producers + [proc for proc, _ in consumers]:
+            proc.join(5)
+            assert proc.exitcode == 0
+    finally:
+        for proc in producers + [proc for proc, _ in consumers]:
+            if proc.is_alive():
+                proc.kill()
+                proc.join(5)
+        for _, control in consumers:
+            control.close()
+
+
 @pytest.mark.parametrize("role,slot", [("writer", 1), ("reader", 2)])
 def test_killed_transaction_owner_invalidates_stream(framed_queue, role, slot):
     q = framed_queue
@@ -677,6 +784,68 @@ def test_killed_transaction_owner_invalidates_stream(framed_queue, role, slot):
         parent.close()
 
 
+def _produce_tensors(q):
+    import torch
+
+    tensor = torch.arange(32)
+    q.put([tensor[1:7], tensor[3:10], torch.arange(8, dtype=torch.float32)])
+    q.close()
+    q.join_thread()  # Successful put alone is not a completed transfer.
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="Torch file_descriptor is Linux-only"
+)
+def test_tensors_survive_sender_exit_without_resource_sharer(monkeypatch):
+    torch = pytest.importorskip("torch")
+    import multiprocessing.resource_sharer as sharer
+
+    ctx = mp.get_context("spawn")
+    q = queue.NamedQueue("sender-exit", ctx=ctx)
+    child = ctx.Process(target=_produce_tensors, args=(q,))
+    child.start()
+    try:
+        child.join(15)
+        assert child.exitcode == 0
+
+        def unexpected(*args, **kwargs):
+            raise AssertionError("direct receive must not contact resource_sharer")
+
+        monkeypatch.setattr(sharer._resource_sharer, "get_connection", unexpected)
+        values = q.get(timeout=5)
+        assert torch.equal(values[0], torch.arange(1, 7))
+        assert torch.equal(values[1], torch.arange(3, 10))
+        assert (
+            values[0].untyped_storage().data_ptr()
+            == values[1].untyped_storage().data_ptr()
+        )
+        assert all(value.is_shared() for value in values)
+    finally:
+        q.close()
+        if child.is_alive():
+            child.kill()
+            child.join(5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Torch FD storage is Linux-only")
+@pytest.mark.parametrize("cap,reject", [(128, False), (1, False), (1, True)])
+def test_storage_overflow_and_pressure_through_stdlib_feeder(
+    framed_queue, monkeypatch, cap, reject
+):
+    torch = pytest.importorskip("torch")
+    monkeypatch.setattr(wire, "MAX_DIRECT_FDS", cap)
+    q = framed_queue
+    proxy = SocketSendFaults(q._writer.socket, reject=reject)
+    q._writer.socket = proxy
+    values = [torch.arange(4), torch.arange(6)]
+    q.put(values)
+    q.put(values)  # Each put has its own direct handle allowance.
+    for _ in range(2):
+        received = q.get(timeout=10)
+        assert all(torch.equal(a, b) for a, b in zip(received, values))
+    assert proxy.rights_calls == 2
+
+
 @pytest.mark.skipif(
     sys.platform != "linux", reason="Torch file_descriptor is Linux-only"
 )
@@ -702,7 +871,7 @@ def test_storage_transfer_uses_selected_codec(
     framed_queue.put(torch.arange(8))
     received = framed_queue.get(timeout=5)
     assert torch.equal(received, torch.arange(8)) and received.is_shared()
-    assert len(connections) == 1
+    assert len(connections) == 0
 
 
 def test_abort_stops_feeder_blocked_in_large_native_send(

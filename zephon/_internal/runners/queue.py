@@ -11,6 +11,7 @@ them as :class:`QueueFeederError` exceptions so the pipeline can fail loudly.
 
 from __future__ import annotations
 
+import errno
 import os
 import socket
 import sys
@@ -21,8 +22,13 @@ from multiprocessing import queues as mp_queues
 from multiprocessing.context import BaseContext
 from multiprocessing.util import register_after_fork
 from queue import Empty, Full
+from types import FunctionType
 from typing import Any, get_args
 
+from zephon._internal.utils.fd_transport import (
+    EncodedMessage,
+    ReceivedMessage,
+)
 from zephon._internal.utils.ipc import (
     DEFAULT_IPC_BUFFER_BYTES,
     DEFAULT_IPC_TRANSPORT,
@@ -150,6 +156,94 @@ class _SocketWriter:
             raise
 
 
+class _FrameWriter(_SocketWriter):
+    """Carry a serialized message and its owned FDs between the feeder's hooks.
+
+    Queue._feed calls dumps() before acquiring its write lock, then passes the
+    returned bytes to send(). Bytes cannot carry descriptor ownership, so
+    dumps() stages an EncodedMessage here and returns an empty placeholder.
+    send() transmits that staged message under the feeder's write lock and
+    releases its descriptors on success or failure. The placeholder never goes
+    on the wire and prevents the idle feeder from retaining a large payload.
+    """
+
+    def __init__(
+        self, reader: Any, writer: Any, state: Any, buffer: Any, condition: Any
+    ) -> None:
+        super().__init__(reader, writer, state, buffer, condition)
+        self.pending: EncodedMessage | None = None
+
+    def clear(self) -> None:
+        if self.pending is not None:
+            self.pending.close()
+            self.pending = None
+
+    def dumps(self, value: Any) -> bytes:
+        assert self.pending is None, "Previous queue message was not sent"
+        try:
+            self.pending = EncodedMessage(value)
+        except BaseException as exc:
+            # Stock _feed exits before its error hook for these failures.
+            if (
+                not isinstance(exc, Exception)
+                or getattr(exc, "errno", None) == errno.EPIPE
+            ):
+                self.abort()
+            elif isinstance(exc, IndexError):
+                raise RuntimeError("Queue serialization failed") from exc
+            raise
+        return b""  # The stock feeder must not retain the payload while idle.
+
+    def send(self, payload: memoryview) -> None:
+        message = self.pending
+        self.pending = None
+        try:
+            if self.state[0]:
+                _check_transport(self.state)
+            if message is None:
+                raise QueueTransportError("Queue feeder bypassed its codec")
+            message.send(self.writer.socket)
+        except BaseException:
+            # Publish failure before the stock feeder releases its write lock.
+            self.abort()
+            raise
+        finally:
+            if message is not None:
+                message.close()
+
+
+def _with_globals(function: Any, **bindings: Any) -> Any:
+    """Bind a function to a private copy of its global namespace.
+
+    Queue startup and feeding resolve their serializer through module globals.
+    Binding those names per queue selects its codec without changing unrelated
+    queues or maintaining a separate copy of CPython's function bodies.
+    """
+    rebound = FunctionType(
+        function.__code__,
+        {**function.__globals__, **bindings},
+        function.__name__,
+        function.__defaults__,
+        function.__closure__,
+    )
+    rebound.__kwdefaults__ = function.__kwdefaults__
+    return rebound
+
+
+class _FeederGlobals:
+    """Namespace used by Queue._start_thread to select a queue's feeder.
+
+    Startup resolves Queue._feed and Queue's finalizer callbacks. Only _feed
+    needs a private serializer; the remaining attributes delegate to Queue.
+    """
+
+    def __init__(self, writer: _FrameWriter) -> None:
+        self._feed = _with_globals(mp_queues.Queue._feed, _ForkingPickler=writer)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(mp_queues.Queue, name)
+
+
 @dataclass(frozen=True, slots=True)
 class FeederError:
     """Sentinel enqueued when the feeder thread fails to serialize an item.
@@ -193,8 +287,8 @@ class NamedQueue(mp_queues.Queue):
     ``transport="socketpair"`` (default) swaps the stock ``os.pipe()`` for an
     AF_UNIX socketpair carrying ``buffer_bytes`` of kernel buffering (see
     :mod:`zephon._internal.utils.ipc` for why); ``"pipe"`` keeps stock behavior.
-    Linux socketpairs track transaction owners and abort all peers after an
-    interrupted frame; force-releasing its lock cannot repair missing bytes.
+    Linux socketpairs carry CPU storage FDs with the pickle. A partial frame
+    cannot be skipped safely, so wire failures abort the queue for all peers.
     """
 
     def __init__(
@@ -211,7 +305,7 @@ class NamedQueue(mp_queues.Queue):
                 f"Unknown queue transport {transport!r}; expected 'socketpair' or 'pipe'"
             )
         super().__init__(maxsize, ctx=ctx)
-        self._frame_writer: _SocketWriter | None = None
+        self._frame_writer: _FrameWriter | None = None
         self._send_bytes: Any = self._writer.send_bytes
         self._poll: Any = self._reader.poll
         self._ignore_epipe = True
@@ -242,7 +336,7 @@ class NamedQueue(mp_queues.Queue):
         super()._reset(after_fork)  # type: ignore[attr-defined]
         state = getattr(self, "_transport_state", None)
         if state is not None:
-            self._frame_writer = _SocketWriter(
+            self._frame_writer = _FrameWriter(
                 self._reader, self._writer, state, self._buffer, self._notempty
             )
             self._send_bytes = self._frame_writer.send
@@ -328,6 +422,8 @@ class NamedQueue(mp_queues.Queue):
 
         tb_str = tb_mod.format_exc()
         if self._transport_state is not None:
+            assert self._frame_writer is not None
+            self._frame_writer.clear()
             if self._transport_state[0]:
                 self.abort()
                 return
@@ -393,7 +489,11 @@ class NamedQueue(mp_queues.Queue):
                     self._transport_state
                 )  # A feeder may have closed on abort.
                 raise
-            item = mp_queues._ForkingPickler.loads(frame)
+            item = (
+                frame.decode()
+                if isinstance(frame, ReceivedMessage)
+                else mp_queues._ForkingPickler.loads(frame)
+            )
         if isinstance(item, FeederError):
             raise QueueFeederError(
                 f"Queue '{item.queue_name}' feeder thread failed to serialize "
@@ -429,7 +529,7 @@ class NamedQueue(mp_queues.Queue):
             self._sem.release()
             raise
 
-    def _get_frame(self, block: bool, timeout: float | None) -> bytes:
+    def _get_frame(self, block: bool, timeout: float | None) -> ReceivedMessage | bytes:
         if self._closed:
             raise ValueError(f"Queue {self!r} is closed")
         state = self._transport_state
@@ -457,13 +557,19 @@ class NamedQueue(mp_queues.Queue):
                         # No selector calls when a frame is already buffered.
                         # Only the first receive is nonblocking; once any bytes
                         # arrive we own the transaction and finish it normally.
-                        frame = read_frame(self._reader.socket, nonblocking_start=True)
+                        frame = read_frame(
+                            self._reader.socket,
+                            nonblocking_start=True,
+                            fd_frame=ReceivedMessage,
+                        )
                         if state[0]:
                             _check_transport(state)
                         if frame is not None:
                             self._sem.release()
                     except BaseException:
                         self.abort()
+                        if isinstance(frame, ReceivedMessage):
+                            frame.close()
                         raise
             finally:
                 state[2] = 0
@@ -537,7 +643,13 @@ class NamedQueue(mp_queues.Queue):
     # -- Thread naming & lifecycle ------------------------------------------
 
     def _start_thread(self) -> None:
-        super()._start_thread()  # type: ignore[attr-defined]
+        if self._transport_state is None:
+            super()._start_thread()  # type: ignore[attr-defined]
+        else:
+            assert self._frame_writer is not None
+            _with_globals(
+                mp_queues.Queue._start_thread, Queue=_FeederGlobals(self._frame_writer)
+            )(self)
         thread = getattr(self, "_thread", None)
         if thread is not None:
             thread.name = f"QueueFeederThread[{self._name_label}]"
