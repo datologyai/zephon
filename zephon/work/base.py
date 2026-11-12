@@ -474,6 +474,21 @@ class WorkSource(ABC):
         """
         return None
 
+    def _prepare_for_execution(
+        self,
+        *,
+        canonical_replicas: int,
+        output_batch_size: int | None,
+        preserves_cursor_order: bool,
+        global_batch_size: int | None = None,
+    ) -> None:
+        """Bind configuration that depends on the resolved execution topology.
+
+        The engine calls this before it creates lane clones.
+        """
+        del canonical_replicas, output_batch_size, preserves_cursor_order
+        del global_batch_size
+
     def _has_schedule(self) -> bool:
         """Whether a curriculum schedule drives this source's per-chunk mixture."""
         return False
