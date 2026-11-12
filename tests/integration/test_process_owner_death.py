@@ -15,7 +15,6 @@ import pytest
 from tests.zephon._internal.runners._helpers import _ctx_services, _mk_records
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.delay import DelayById
-from zephon._internal.runners import process as process_mod
 from zephon._internal.runners.process import ProcessStageRunner
 
 pytestmark = pytest.mark.integration
@@ -68,7 +67,8 @@ def test_workers_exit_when_owner_is_killed() -> None:
         assert pids and all(_pid_running(pid) for pid in pids)
         os.kill(owner.pid, signal.SIGKILL)
         owner.join(timeout=10)
-        deadline = time.monotonic() + 10 * process_mod._PARENT_POLL_S
+        # Workers poll for parent death every second.
+        deadline = time.monotonic() + 10
         while any(_pid_running(pid) for pid in pids):
             assert time.monotonic() < deadline, "worker outlived its killed owner"
             time.sleep(0.05)
