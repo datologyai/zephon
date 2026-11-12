@@ -31,15 +31,17 @@ selected comes from the example `Dataset`). The `seed` parameter is used to make
 resulting curriculum reproducible across training runs.
 
 The remaining subpages explain how to use `StaticMixtureWorkSource` to combine samples
-from multiple `Dataset`s, how to size the work chunks appropriately, and how to control
-how samples are ordered and repeated during training. If you want to write a `WorkSource`
+from multiple `Dataset`s, how to change that mixture over training, how to size the work
+chunks appropriately, and how to control how samples are ordered and repeated during
+training. If you want to write a `WorkSource`
 of your own, or simply want to know how the built-in one decides what goes in a chunk,
 [WorkSources and work chunks](../internals/worksources_and_work_chunks.md) documents the
 interface and the implementation behind it.
 
 :::{note}
 **Future WorkSources.** We're working on support for more advanced WorkSources, e.g. for
-dynamic curricula or a SQL-like interface inspired by data loaders like
+curricula that react to training signals or a SQL-like interface inspired by data loaders
+like
 [Mixtera](https://github.com/eth-easl/mixtera). Stay tuned!
 :::
 
@@ -47,5 +49,6 @@ dynamic curricula or a SQL-like interface inspired by data loaders like
 :maxdepth: 2
 
 mixing_datasets
+changing_the_mixture_over_training
 shuffling_and_repeating_samples
 ```
