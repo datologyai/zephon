@@ -53,6 +53,15 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.runners.process:ProcessStageRunner",
         }
     ),
+    # Owner-death tests kill the process that owns a real internal runner.
+    "tests/integration/test_process_owner_death.py": frozenset(
+        {
+            "zephon._internal.graph:Node",
+            "zephon._internal.graph:Stage",
+            "zephon._internal.ops.delay:DelayById",
+            "zephon._internal.runners.process:ProcessStageRunner",
+        }
+    ),
     # Reset sticky catalog state and the mmap registry between tests.
     "tests/conftest.py": frozenset(
         {

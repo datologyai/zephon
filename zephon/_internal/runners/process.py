@@ -123,6 +123,9 @@ _SHUTDOWN_WATCHDOG_TIMEOUT = float(os.environ.get("ZEPHON_SHUTDOWN_WATCHDOG", "0
 #: to tighten resubmit-round-trip latency.
 _WATCHDOG_POLL_S = float(os.environ.get("ZEPHON_WATCHDOG_POLL_S", "5.0"))
 _SERVICE_POLL_S = 0.1
+#: How often a worker waiting for a command or a result permit checks that the
+#: process owning it is still alive.
+_PARENT_POLL_S = 1.0
 
 # -- Shutdown timeout constants (seconds) -----------------------------------
 _GRACEFUL_QUEUE_FLUSH: float = 5.0
@@ -404,6 +407,42 @@ SemaphoreFactory = Callable[..., Semaphore | SafeSemLock]
 ProcessFactory = Callable[..., BaseProcess]
 
 
+def _exit_if_parent_died(config: _ProcessWorkerConfig) -> None:
+    """Exit at once if the process that owns this worker has died.
+
+    An owner killed before it sends ``stop`` (for example an MTP subprocess
+    killed at its shutdown deadline) would otherwise leave the worker blocked
+    forever on its task queue or result permit. No one remains to read results
+    or release permits, so skip teardown and queue flushing, which could block
+    on the dead peer.
+    """
+    parent = mp.parent_process()
+    if parent is None or parent.is_alive():
+        return
+    print(
+        f"[zephon] process worker {config.worker_id} ({config.stage_name!r}) "
+        + f"exiting: parent process {parent.pid} is gone",
+        file=sys.stderr,
+        flush=True,
+    )
+    os._exit(1)
+
+
+def _get_command(config: _ProcessWorkerConfig) -> _WorkerCommand:
+    """Wait for the next command, checking parent liveness while idle."""
+    while True:
+        try:
+            return config.task_queue.get(timeout=_PARENT_POLL_S)
+        except queue.Empty:
+            _exit_if_parent_died(config)
+
+
+def _acquire_result_permit(config: _ProcessWorkerConfig) -> None:
+    """Wait for a result permit, checking parent liveness while blocked."""
+    while not config.backpressure.acquire(timeout=_PARENT_POLL_S):
+        _exit_if_parent_died(config)
+
+
 def _process_worker_main(config: _ProcessWorkerConfig) -> None:
     _set_worker_fds_close_on_exec()
     startup_t0 = time.perf_counter_ns()
@@ -454,7 +493,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
         _last_gc_ns = time.monotonic_ns()
         slots = config.worker_seq_slots
         while True:
-            command = config.task_queue.get()
+            command = _get_command(config)
             if command.kind in {"stop", "stop_hard"}:
                 hard_cleanup = command.kind == "stop_hard"
                 _debug(f"worker[{config.worker_index}] received stop, exiting cleanly")
@@ -482,7 +521,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                 prepared = prepare_microbatch(outputs, config.memory_policy)
                 outputs = cast(Microbatch, prepared)
 
-            config.backpressure.acquire()
+            _acquire_result_permit(config)
             result = RunnerResult(
                 seq=command.seq,
                 payload=outputs,
@@ -513,7 +552,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                 _last_gc_ns = now_ns
     except BaseException as exc:  # noqa: BLE001
         try:
-            config.backpressure.acquire()
+            _acquire_result_permit(config)
         except Exception:
             pass
         info = WorkerErrorInfo(
