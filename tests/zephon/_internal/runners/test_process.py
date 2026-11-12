@@ -2325,3 +2325,135 @@ def test_worker_teardown_uses_shutdown_budget(
     if fail_setup:
         assert results.get_nowait().error.message == "setup failed"
     assert results.empty()
+
+
+# ---------------------------------------------------------------------------
+# Owner death: workers must not outlive the process that owns them
+# ---------------------------------------------------------------------------
+
+
+class _WorkerExited(BaseException):
+    """Stands in for ``os._exit`` so the test process survives."""
+
+
+@pytest.mark.parametrize("parent", [None, "alive"])
+def test_worker_waits_for_command_while_parent_lives(parent: str | None) -> None:
+    command = object()
+    task_queue = Mock()
+    task_queue.get.side_effect = [queue.Empty, queue.Empty, command]
+    owner = None if parent is None else Mock(is_alive=Mock(return_value=True))
+    with patch("multiprocessing.parent_process", return_value=owner):
+        got = process_mod._get_command(SimpleNamespace(task_queue=task_queue))
+    assert got is command
+    assert all(
+        call.kwargs == {"timeout": process_mod._PARENT_POLL_S}
+        for call in task_queue.get.call_args_list
+    )
+    if owner is not None:
+        assert owner.is_alive.call_count == 2
+
+
+def test_worker_waits_for_result_permit_while_parent_lives() -> None:
+    backpressure = Mock()
+    backpressure.acquire.side_effect = [False, False, True]
+    owner = Mock(is_alive=Mock(return_value=True))
+    with patch("multiprocessing.parent_process", return_value=owner):
+        process_mod._acquire_result_permit(SimpleNamespace(backpressure=backpressure))
+    assert backpressure.acquire.call_count == 3
+    assert owner.is_alive.call_count == 2
+
+
+@pytest.mark.parametrize("blocked_on", ["command", "permit"])
+def test_worker_exits_when_parent_dies_while_blocked(
+    blocked_on: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    task_queue = Mock()
+    task_queue.get.side_effect = queue.Empty
+    backpressure = Mock()
+    backpressure.acquire.return_value = False
+    config = SimpleNamespace(
+        task_queue=task_queue,
+        backpressure=backpressure,
+        worker_id=3,
+        stage_name="tokenize",
+    )
+    owner = Mock(pid=4321, is_alive=Mock(return_value=False))
+    wait_for = (
+        process_mod._get_command
+        if blocked_on == "command"
+        else process_mod._acquire_result_permit
+    )
+    with patch("multiprocessing.parent_process", return_value=owner):
+        with patch.object(os, "_exit", side_effect=_WorkerExited) as exit_:
+            with pytest.raises(_WorkerExited):
+                wait_for(config)
+    exit_.assert_called_once_with(1)
+    assert "parent process 4321 is gone" in capsys.readouterr().err
+
+
+def _pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        # Orphans may stay zombies where PID 1 does not reap them.
+        with open(f"/proc/{pid}/stat") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+def _own_process_workers_until_killed(conn: Any) -> None:
+    """Start a runner mid-stream, report its worker pids, then wait."""
+    stage = Stage(
+        name="s",
+        nodes=[Node(name="identity", op=_IdentityOp())],
+        placement="auto",
+        break_reason="test",
+    )
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    stream = runner.run(iter(_mk_records(range(64))))
+    next(stream)
+    conn.send([proc.pid for state in runner.ops for proc in state.workers])
+    time.sleep(300)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX signals")
+@pytest.mark.timeout(120)
+def test_process_workers_exit_when_owner_is_killed() -> None:
+    """An owner killed without cleanup must not orphan its workers forever."""
+    ctx = multiprocessing.get_context("spawn")
+    reader, writer = ctx.Pipe(duplex=False)
+    owner = ctx.Process(target=_own_process_workers_until_killed, args=(writer,))
+    owner.start()
+    writer.close()
+    pids: list[int] = []
+    try:
+        assert reader.poll(60), "owner never started its workers"
+        pids = reader.recv()
+        assert pids and all(_pid_running(pid) for pid in pids)
+        os.kill(owner.pid, signal.SIGKILL)
+        owner.join(timeout=10)
+        deadline = time.monotonic() + 10 * process_mod._PARENT_POLL_S
+        while any(_pid_running(pid) for pid in pids):
+            assert time.monotonic() < deadline, "worker outlived its killed owner"
+            time.sleep(0.05)
+    finally:
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if owner.is_alive():
+            owner.kill()
+        owner.join(timeout=5)
+        owner.close()
