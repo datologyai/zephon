@@ -79,6 +79,14 @@ class QueueDrainStageRunner(ConcurrentStageRunner[SQueueDrain], Generic[SQueueDr
     # keep counting.
     _UNTIMED_FIRST_POLL: ClassVar[bool] = False
 
+    def _get_result(
+        self, state: SQueueDrain, timeout: float | None = None
+    ) -> RunnerResult:
+        """Read a result; subclasses can account for queue replacement here."""
+        if timeout is None:
+            return self._queue_get_nowait(state.result_queue)
+        return self._queue_get(state.result_queue, timeout=timeout)
+
     def _drain_results(
         self,
         state: SQueueDrain,
@@ -91,7 +99,7 @@ class QueueDrainStageRunner(ConcurrentStageRunner[SQueueDrain], Generic[SQueueDr
             # usually empty, so poll before starting the idle_drain timer:
             # timing an empty in-memory poll cost more than the poll itself.
             try:
-                item = self._queue_get_nowait(state.result_queue)
+                item = self._get_result(state)
             except queue.Empty:
                 return
             except FileNotFoundError as exc:
@@ -101,7 +109,7 @@ class QueueDrainStageRunner(ConcurrentStageRunner[SQueueDrain], Generic[SQueueDr
             while True:
                 if item is None:
                     try:
-                        item = self._queue_get_nowait(state.result_queue)
+                        item = self._get_result(state)
                     except queue.Empty:
                         break
                     except FileNotFoundError as exc:
@@ -121,7 +129,7 @@ class QueueDrainStageRunner(ConcurrentStageRunner[SQueueDrain], Generic[SQueueDr
     ) -> None:
         try:
             with state.pump_timer.measure("result_wait"):
-                item = self._queue_get(state.result_queue, timeout=timeout)
+                item = self._get_result(state, timeout=timeout)
         except queue.Empty:
             return
         # FileNotFoundError propagates — outer _operator_loop BaseException
