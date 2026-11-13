@@ -198,6 +198,9 @@ class _SocketWriter:
 class _FrameWriter(_SocketWriter):
     """Carry a serialized message and its owned FDs between the feeder's hooks.
 
+    Difference to CPython: also stands in for ``_feed``'s ``_ForkingPickler``, so
+    each item is encoded as a frame that can carry storage FDs.
+
     Queue._feed calls dumps() before acquiring its write lock, then passes the
     returned bytes to send(). Bytes cannot carry descriptor ownership, so
     dumps() stages an EncodedMessage here and returns an empty placeholder.
@@ -278,6 +281,9 @@ def _with_globals(function: FunctionType, **bindings: object) -> FunctionType:
 
 class _FeederGlobals:
     """Namespace used by Queue._start_thread to select a queue's feeder.
+
+    Difference to CPython: the stock thread runs the module-level ``_feed`` and
+    pickler; this hands it a copy of ``_feed`` bound to the queue's codec.
 
     Startup resolves Queue._feed and Queue's finalizer callbacks. Only _feed
     needs a private serializer; the remaining attributes delegate to Queue.
@@ -729,6 +735,11 @@ class NamedQueue(mp_queues.Queue):
     # -- Thread naming & lifecycle ------------------------------------------
 
     def _start_thread(self) -> None:
+        """Start the feeder thread.
+
+        Difference to CPython: the thread is named after the queue, and socketpair
+        queues run CPython's ``_feed`` with the FD-aware codec (_FeederGlobals).
+        """
         if self._transport_state is None:
             super()._start_thread()  # type: ignore[attr-defined]
         else:
