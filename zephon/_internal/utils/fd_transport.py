@@ -3,10 +3,14 @@
 
 """Pickle framing and CPU storage descriptor ownership for socketpair queues.
 
-Ordinary messages have a native length prefix and pickle. A -2 prefix introduces
-an FD subframe whose header carries SCM_RIGHTS, followed by optional legacy
-tickets and the pickle. Only that subframe is read with recvmsg: an ordinary
-read at a rights-bearing boundary would discard the descriptors.
+Stock multiprocessing pickles each CPU storage FD as a resource_sharer ticket
+(DupFd) inside the pickle; unpickling redeems it over a new connection to the
+sender's sharer thread. Here the FDs travel with the frame itself instead.
+
+Ordinary messages have a native length prefix and pickle. An _FD_FRAME (-2)
+prefix introduces an FD subframe whose header carries SCM_RIGHTS, followed by
+optional legacy tickets and the pickle. Only that subframe is read with recvmsg:
+an ordinary read at a rights-bearing boundary would discard the descriptors.
 
 Storage references in the pickle are indices into a message-local handle table.
 The sender can replace direct FDs with tickets after an initial quota rejection
@@ -27,27 +31,46 @@ import sys
 from functools import partial
 from multiprocessing.reduction import DupFd, ForkingPickler
 from multiprocessing.util import register_after_fork
-from typing import Any
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from zephon._internal.utils.ipc import (
+    _FD_FRAME,
+    _LARGE_FRAME,
     _LENGTH,
     QueueTransportError,
     _read_exact,
     read_frame,
 )
 
+# Slots sent as SCM_RIGHTS per frame; any further slots become tickets. The
+# receiver sizes its recvmsg control buffer for this (Linux allows 253 per message).
 MAX_DIRECT_FDS = 128
-_FD_PREFIX = _LENGTH.pack(-2)
-_HEADER = struct.Struct(
-    "!4sIIQQ"
-)  # magic, direct count, total count, table/payload bytes
+_FD_PREFIX = _LENGTH.pack(_FD_FRAME)
+# FD frame: [int32 _FD_FRAME][header, SCM_RIGHTS attached][ticket table][pickle].
+# Header: magic, slots sent as SCM_RIGHTS, total slots, table bytes, pickle bytes.
+_HEADER = struct.Struct("!4sIIQQ")
 _MAGIC = b"ZFD1"
 _CONTROL_BYTES = socket.CMSG_SPACE(MAX_DIRECT_FDS * array.array("i").itemsize)
 _SEND_FLAGS = getattr(socket, "MSG_NOSIGNAL", 0)
 _RECV_FLAGS = getattr(socket, "MSG_CMSG_CLOEXEC", 0)
 
 
-def _storage_from_slot(cls: type, index: int, size: int) -> Any:
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    import torch
+
+    _Reducer = Callable[[Any], "str | tuple[object, ...]"]
+
+
+class _Ticket(Protocol):
+    """A stdlib resource_sharer DupFd; detach() fetches the FD from its sender."""
+
+    def detach(self) -> int: ...
+
+
+def _storage_from_slot(cls: type, index: int, size: int) -> NoReturn:
     """Pickle marker resolved by the owning message's unpickler to rebuild()."""
     raise QueueTransportError("Storage slots require a queue message decoder")
 
@@ -65,9 +88,17 @@ class _FdTable:
             if not self.fds:
                 register_after_fork(self, _FdTable.close)
             index = len(self.fds)
+            # Own a dup: the storage may close its FD before send() picks a route.
             self.fds.append(os.dup(fd))
             self.indices[key] = index
         return index
+
+    def to_ticket(self, index: int) -> _Ticket:
+        """Hand one slot to the stdlib resource_sharer as a DupFd ticket."""
+        ticket = DupFd(self.fds[index])  # DupFd keeps its own dup ...
+        os.close(self.fds[index])  # ... so ours is no longer needed.
+        self.fds[index] = -1
+        return ticket
 
     def close(self) -> None:
         for index, fd in enumerate(self.fds):
@@ -86,10 +117,10 @@ class _LazyDispatch:
     subsequent lookups use the normal dictionary directly in the C pickler.
     """
 
-    def __init__(self, pickler: Any, message: EncodedMessage) -> None:
+    def __init__(self, pickler: pickle.Pickler, message: EncodedMessage) -> None:
         self.pickler, self.message = pickler, message
 
-    def __getitem__(self, cls: type) -> Any:
+    def __getitem__(self, cls: type) -> _Reducer:
         dispatch = ForkingPickler._copyreg_dispatch_table.copy()
         dispatch.update(ForkingPickler._extra_reducers)
         torch = sys.modules.get("torch")
@@ -99,6 +130,8 @@ class _LazyDispatch:
             and reductions is not None
             and dispatch.get(torch.UntypedStorage) is reductions.reduce_storage
         ):
+            # Torch's reducer would pickle a DupFd ticket; ours records the FD
+            # as a slot in this message's table instead.
             dispatch[torch.UntypedStorage] = partial(
                 _reduce_storage, self.message, reductions
             )
@@ -106,7 +139,7 @@ class _LazyDispatch:
         return dispatch[cls]
 
 
-def _dump(value: Any, buffer: io.BytesIO, message: EncodedMessage) -> None:
+def _dump(value: object, buffer: io.BytesIO, message: EncodedMessage) -> None:
     pickler = pickle.Pickler(buffer)
     pickler.dispatch_table = _LazyDispatch(pickler, message)
     try:
@@ -117,7 +150,9 @@ def _dump(value: Any, buffer: io.BytesIO, message: EncodedMessage) -> None:
         )  # Break the owner cycle.
 
 
-def _reduce_storage(message: EncodedMessage, reductions: Any, storage: Any) -> tuple:
+def _reduce_storage(
+    message: EncodedMessage, reductions: ModuleType, storage: torch.UntypedStorage
+) -> tuple[object, ...]:
     mp = sys.modules["torch.multiprocessing"]
     if (
         storage.device.type != "cpu"
@@ -150,7 +185,7 @@ class EncodedMessage:
     Messages without storage FDs use native framing and allocate no FD table.
     """
 
-    def __init__(self, value: Any) -> None:
+    def __init__(self, value: object) -> None:
         self._table: _FdTable | None = None
         buffer = io.BytesIO()
         buffer.seek(4)  # Reserve native framing without copying the pickle later.
@@ -178,28 +213,32 @@ class EncodedMessage:
         if self._table is None or not self._table.fds:
             size = len(self.payload)
             if size > 0x7FFFFFFF:
-                sock.sendall(_LENGTH.pack(-1) + struct.pack("!Q", size), _SEND_FLAGS)
+                sock.sendall(
+                    _LENGTH.pack(_LARGE_FRAME) + struct.pack("!Q", size), _SEND_FLAGS
+                )
                 sock.sendall(self.payload, _SEND_FLAGS)
             else:
                 _LENGTH.pack_into(self.buffer, 0, size)
                 sock.sendall(self.buffer, _SEND_FLAGS)
             return
         assert self._table is not None
+        slots = self._table
         # The native-size prefix never carries rights. Only the following
         # subframe uses recvmsg, so ordinary messages keep the native wire path.
         sock.sendall(_FD_PREFIX, _SEND_FLAGS)
-        fds = self._table.fds
+        fds = slots.fds
         direct = min(len(fds), MAX_DIRECT_FDS)
-        tickets: dict[int, Any] = {}
+        tickets: dict[int, _Ticket] = {}
 
         def prepare(first: int) -> list[memoryview]:
+            # Slots from `first` on go as stdlib tickets: overflow past
+            # MAX_DIRECT_FDS, or every slot after ETOOMANYREFS. The pickle names
+            # slots either way, so nothing is pickled again.
             # As with stock Queue, tickets left by a failed send live until
             # resource_sharer/process cleanup; there is no public cancel API.
             for index in range(first, len(fds)):
                 if index not in tickets:
-                    tickets[index] = DupFd(fds[index])
-                    os.close(fds[index])
-                    fds[index] = -1
+                    tickets[index] = slots.to_ticket(index)
             table = ForkingPickler.dumps(tickets) if tickets else b""
             header = _HEADER.pack(
                 _MAGIC, first, len(fds), len(table), len(self.payload)
@@ -236,8 +275,8 @@ class ReceivedMessage:
 
     def __init__(self, sock: socket.socket) -> None:
         self.fds: list[int] = []
-        self.storages: dict[int, tuple[type, int, Any]] = {}
-        self.tickets: dict[int, Any] = {}
+        self.storages: dict[int, tuple[type, int, object]] = {}
+        self.tickets: dict[int, _Ticket] = {}
         register_after_fork(self, ReceivedMessage.close)
         try:
             header = bytearray()
@@ -288,25 +327,26 @@ class ReceivedMessage:
     def __del__(self) -> None:
         self.close()
 
-    def decode(self) -> Any:
+    def decode(self) -> object:
         """Resolve local storage slots or demand-driven legacy tickets."""
         try:
             if not self.total:
                 return ForkingPickler.loads(self.payload)
-            self.tickets = (
+            tickets = (
                 ForkingPickler.loads(self.ticket_bytes) if self.ticket_bytes else {}
             )
             if (
-                not isinstance(self.tickets, dict)
-                or len(self.tickets) != self.total - len(self.fds)
-                or set(self.tickets) != set(range(len(self.fds), self.total))
+                not isinstance(tickets, dict)
+                or len(tickets) != self.total - len(self.fds)
+                or set(tickets) != set(range(len(self.fds), self.total))
             ):
                 raise QueueTransportError("Invalid queue ticket table")
+            self.tickets = tickets
             return _Unpickler(self).load()
         finally:
             self.close()
 
-    def rebuild(self, cls: type, index: int, size: int) -> Any:
+    def rebuild(self, cls: type, index: int, size: int) -> object:
         """Detach each slot exactly once and preserve storage aliases."""
         if not 0 <= index < self.total:
             raise QueueTransportError("Invalid storage index")
@@ -329,6 +369,8 @@ class _Handle:
         self.message, self.index = message, index
 
     def detach(self) -> int:
+        # Direct slot: the FD that arrived with the header. Later slots: redeem
+        # the stdlib ticket, which connects back to the sender's sharer thread.
         if self.index < len(self.message.fds):
             fd = self.message.fds[self.index]
             self.message.fds[self.index] = -1
@@ -345,7 +387,7 @@ class _Unpickler(pickle.Unpickler):
         super().__init__(io.BytesIO(message.payload))
         self.message = message
 
-    def find_class(self, module: str, name: str) -> Any:
+    def find_class(self, module: str, name: str) -> object:
         if module == __name__ and name == "_storage_from_slot":
             return self.message.rebuild
         return super().find_class(module, name)
