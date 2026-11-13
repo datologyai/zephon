@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import array
 import fcntl
-import math
-import select
 import socket
 import struct
 import sys
@@ -132,17 +130,6 @@ class SocketConnection(Connection):
 
     def _close(self) -> None:
         self.socket.close()
-
-    def poll_readable(self, timeout: float | None = 0.0) -> bool:
-        """Poll readability, including hangups/errors that the next read reports.
-
-        Each caller owns its poll object so concurrent readers can wait without
-        sharing a poll instance that rejects concurrent poll() calls.
-        """
-        poller = select.poll()
-        poller.register(self.fileno(), select.POLLIN)
-        milliseconds = None if timeout is None else max(0, math.ceil(timeout * 1000))
-        return bool(poller.poll(milliseconds))
 
     def close(self) -> None:
         """Defer feeder close until an active framed reader has unwound."""
