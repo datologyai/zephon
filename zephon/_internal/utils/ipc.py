@@ -88,6 +88,9 @@ def read_frame(sock: socket.socket, *, nonblocking_start: bool = False) -> bytes
 class SocketConnection(Connection):
     """Expose a socket through Connection while keeping a single FD owner.
 
+    Difference to CPython: a stock Connection holds only a raw FD; this keeps the
+    socket for sendmsg/recvmsg/shutdown and can defer close during a read.
+
     Connection's byte methods and the socket's ancillary methods use the same
     descriptor; only the socket closes it. A framed reader holds close_guard
     during a receive. Concurrent close requests are deferred until that reader
@@ -104,10 +107,18 @@ class SocketConnection(Connection):
         super().__init__(sock.fileno(), readable=readable, writable=writable)
 
     def _close(self) -> None:
+        """Close the descriptor.
+
+        Difference to CPython: closes through the socket, the FD's only owner.
+        """
         self.socket.close()
 
     def close(self) -> None:
-        """Defer feeder close until an active framed reader has unwound."""
+        """Defer feeder close until an active framed reader has unwound.
+
+        Difference to CPython: the stock close is immediate, so the FD number
+        could be reused while another thread is still inside recv on it.
+        """
         self.close_requested = True
         if self.close_guard is None:
             super().close()
@@ -118,9 +129,15 @@ class SocketConnection(Connection):
                 self.close_guard.release()
 
     def __getstate__(self) -> tuple[socket.socket, bool, bool]:
+        """Pickle the connection for a spawned child.
+
+        Difference to CPython: the stock reducer only handles plain Connections;
+        shipping the socket makes the child rebuild a working SocketConnection.
+        """
         return self.socket, self.readable, self.writable
 
     def __setstate__(self, state: tuple[socket.socket, bool, bool]) -> None:
+        """Rebuild around the unpickled socket."""
         sock, readable, writable = state
         self.__init__(sock, readable=readable, writable=writable)
 
