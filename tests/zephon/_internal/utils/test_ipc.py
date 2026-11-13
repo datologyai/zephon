@@ -125,7 +125,7 @@ def test_fragmented_native_prefix_and_extended_length(extended):
     reader, writer = socket.socketpair()
     payload = bytes(ForkingPickler.dumps({"payload": 123}))
     prefix = (
-        ipc._LENGTH.pack(-1) + len(payload).to_bytes(8, "big")
+        ipc._LENGTH.pack(ipc._LARGE_FRAME) + len(payload).to_bytes(8, "big")
         if extended
         else ipc._LENGTH.pack(len(payload))
     )
