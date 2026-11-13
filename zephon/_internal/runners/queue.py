@@ -21,12 +21,13 @@ from multiprocessing import queues as mp_queues
 from multiprocessing.context import BaseContext
 from multiprocessing.util import register_after_fork
 from queue import Empty, Full
-from typing import Any, get_args
+from typing import TYPE_CHECKING, Any, Protocol, get_args
 
 from zephon._internal.utils.ipc import (
     DEFAULT_IPC_BUFFER_BYTES,
     DEFAULT_IPC_TRANSPORT,
     QueueTransportError,
+    SocketConnection,
     read_frame,
     readable_bytes,
     socketpair_connections,
@@ -35,9 +36,22 @@ from zephon._internal.utils.semaphore import SafeSemLock
 from zephon._internal.utils.shm import is_shm_error, shm_usage_str, wait_for_shm_space
 from zephon.options import IpcTransport
 
+if TYPE_CHECKING:
+    import ctypes
+    from collections import deque
+    from collections.abc import Callable
+
+    # Shared per-queue state, indexed by _BROKEN, _WRITER_PID and _READER_PID.
+    _TransportState = ctypes.Array[ctypes.c_longlong]
+
 # Timeouts for the escalating sentinel-enqueue in _enqueue_sentinel.
 _FEEDER_SHORT_TIMEOUT = 5.0
 _FEEDER_LONG_TIMEOUT = 120.0
+# Semaphore waits cannot be woken by socket shutdown, so they re-check abort this often.
+_ABORT_POLL_S = 0.1
+# Slots of a socketpair queue's shared _transport_state array.
+_BROKEN, _WRITER_PID, _READER_PID = 0, 1, 2
+# Cached because os.getpid() is a syscall and every frame records it; refreshed on fork.
 _PID = os.getpid()
 
 
@@ -53,15 +67,26 @@ def _use_socket_transport(transport: IpcTransport) -> bool:
     return sys.platform == "linux" and transport == "socketpair"
 
 
-def _check_transport(state: Any) -> None:
-    if state[0]:
+def _check_transport(state: _TransportState) -> None:
+    if state[_BROKEN]:
         raise QueueTransportError(
             "Queue transport aborted; the stream cannot be reused"
         )
 
 
+class _Lock(Protocol):
+    """The acquire/release surface shared by multiprocessing locks and semaphores."""
+
+    def acquire(self, block: bool = ..., timeout: float | None = ...) -> bool: ...
+
+    def release(self) -> None: ...
+
+
 def _acquire(
-    lock: Any, state: Any, block: bool = True, timeout: float | None = None
+    lock: _Lock,
+    state: _TransportState,
+    block: bool = True,
+    timeout: float | None = None,
 ) -> bool:
     """Acquire a semaphore while checking whether its queue was aborted.
 
@@ -77,7 +102,9 @@ def _acquire(
     while True:
         _check_transport(state)
         wait = (
-            0.1 if deadline is None else min(0.1, max(0, deadline - time.monotonic()))
+            _ABORT_POLL_S
+            if deadline is None
+            else min(_ABORT_POLL_S, max(0, deadline - time.monotonic()))
         )
         if lock.acquire(True, wait):
             return True
@@ -95,25 +122,25 @@ class _WriteLock:
     the stream unsafe to reuse, even if the lock could be force-released.
     """
 
-    def __init__(self, lock: Any, state: Any) -> None:
+    def __init__(self, lock: _Lock, state: _TransportState) -> None:
         self.lock, self.state = lock, state
 
     def acquire(self, block: bool = True, timeout: float | None = None) -> bool:
         try:
-            if self.state[0]:
+            if self.state[_BROKEN]:
                 _check_transport(self.state)
             if not self.lock.acquire(False) and not _acquire(
                 self.lock, self.state, block, timeout
             ):
                 return False
         except BaseException:
-            self.state[0] = 1
+            self.state[_BROKEN] = 1
             raise
-        self.state[1] = _PID
+        self.state[_WRITER_PID] = _PID
         return True
 
     def release(self) -> None:
-        self.state[1] = 0
+        self.state[_WRITER_PID] = 0
         self.lock.release()
 
 
@@ -121,14 +148,19 @@ class _SocketWriter:
     """Abort the shared stream before a failed feeder releases its write lock."""
 
     def __init__(
-        self, reader: Any, writer: Any, state: Any, buffer: Any, condition: Any
+        self,
+        reader: SocketConnection,
+        writer: SocketConnection,
+        state: _TransportState,
+        buffer: deque[object],
+        condition: threading.Condition,
     ) -> None:
         self.reader, self.writer, self.state = reader, writer, state
         self.buffer, self.condition = buffer, condition
 
     def abort(self) -> None:
         """Invalidate the stream and wake peers before discarding buffered items."""
-        self.state[0] = 1
+        self.state[_BROKEN] = 1
         for endpoint in (self.reader, self.writer):
             try:
                 endpoint.socket.shutdown(socket.SHUT_RDWR)
@@ -142,7 +174,7 @@ class _SocketWriter:
 
     def send(self, payload: memoryview) -> None:
         try:
-            if self.state[0]:
+            if self.state[_BROKEN]:
                 _check_transport(self.state)
             self.writer.send_bytes(payload)
         except BaseException:
@@ -212,14 +244,14 @@ class NamedQueue(mp_queues.Queue):
             )
         super().__init__(maxsize, ctx=ctx)
         self._frame_writer: _SocketWriter | None = None
-        self._send_bytes: Any = self._writer.send_bytes
-        self._poll: Any = self._reader.poll
+        self._send_bytes: Callable[[memoryview], None] = self._writer.send_bytes
+        self._poll: Callable[[float | None], bool] = self._reader.poll
         self._ignore_epipe = True
         self._name_label = name
         # Three aligned shared integers: broken, active writer PID, active reader
         # PID. Only the lock holder writes its PID; zero while a lock is held
         # means an ambiguous crash window, never permission to reclaim it.
-        self._transport_state = (
+        self._transport_state: _TransportState | None = (
             ctx.RawArray("q", 3) if _use_socket_transport(transport) else None
         )
 
@@ -242,12 +274,16 @@ class NamedQueue(mp_queues.Queue):
         super()._reset(after_fork)  # type: ignore[attr-defined]
         state = getattr(self, "_transport_state", None)
         if state is not None:
+            reader, writer = self._reader, self._writer
+            # Only socketpair-backed queues carry transport state.
+            assert isinstance(reader, SocketConnection)
+            assert isinstance(writer, SocketConnection)
             self._frame_writer = _SocketWriter(
-                self._reader, self._writer, state, self._buffer, self._notempty
+                reader, writer, state, self._buffer, self._notempty
             )
             self._send_bytes = self._frame_writer.send
-            self._poll = self._reader.poll_readable
-            self._reader.close_guard = threading.Lock()
+            self._poll = reader.poll_readable
+            reader.close_guard = threading.Lock()
 
     # -- Feeder error detection ---------------------------------------------
 
@@ -328,7 +364,7 @@ class NamedQueue(mp_queues.Queue):
 
         tb_str = tb_mod.format_exc()
         if self._transport_state is not None:
-            if self._transport_state[0]:
+            if self._transport_state[_BROKEN]:
                 self.abort()
                 return
 
@@ -339,12 +375,13 @@ class NamedQueue(mp_queues.Queue):
         # --- SHM error: wait for space, then re-queue for serialization ----
         label = f"Queue '{self._name_label}'"
         total_waits = 0
+        transport = self._transport_state
         while True:
             try:
                 total_waits += wait_for_shm_space(
                     label,
-                    check_cancelled=(lambda: _check_transport(self._transport_state))
-                    if self._transport_state is not None
+                    check_cancelled=(lambda: _check_transport(transport))
+                    if transport is not None
                     else None,
                 )
             except QueueTransportError:
@@ -383,15 +420,16 @@ class NamedQueue(mp_queues.Queue):
 
     def get(self, block: bool = True, timeout: float | None = None) -> Any:
         """Retrieve an item, raising on feeder-thread errors."""
-        if self._transport_state is None:
+        state = self._transport_state
+        if state is None:
             item = super().get(block, timeout)
         else:
             try:
                 frame = self._get_frame(block, timeout)
             except (OSError, ValueError, TypeError):
-                _check_transport(
-                    self._transport_state
-                )  # A feeder may have closed on abort.
+                # After an abort another thread may close our reader under us;
+                # report the abort rather than whichever error that close caused.
+                _check_transport(state)
                 raise
             item = mp_queues._ForkingPickler.loads(frame)
         if isinstance(item, FeederError):
@@ -404,14 +442,16 @@ class NamedQueue(mp_queues.Queue):
             )
         return item
 
-    def put(self, obj: Any, block: bool = True, timeout: float | None = None) -> None:
+    def put(
+        self, obj: object, block: bool = True, timeout: float | None = None
+    ) -> None:
         """Enqueue asynchronously, observing terminal abort during capacity waits."""
         state = self._transport_state
         if state is None:
             return super().put(obj, block, timeout)
         if self._closed:
             raise ValueError(f"Queue {self!r} is closed")
-        if state[0]:
+        if state[_BROKEN]:
             _check_transport(state)
         if not self._sem.acquire(False) and not _acquire(
             self._sem, state, block, timeout
@@ -419,7 +459,7 @@ class NamedQueue(mp_queues.Queue):
             raise Full
         try:
             with self._notempty:
-                if state[0]:
+                if state[_BROKEN]:
                     _check_transport(state)
                 if self._thread is None:
                     self._start_thread()
@@ -442,23 +482,25 @@ class NamedQueue(mp_queues.Queue):
                 )
                 if not _acquire(self._rlock, state, block, remaining):
                     raise Empty
-            state[2] = _PID
+            state[_READER_PID] = _PID
             frame = None
+            guard = self._reader.close_guard
+            assert guard is not None  # _reset installs it on socketpair queues.
             try:
-                with self._reader.close_guard:
+                with guard:
                     # A local close before any bytes arrive leaves the shared
                     # stream intact; only an interrupted transaction aborts it.
                     if self._reader.closed:
                         _check_transport(state)
                         raise ValueError(f"Queue {self!r} is closed")
                     try:
-                        if state[0]:
+                        if state[_BROKEN]:
                             _check_transport(state)
                         # No selector calls when a frame is already buffered.
                         # Only the first receive is nonblocking; once any bytes
                         # arrive we own the transaction and finish it normally.
                         frame = read_frame(self._reader.socket, nonblocking_start=True)
-                        if state[0]:
+                        if state[_BROKEN]:
                             _check_transport(state)
                         if frame is not None:
                             self._sem.release()
@@ -466,9 +508,9 @@ class NamedQueue(mp_queues.Queue):
                         self.abort()
                         raise
             finally:
-                state[2] = 0
+                state[_READER_PID] = 0
                 self._rlock.release()
-                if state[0] or self._reader.close_requested:
+                if state[_BROKEN] or self._reader.close_requested:
                     self._reader.close()
             if frame is not None:
                 return frame
@@ -481,8 +523,17 @@ class NamedQueue(mp_queues.Queue):
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     raise Empty
-                if self._poll(0.1 if remaining is None else min(0.1, remaining)):
+                if self._poll(
+                    _ABORT_POLL_S
+                    if remaining is None
+                    else min(_ABORT_POLL_S, remaining)
+                ):
                     break
+
+    @property
+    def supports_abort(self) -> bool:
+        """Whether this queue uses the managed Linux socketpair stream abort() stops."""
+        return self._transport_state is not None
 
     def abort(self) -> None:
         """Invalidate a managed socket stream and wake I/O/semaphore waits."""
@@ -505,7 +556,7 @@ class NamedQueue(mp_queues.Queue):
         if self._transport_state is None:
             return True
         wlock = self._wlock.lock if isinstance(self._wlock, _WriteLock) else self._wlock
-        for lock, slot in ((wlock, 1), (self._rlock, 2)):
+        for lock, slot in ((wlock, _WRITER_PID), (self._rlock, _READER_PID)):
             deadline = time.monotonic() + 1.0
             while True:
                 if lock.acquire(block=False):
@@ -519,7 +570,7 @@ class NamedQueue(mp_queues.Queue):
                     return False
                 # A live owner may be entering/leaving its critical section.
                 time.sleep(0.005)
-        return not self._transport_state[0]
+        return not self._transport_state[_BROKEN]
 
     def staged_bytes(self) -> int:
         """Serialized bytes sitting in the transport buffer, not yet read.
@@ -545,7 +596,7 @@ class NamedQueue(mp_queues.Queue):
     def close(self) -> None:
         """Close the queue and clean up all internal semaphores."""
         try:
-            if self._transport_state is not None and self._transport_state[0]:
+            if self._transport_state is not None and self._transport_state[_BROKEN]:
                 self.abort()
             super().close()
         finally:
