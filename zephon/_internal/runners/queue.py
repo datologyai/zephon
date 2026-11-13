@@ -354,8 +354,9 @@ class NamedQueue(mp_queues.Queue):
     ) -> None:
         """Create the queue; see the class docstring for the transports.
 
-        Difference to CPython: swaps the pipe for a socketpair and wraps the locks
-        (SafeSemLock, plus _WriteLock on Linux) for cleanup and abort.
+        Difference to CPython: supports interchangeable transports, including a
+        socketpair instead of the pipe, and wraps the locks (SafeSemLock, plus
+        _WriteLock on Linux socketpairs) for cleanup and abort.
         """
         if transport not in get_args(IpcTransport):
             raise ValueError(
