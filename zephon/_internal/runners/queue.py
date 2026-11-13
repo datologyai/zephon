@@ -282,7 +282,6 @@ class NamedQueue(mp_queues.Queue):
                 reader, writer, state, self._buffer, self._notempty
             )
             self._send_bytes = self._frame_writer.send
-            self._poll = reader.poll_readable
             reader.close_guard = threading.Lock()
 
     # -- Feeder error detection ---------------------------------------------

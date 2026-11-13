@@ -72,9 +72,9 @@ def test_close_defers_descriptor_disposal_until_receive_finishes() -> None:
 def test_poll_reports_hangup_for_the_reader_to_handle() -> None:
     reader, writer = socketpair_connections()
     try:
-        assert not reader.poll_readable(0)
+        assert not reader.poll(0)
         writer.close()
-        assert reader.poll_readable(1)
+        assert reader.poll(1)
         assert reader.socket.recv(1) == b""
     finally:
         reader.close()
