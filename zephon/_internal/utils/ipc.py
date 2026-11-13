@@ -19,11 +19,13 @@ import struct
 import sys
 import termios
 from multiprocessing.connection import Connection
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 if TYPE_CHECKING:
     import threading
+    from collections.abc import Callable
 
+    from zephon._internal.utils.fd_transport import ReceivedMessage
     from zephon.options import IpcTransport
 
 DEFAULT_IPC_TRANSPORT: IpcTransport = "socketpair"
@@ -37,6 +39,7 @@ _clamp_warned: set[int] = set()
 _LENGTH = struct.Struct("!i")
 # Negative values in that length prefix are markers, not lengths.
 _LARGE_FRAME = -1  # CPython: a frame over 2 GiB; its real length follows as a u64.
+_FD_FRAME = -2  # Zephon: an FD subframe follows (see fd_transport).
 
 
 class QueueTransportError(RuntimeError):
@@ -60,8 +63,28 @@ def _read_exact(sock: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def read_frame(sock: socket.socket, *, nonblocking_start: bool = False) -> bytes | None:
-    """Read one complete native multiprocessing frame from a socket.
+@overload
+def read_frame(
+    sock: socket.socket, *, nonblocking_start: bool = False, fd_frame: None = None
+) -> bytes | None: ...
+
+
+@overload
+def read_frame(
+    sock: socket.socket,
+    *,
+    nonblocking_start: bool = False,
+    fd_frame: Callable[[socket.socket], ReceivedMessage],
+) -> bytes | ReceivedMessage | None: ...
+
+
+def read_frame(
+    sock: socket.socket,
+    *,
+    nonblocking_start: bool = False,
+    fd_frame: Callable[[socket.socket], ReceivedMessage] | None = None,
+) -> bytes | ReceivedMessage | None:
+    """Read one native frame, optionally delegating an FD extension to its decoder.
 
     nonblocking_start returns None only if the first read consumes no bytes.
     After any progress the reader must finish the frame or fail the stream;
@@ -78,6 +101,8 @@ def read_frame(sock: socket.socket, *, nonblocking_start: bool = False) -> bytes
     if len(header) < 4:
         header += _read_exact(sock, 4 - len(header))
     size = _LENGTH.unpack(header)[0]
+    if size == _FD_FRAME and fd_frame is not None:
+        return fd_frame(sock)
     if size == _LARGE_FRAME:
         size = struct.unpack("!Q", _read_exact(sock, 8))[0]
     if size < 0 or size > sys.maxsize:
