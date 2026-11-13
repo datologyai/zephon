@@ -492,13 +492,17 @@ def test_poll_timeouts_do_not_repeat_empty_probes(framed_queue, monkeypatch):
     assert calls == [1]
 
 
-def test_abort_wakes_reader_parked_in_poll(framed_queue, monkeypatch):
+@pytest.mark.parametrize("waiters", [1, 3])
+def test_abort_wakes_readers_parked_in_poll(framed_queue, monkeypatch, waiters):
     q = framed_queue
-    parked, failures = threading.Event(), []
+    parked = threading.Condition()
+    polling_threads, failures = set(), []
     original = q._poll
 
     def poll(timeout):
-        parked.set()
+        with parked:
+            polling_threads.add(threading.get_ident())
+            parked.notify_all()
         return original(timeout)
 
     def consume():
@@ -508,13 +512,19 @@ def test_abort_wakes_reader_parked_in_poll(framed_queue, monkeypatch):
             failures.append(exc)
 
     monkeypatch.setattr(q, "_poll", poll)
-    thread = threading.Thread(target=consume)
-    thread.start()
-    assert parked.wait(3)
-    q.abort()
-    thread.join(3)
-    assert not thread.is_alive()
-    assert len(failures) == 1 and isinstance(failures[0], queue.QueueTransportError)
+    threads = [threading.Thread(target=consume) for _ in range(waiters)]
+    for thread in threads:
+        thread.start()
+    try:
+        with parked:
+            assert parked.wait_for(lambda: len(polling_threads) == waiters, timeout=3)
+    finally:
+        q.abort()
+        for thread in threads:
+            thread.join(3)
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(failures) == waiters
+    assert all(isinstance(exc, queue.QueueTransportError) for exc in failures)
 
 
 def _produce_plain(q, producer):
