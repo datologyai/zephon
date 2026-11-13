@@ -140,6 +140,12 @@ class _LazyDispatch:
 
 
 def _dump(value: object, buffer: io.BytesIO, message: EncodedMessage) -> None:
+    """Pickle ``value`` with a fresh pickler, as ``ForkingPickler.dumps`` does.
+
+    ForkingPickler copies the global reducer registry for every message; here
+    that copy is made on first use (_LazyDispatch), with torch's storage reducer
+    pointed at this message's FD table.
+    """
     pickler = pickle.Pickler(buffer)
     pickler.dispatch_table = _LazyDispatch(pickler, message)
     try:
