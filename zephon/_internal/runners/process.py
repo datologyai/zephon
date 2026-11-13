@@ -85,6 +85,7 @@ from zephon._internal.runners.queue_drain import (
     QueueDrainStageRunner,
 )
 from zephon._internal.runners.watchdog import (
+    _disabled_strategies,
     close_abandoned_result_queues,
     recover_result_queue,
 )
@@ -172,7 +173,7 @@ def _shutdown_debug(msg: str) -> None:  # pragma: no cover - diagnostics helper
         print(f"[Shutdown {ts}.{ms:03d}] {msg}", file=sys.stderr, flush=True)
 
 
-from zephon._internal.runners.queue import NamedQueue
+from zephon._internal.runners.queue import NamedQueue, QueueTransportError
 
 
 def _startup_log(msg: str) -> None:  # pragma: no cover - diagnostics helper
@@ -1124,12 +1125,52 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             formatted_traceback="",
         )
         self._record_error(context, WorkerCrashed(info))
+        self._check_dead_worker_queues(state, worker_index, proc.pid)
 
     # Result-queue recovery after a worker crash lives in
     # :mod:`zephon._internal.runners.watchdog`.  The watchdog calls
     # ``recover_result_queue`` from there; OS-specific bits (POSIX
     # semaphore introspection, Linux ``/proc/PID/syscall`` parsing) are
     # kept out of this file.
+
+    def _check_dead_worker_queues(
+        self,
+        state: _ProcessOperatorState,
+        worker_index: int,
+        pid: int | None,
+        *,
+        result_will_rotate: bool = False,
+    ) -> bool:
+        """Cancel the stage if a dead worker may have interrupted a queue frame.
+
+        Task and service queues are shared with live peers and cannot be
+        replaced independently. A result queue scheduled for rotation is
+        excluded because its replacement starts with a fresh stream.
+        """
+        queues = [
+            state.task_queue,
+            self._service_queue,
+            self._service_responses.get(state.worker_ids[worker_index]),
+        ]
+        # A single worker's result queue is replaced by recover_result_queue.
+        if not result_will_rotate:
+            queues.append(state.result_queue)
+        if pid is None or all(
+            not isinstance(q, NamedQueue) or q.check_dead_process(pid) for q in queues
+        ):
+            return True
+        for q in [*queues, state.result_queue]:
+            if isinstance(q, NamedQueue):
+                q.abort()
+        self._service_cancelled.value = 1
+        if self._active_context is not None:
+            self._record_error(
+                self._active_context,
+                RuntimeError(
+                    f"Worker {pid} died during a queue transaction; transport aborted"
+                ),
+            )
+        return False
 
     def _handle_dead_worker(
         self,
@@ -1148,6 +1189,18 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         """
         pid = dead_proc.pid
         exitcode = dead_proc.exitcode
+        worker_id = state.worker_ids[worker_index]
+        pending = self._service_pending.get(worker_id)
+        if not self._check_dead_worker_queues(
+            state,
+            worker_index,
+            pid,
+            result_will_rotate=state.parallelism == 1
+            and self._max_worker_retries > 0
+            and "rotation" not in _disabled_strategies()
+            and not (pending is not None and pending.value),
+        ):
+            return
         # Determine which seq the worker was ACTIVELY processing at the
         # moment of death (the likely culprit), versus innocent bystanders.
         #
@@ -1174,8 +1227,6 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             state, worker_index, pid, exitcode, to_consider, culprit_seq
         )
 
-        worker_id = state.worker_ids[worker_index]
-        pending = self._service_pending.get(worker_id)
         if pending is not None and pending.value:
             # Result-queue recovery cannot repair a control queue whose writer
             # died mid-message. Fail this execution instead of reusing it.
@@ -1608,7 +1659,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                 # Shutdown requested; don't wait forever for dead workers.
                 break
             try:
-                item = self._queue_get(state.result_queue, timeout=0.05)
+                item = self._get_result(state, timeout=0.05)
             except queue.Empty:
                 if _DEBUG:
                     now = time.monotonic_ns()
@@ -1921,14 +1972,21 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             drain_start = time.time()
             drain_timeout = _HARD_DRAIN_TIMEOUT if hard else _GRACEFUL_DRAIN_TIMEOUT
             drained_total = 0
+            drain_failed = False
             while time.time() - drain_start < drain_timeout:
                 drained_any = False
                 try:
                     # Drain results with timeout - get() returns immediately if items available
                     while True:
                         try:
-                            item = self._queue_get(state.result_queue, timeout=0.1)
-                        except (FileNotFoundError, EOFError, OSError, ValueError):
+                            item = self._get_result(state, timeout=0.1)
+                        except (
+                            FileNotFoundError,
+                            EOFError,
+                            OSError,
+                            ValueError,
+                            QueueTransportError,
+                        ):
                             # The result queue's underlying fd may vanish if workers
                             # die abruptly (torch shared memory handles). At shutdown
                             # we just stop draining and proceed with tear-down.
@@ -1936,6 +1994,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                                 f"_shutdown_workers: op[{op_idx}] result_queue get() "
                                 + "failed; worker likely exited"
                             )
+                            drain_failed = True
                             break
                         # Skip in-flight watchdog signals — they aren't results,
                         # and we're tearing everything down anyway so there's
@@ -1955,7 +2014,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                 except queue.Empty:
                     pass
 
-                if not drained_any and state.inflight.is_zero():
+                if drain_failed or (not drained_any and state.inflight.is_zero()):
                     break
                 # Work dispatched to dead workers stays "in flight" forever;
                 # once none are left alive nothing more can arrive.
@@ -2106,7 +2165,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             try:
                 queue_.put(command, timeout=0.1)
                 return
-            except ValueError:
+            except (ValueError, QueueTransportError):
                 # Queue was closed - only silently return if we're in shutdown
                 if self._workers_shutdown:
                     return
@@ -2129,7 +2188,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                         next_queue = self._next_queue_for(state)
                         for _ in range(3):
                             try:
-                                item = self._queue_get_nowait(state.result_queue)
+                                item = self._get_result(state)
                                 state.pump_timer.note("batches_completed")
                                 with state.pump_timer.measure("result_handle"):
                                     self._handle_result(
@@ -2291,7 +2350,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
     def _handle_result(
         self,
         state: _ProcessOperatorState,
-        result: RunnerResult,
+        result: RunnerResult | _RelaxSignal,
         next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
         context: ConcurrentRunContext,
     ) -> None:
@@ -2356,6 +2415,23 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             state.inflight.try_decrement()
         super()._handle_result(state, result, next_queue, context)
 
+    def _get_result(
+        self, state: _ProcessOperatorState, timeout: float | None = None
+    ) -> RunnerResult | _RelaxSignal:
+        """Read from the published result queue, retrying an aborted retired queue."""
+        while True:
+            q = state.result_queue
+            try:
+                return (
+                    self._queue_get_nowait(q)
+                    if timeout is None
+                    else self._queue_get(q, timeout=timeout)
+                )
+            except QueueTransportError:
+                if q is state.result_queue:
+                    raise
+                # Rotation publishes the replacement before waking old readers.
+
     def _wait_for_result(
         self,
         state: _ProcessOperatorState,
@@ -2365,7 +2441,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
     ) -> RunnerResult:
         while True:
             try:
-                item = self._queue_get(state.result_queue, timeout=0.1)
+                item = self._get_result(state, timeout=0.1)
             except queue.Empty:
                 if context.stop_event.is_set():
                     # Shutdown requested - return empty result to allow graceful exit.

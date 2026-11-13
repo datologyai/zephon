@@ -482,6 +482,11 @@ def _shutdown_process(
     already_exhausted: bool = False,
 ) -> None:
     """Send SHUTDOWN, drain queue, escalate to SIGTERM/SIGKILL, close IPC."""
+    # Items still queued were never ACKed, so drop them: abort wakes a subprocess
+    # blocked on a full queue at once, replacing the drain below.
+    if isinstance(data_q, NamedQueue) and data_q.supports_abort:
+        data_q.abort()
+        already_exhausted = True
     try:
         main_conn.send((_SHUTDOWN, None))
     except (BrokenPipeError, OSError):
@@ -649,6 +654,8 @@ class MTPPipeline:
                 return
             if not self._process.is_alive():
                 exitcode = self._process.exitcode
+                if self._process.pid is not None:
+                    self._data_q.check_dead_process(self._process.pid)
                 print(
                     "\n"
                     + "!" * 78
@@ -674,6 +681,8 @@ class MTPPipeline:
         prefetch: _Prefetcher,
     ) -> None:
         """Ensure subprocess is shut down — used by Finalize."""
+        if isinstance(data_q, NamedQueue):
+            data_q.abort()
         prefetch.stop()
         _shutdown_process(process, main_conn, data_q)
 
@@ -891,5 +900,7 @@ class MTPPipeline:
         self._closed = True
         self._watchdog_stop.set()
         self._finalizer.cancel()
+        # A partial frame ignores get() timeouts; wake it before joining prefetch.
+        self._data_q.abort()
         self._prefetch.stop()
         _shutdown_process(self._process, self._main_conn, self._data_q, self._exhausted)

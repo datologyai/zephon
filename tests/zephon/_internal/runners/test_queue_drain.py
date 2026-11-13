@@ -80,3 +80,36 @@ def test_thread_drain_times_reads_after_the_first() -> None:
     # The (slow) first read is untimed; the second read and the final empty
     # poll are inside idle_drain.
     assert 2 * _READ_NS <= timer.idle_drain_ns < int(first_s * 1e9)
+
+
+@pytest.mark.parametrize("runner_cls", [ThreadStageRunner, ProcessStageRunner])
+@pytest.mark.parametrize("wait", [False, True])
+def test_result_reads_use_queue_replacement_hook(
+    runner_cls: type[QueueDrainStageRunner[Any]], wait: bool
+) -> None:
+    items: list[Any] = ["replacement result"]
+    handled: list[Any] = []
+    if not wait and runner_cls._UNTIMED_FIRST_POLL:
+        items.insert(0, None)
+
+    class ReplacedQueueRunner(runner_cls):
+        def _get_result(self, state: Any, timeout: float | None = None) -> Any:
+            if not items:
+                raise queue.Empty
+            return items.pop(0)
+
+    class RetiredQueue:
+        def get_nowait(self) -> Any:
+            raise AssertionError("result hook must select the replacement queue")
+
+    runner = object.__new__(ReplacedQueueRunner)
+    runner._handle_result = lambda state, item, next_queue, ctx: handled.append(item)
+    state = SimpleNamespace(
+        result_queue=RetiredQueue(), pump_timer=PumpTimer(enabled=True)
+    )
+    if wait:
+        runner._await_one_result(state, None, SimpleNamespace(), timeout=0.1)
+    else:
+        runner._drain_results(state, None, SimpleNamespace())
+    assert handled == ["replacement result"]
+    assert state.pump_timer.batches_completed == 1
