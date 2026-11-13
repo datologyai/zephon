@@ -215,7 +215,7 @@ class _FrameWriter(_SocketWriter):
             self.pending.close()
             self.pending = None
 
-    def dumps(self, value: Any) -> bytes:
+    def dumps(self, value: object) -> bytes:
         assert self.pending is None, "Previous queue message was not sent"
         try:
             self.pending = EncodedMessage(value)
@@ -227,9 +227,11 @@ class _FrameWriter(_SocketWriter):
             ):
                 self.abort()
             elif isinstance(exc, IndexError):
+                # Stock _feed reads IndexError as "buffer empty" and would drop the item.
                 raise RuntimeError("Queue serialization failed") from exc
             raise
-        return b""  # The stock feeder must not retain the payload while idle.
+        # _feed hands this placeholder to send(); the real frame is self.pending.
+        return b""
 
     def send(self, payload: memoryview) -> None:
         message = self.pending
@@ -249,7 +251,7 @@ class _FrameWriter(_SocketWriter):
                 message.close()
 
 
-def _with_globals(function: Any, **bindings: Any) -> Any:
+def _with_globals(function: FunctionType, **bindings: object) -> FunctionType:
     """Bind a function to a private copy of its global namespace.
 
     Queue startup and feeding resolve their serializer through module globals.
@@ -277,7 +279,7 @@ class _FeederGlobals:
     def __init__(self, writer: _FrameWriter) -> None:
         self._feed = _with_globals(mp_queues.Queue._feed, _ForkingPickler=writer)
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> object:
         return getattr(mp_queues.Queue, name)
 
 
@@ -373,12 +375,16 @@ class NamedQueue(mp_queues.Queue):
         super()._reset(after_fork)  # type: ignore[attr-defined]
         state = getattr(self, "_transport_state", None)
         if state is not None:
+            reader, writer = self._reader, self._writer
+            # Only socketpair-backed queues carry transport state.
+            assert isinstance(reader, SocketConnection)
+            assert isinstance(writer, SocketConnection)
             self._frame_writer = _FrameWriter(
-                self._reader, self._writer, state, self._buffer, self._notempty
+                reader, writer, state, self._buffer, self._notempty
             )
             self._send_bytes = self._frame_writer.send
-            self._poll = self._reader.poll_readable
-            self._reader.close_guard = threading.Lock()
+            self._poll = reader.poll_readable
+            reader.close_guard = threading.Lock()
 
     # -- Feeder error detection ---------------------------------------------
 
@@ -699,6 +705,8 @@ class NamedQueue(mp_queues.Queue):
             super()._start_thread()  # type: ignore[attr-defined]
         else:
             assert self._frame_writer is not None
+            # Run CPython's own feeder loop, but with its `_ForkingPickler` name
+            # resolving to our _FrameWriter (FD-aware dumps() and send()).
             _with_globals(
                 mp_queues.Queue._start_thread, Queue=_FeederGlobals(self._frame_writer)
             )(self)
