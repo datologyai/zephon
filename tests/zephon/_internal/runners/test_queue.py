@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import errno
+import inspect
 import multiprocessing as mp
 import os
 import stat
@@ -355,6 +356,24 @@ def test_idle_reader_holds_no_process_lock(framed_queue):
     finally:
         thread.join(3)
     assert not thread.is_alive()
+
+
+def test_cpython_feeder_contract():
+    """Pin the CPython internals that socketpair NamedQueues hook into.
+
+    They keep CPython's feeder thread but hand it our write lock and send hook,
+    and abort() stops it with CPython's sentinel. If a new Python changes this
+    wiring, fail here instead of letting the queue misbehave silently.
+    """
+    stock = queue.mp_queues
+    feeder = stock.Queue._feed
+    assert " ".join(inspect.signature(feeder).parameters) == (
+        "buffer notempty send_bytes writelock reader_close writer_close "
+        "ignore_epipe onerror queue_sem"
+    )
+    assert "_sentinel" in feeder.__code__.co_names
+    hooks = {"_buffer", "_notempty", "_send_bytes", "_wlock", "_on_queue_feeder_error"}
+    assert hooks <= set(stock.Queue._start_thread.__code__.co_names)
 
 
 def test_buffered_receive_avoids_readiness_polls(framed_queue, monkeypatch):
