@@ -198,8 +198,10 @@ class _SocketWriter:
 class _FrameWriter(_SocketWriter):
     """Carry a serialized message and its owned FDs between the feeder's hooks.
 
-    Difference to CPython: also stands in for ``_feed``'s ``_ForkingPickler``, so
-    each item is encoded as a frame that can carry storage FDs.
+    Difference to CPython: stands in for both ``_feed``'s ``_ForkingPickler``
+    and its ``send_bytes``. It is not a pickler: ``_feed`` only calls
+    ``_ForkingPickler.dumps(obj)``, so this provides that one method and leaves
+    the actual pickling to EncodedMessage, which can carry storage FDs.
 
     Queue._feed calls dumps() before acquiring its write lock, then passes the
     returned bytes to send(). Bytes cannot carry descriptor ownership, so
