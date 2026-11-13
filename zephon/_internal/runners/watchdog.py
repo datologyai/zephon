@@ -22,13 +22,24 @@ The race is dramatically more likely under free-threaded Python
 (``PYTHON_GIL=0``) where ``_feed`` runs concurrently with the worker's
 main thread rather than cooperatively.
 
-Managed Linux socket queues track transaction owners. After a worker dies,
-shared result streams are checked for an interrupted transaction and aborted
-if their framing cannot be trusted. Their locks are never force-released.
-With one worker, queue rotation publishes a replacement before abort wakes
-readers of the old stream, allowing them to retry the new queue.
+Whatever the transport, the dead worker is respawned and its in-flight work
+resubmitted; only how the result queue is repaired differs.
 
-For other transports this module implements a tiered strategy chain:
+**Managed Linux socketpair queues** (``NamedQueue``'s default transport on
+Linux) record which process holds each lock. A worker that died outside a
+queue transfer (e.g. inside operator code) left every stream intact, so
+nothing needs repair. One that died mid-transfer may have left half a frame on
+the stream. Force-releasing its lock would let the next frame be glued onto
+that remainder, so these locks are never force-released:
+
+- One worker per op: rotate the result queue (publish a fresh one, then abort
+  the old one so readers blocked on it move over).
+- Any other stream cut off mid-transfer (a result queue shared by several
+  workers, or a task/service queue, which the process runner checks): abort
+  it and fail the run.
+
+**Other transports** (``"pipe"``, or socketpairs off Linux) have no owner
+tracking and use a tiered strategy chain:
 
 1. **Queue rotation** (``parallelism == 1`` only). Replace the result queue
    and abandon the old one. Readers already waiting on the old queue return
