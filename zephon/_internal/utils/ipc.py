@@ -21,9 +21,13 @@ import struct
 import sys
 import termios
 from multiprocessing.connection import Connection
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, overload
 
 if TYPE_CHECKING:
+    import threading
+    from collections.abc import Callable
+
+    from zephon._internal.utils.fd_transport import ReceivedMessage
     from zephon.options import IpcTransport
 
 DEFAULT_IPC_TRANSPORT: IpcTransport = "socketpair"
@@ -35,6 +39,9 @@ DEFAULT_MTP_BUFFER_BYTES = 8 * 1024 * 1024
 # Requested sizes already reported, so a fleet of queues warns once.
 _clamp_warned: set[int] = set()
 _LENGTH = struct.Struct("!i")
+# Negative values in that length prefix are markers, not lengths.
+_LARGE_FRAME = -1  # CPython: a frame over 2 GiB; its real length follows as a u64.
+_FD_FRAME = -2  # Zephon: an FD subframe follows (see fd_transport).
 
 
 class QueueTransportError(RuntimeError):
@@ -58,9 +65,27 @@ def _read_exact(sock: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
+@overload
 def read_frame(
-    sock: socket.socket, *, nonblocking_start: bool = False, fd_frame: Any = None
-) -> Any:
+    sock: socket.socket, *, nonblocking_start: bool = False, fd_frame: None = None
+) -> bytes | None: ...
+
+
+@overload
+def read_frame(
+    sock: socket.socket,
+    *,
+    nonblocking_start: bool = False,
+    fd_frame: Callable[[socket.socket], ReceivedMessage],
+) -> bytes | ReceivedMessage | None: ...
+
+
+def read_frame(
+    sock: socket.socket,
+    *,
+    nonblocking_start: bool = False,
+    fd_frame: Callable[[socket.socket], ReceivedMessage] | None = None,
+) -> bytes | ReceivedMessage | None:
     """Read one native frame, optionally delegating an FD extension to its decoder.
 
     nonblocking_start returns None only if the first read consumes no bytes.
@@ -78,9 +103,9 @@ def read_frame(
     if len(header) < 4:
         header += _read_exact(sock, 4 - len(header))
     size = _LENGTH.unpack(header)[0]
-    if size == -2 and fd_frame is not None:
+    if size == _FD_FRAME and fd_frame is not None:
         return fd_frame(sock)
-    if size == -1:
+    if size == _LARGE_FRAME:
         size = struct.unpack("!Q", _read_exact(sock, 8))[0]
     if size < 0 or size > sys.maxsize:
         raise QueueTransportError("Invalid queue frame length")
@@ -101,7 +126,7 @@ class SocketConnection(Connection):
     ) -> None:
         sock.setblocking(True)
         self.socket = sock
-        self.close_guard: Any = None
+        self.close_guard: threading.Lock | None = None
         self.close_requested = False
         super().__init__(sock.fileno(), readable=readable, writable=writable)
 
@@ -163,7 +188,7 @@ def readable_bytes(fd: int) -> int:
 
 def socketpair_connections(
     buffer_bytes: int | None = None,
-) -> tuple[Connection, Connection]:
+) -> tuple[SocketConnection, SocketConnection]:
     """Return a socketpair-backed ``(reader, writer)`` Connection pair.
 
     Mirrors ``multiprocessing.connection.Pipe``: ``duplex=False`` semantics

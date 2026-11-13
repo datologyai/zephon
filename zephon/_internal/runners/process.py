@@ -2350,7 +2350,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
     def _handle_result(
         self,
         state: _ProcessOperatorState,
-        result: RunnerResult,
+        result: RunnerResult | _RelaxSignal,
         next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
         context: ConcurrentRunContext,
     ) -> None:
@@ -2417,7 +2417,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
 
     def _get_result(
         self, state: _ProcessOperatorState, timeout: float | None = None
-    ) -> Any:
+    ) -> RunnerResult | _RelaxSignal:
         """Read from the published result queue, retrying an aborted retired queue."""
         while True:
             q = state.result_queue

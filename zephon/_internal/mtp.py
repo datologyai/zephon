@@ -482,7 +482,9 @@ def _shutdown_process(
     already_exhausted: bool = False,
 ) -> None:
     """Send SHUTDOWN, drain queue, escalate to SIGTERM/SIGKILL, close IPC."""
-    if isinstance(data_q, NamedQueue) and data_q._transport_state is not None:
+    # Items still queued were never ACKed, so drop them: abort wakes a subprocess
+    # blocked on a full queue at once, replacing the drain below.
+    if isinstance(data_q, NamedQueue) and data_q.supports_abort:
         data_q.abort()
         already_exhausted = True
     try:
