@@ -381,7 +381,11 @@ class _Handle:
 
 
 class _Unpickler(pickle.Unpickler):
-    """Resolve storage markers against this frame's descriptors and alias memo."""
+    """Resolve storage markers against this frame's descriptors and alias memo.
+
+    Difference to CPython: find_class() maps the slot marker to this message's
+    rebuild(); every other global resolves as usual.
+    """
 
     def __init__(self, message: ReceivedMessage) -> None:
         super().__init__(io.BytesIO(message.payload))

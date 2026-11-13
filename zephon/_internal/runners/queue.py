@@ -121,6 +121,9 @@ def _acquire(
 class _WriteLock:
     """Add abort checks and owner tracking to the queue's multiprocessing lock.
 
+    Difference to CPython: stands in for ``Queue._wlock``, the lock CPython's
+    ``_feed`` holds around each frame, so a writer dying mid-frame is detectable.
+
     The underlying lock still excludes concurrent writers across processes.
     This adapter checks shared abort state during acquisition so a feeder does
     not wait forever on a lock abandoned by a dead writer. While held, it also
@@ -151,7 +154,11 @@ class _WriteLock:
 
 
 class _SocketWriter:
-    """Abort the shared stream before a failed feeder releases its write lock."""
+    """Abort the shared stream before a failed feeder releases its write lock.
+
+    Difference to CPython: stands in for ``Queue._send_bytes``. The stock feeder
+    reports a failed send and keeps writing after the partial frame.
+    """
 
     def __init__(
         self,
@@ -339,6 +346,11 @@ class NamedQueue(mp_queues.Queue):
         transport: IpcTransport = DEFAULT_IPC_TRANSPORT,
         buffer_bytes: int | None = DEFAULT_IPC_BUFFER_BYTES,
     ) -> None:
+        """Create the queue; see the class docstring for the transports.
+
+        Difference to CPython: swaps the pipe for a socketpair and wraps the locks
+        (SafeSemLock, plus _WriteLock on Linux) for cleanup and abort.
+        """
         if transport not in get_args(IpcTransport):
             raise ValueError(
                 f"Unknown queue transport {transport!r}; expected 'socketpair' or 'pipe'"
@@ -372,6 +384,11 @@ class NamedQueue(mp_queues.Queue):
             self._wlock = _WriteLock(self._wlock, self._transport_state)
 
     def _reset(self, after_fork: bool = False) -> None:
+        """Rebind the transport hooks after construction, fork or unpickling.
+
+        Difference to CPython: on socketpair queues, sends go through our frame
+        writer (which aborts the stream on a failed send) and reader close is guarded.
+        """
         super()._reset(after_fork)  # type: ignore[attr-defined]
         state = getattr(self, "_transport_state", None)
         if state is not None:
@@ -452,6 +469,9 @@ class NamedQueue(mp_queues.Queue):
     def _on_queue_feeder_error(self, e: BaseException, obj: object) -> None:
         """Called by CPython's ``Queue._feed`` thread on serialization failure.
 
+        Difference to CPython: the stock hook only prints the traceback and the
+        item is lost; here it is retried or surfaced to the consumer.
+
         For SHM-related errors (``ENOSPC``), retries indefinitely with
         exponential-jittered backoff — blocking the ``_feed`` thread provides
         natural backpressure.  The item is re-queued via ``appendleft`` so
@@ -521,7 +541,12 @@ class NamedQueue(mp_queues.Queue):
             # Queue full or re-queue failed — wait again
 
     def get(self, block: bool = True, timeout: float | None = None) -> Any:
-        """Retrieve an item, raising on feeder-thread errors."""
+        """Retrieve an item, raising on feeder-thread errors.
+
+        Difference to CPython: socketpair queues read via _get_frame(), which holds
+        the read lock only while a frame moves and aborts on a cut-off frame
+        instead of blocking without a timeout.
+        """
         state = self._transport_state
         if state is None:
             item = super().get(block, timeout)
@@ -551,7 +576,11 @@ class NamedQueue(mp_queues.Queue):
     def put(
         self, obj: object, block: bool = True, timeout: float | None = None
     ) -> None:
-        """Enqueue asynchronously, observing terminal abort during capacity waits."""
+        """Enqueue asynchronously, observing terminal abort during capacity waits.
+
+        Difference to CPython: the capacity wait re-checks the abort flag, because
+        socket shutdown cannot wake a process blocked on the semaphore.
+        """
         state = self._transport_state
         if state is None:
             return super().put(obj, block, timeout)
@@ -714,7 +743,11 @@ class NamedQueue(mp_queues.Queue):
             thread.name = f"QueueFeederThread[{self._name_label}]"
 
     def close(self) -> None:
-        """Close the queue and clean up all internal semaphores."""
+        """Close the queue and clean up all internal semaphores.
+
+        Difference to CPython: a broken stream is aborted first so the feeder does
+        not block on it, and the named semaphores are released explicitly.
+        """
         try:
             if self._transport_state is not None and self._transport_state[_BROKEN]:
                 self.abort()
@@ -732,10 +765,19 @@ class NamedQueue(mp_queues.Queue):
     # -- Pickling (process spawning only) -----------------------------------
 
     def __getstate__(self) -> Any:  # noqa: D401 - custom pickle payload
+        """Pickle the queue for a spawned child.
+
+        Difference to CPython: also ships the queue name and the transport state.
+        """
         base_state = super().__getstate__()  # type: ignore[attr-defined]
         return (self._name_label, self._transport_state, base_state)
 
     def __setstate__(self, state: Any) -> None:
+        """Rebuild the queue in a spawned child.
+
+        Difference to CPython: socketpair queues also register the after-fork
+        reset, which the stock queue only registers in ``__init__``.
+        """
         self._name_label, self._transport_state, base_state = state
         super().__setstate__(base_state)  # type: ignore[attr-defined]
         if self._transport_state is not None:

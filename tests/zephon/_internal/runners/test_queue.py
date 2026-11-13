@@ -423,6 +423,8 @@ def test_cpython_feeder_contract():
     assert "_sentinel" in feeder.__code__.co_names
     hooks = {"_buffer", "_notempty", "_send_bytes", "_wlock", "_on_queue_feeder_error"}
     assert hooks <= set(stock.Queue._start_thread.__code__.co_names)
+    # get() waits through the _poll that _reset binds to the (socket) reader.
+    assert "_poll" in stock.Queue._reset.__code__.co_names
     # The FD codec rebinds these module globals of _feed and _start_thread per queue.
     assert "_ForkingPickler" in feeder.__code__.co_names
     assert "Queue" in stock.Queue._start_thread.__code__.co_names
