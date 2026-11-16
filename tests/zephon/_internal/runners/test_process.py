@@ -2325,3 +2325,46 @@ def test_worker_teardown_uses_shutdown_budget(
     if fail_setup:
         assert results.get_nowait().error.message == "setup failed"
     assert results.empty()
+
+
+# ---------------------------------------------------------------------------
+# Owner death: idle workers exit instead of waiting forever
+# ---------------------------------------------------------------------------
+
+
+def test_get_command_checks_parent_while_idle() -> None:
+    command = object()
+    task_queue = Mock()
+    task_queue.get.side_effect = [queue.Empty, command]
+    config = SimpleNamespace(task_queue=task_queue)
+    with patch.object(process_mod, "_exit_if_parent_died") as check:
+        assert process_mod._get_command(config) is command
+    check.assert_called_once_with(config)
+    task_queue.get.assert_called_with(timeout=process_mod._PARENT_POLL_S)
+
+
+def test_acquire_result_permit_checks_parent_while_blocked() -> None:
+    backpressure = Mock()
+    backpressure.acquire.side_effect = [False, True]
+    config = SimpleNamespace(backpressure=backpressure)
+    with patch.object(process_mod, "_exit_if_parent_died") as check:
+        process_mod._acquire_result_permit(config)
+    check.assert_called_once_with(config)
+    backpressure.acquire.assert_called_with(timeout=process_mod._PARENT_POLL_S)
+
+
+def test_worker_exits_only_once_parent_is_gone(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = SimpleNamespace(worker_id=3, stage_name="tokenize")
+    parent = Mock(pid=4321)
+    with patch("multiprocessing.parent_process", return_value=parent):
+        with patch.object(os, "_exit") as exit_:
+            parent.is_alive.return_value = True
+            process_mod._exit_if_parent_died(config)
+            exit_.assert_not_called()
+
+            parent.is_alive.return_value = False
+            process_mod._exit_if_parent_died(config)
+            exit_.assert_called_once_with(1)
+    assert "parent process 4321 is gone" in capsys.readouterr().err
