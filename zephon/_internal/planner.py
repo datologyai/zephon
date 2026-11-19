@@ -3,6 +3,8 @@
 
 """Stage planner that converts logical graphs into executable plans."""
 
+import dataclasses
+
 from zephon._internal.graph import Graph, Node, Plan, Stage
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.map_transform import MapBatchTransform, MapTransform
@@ -227,6 +229,14 @@ class Planner:
         return result if result else [stage]
 
     def _with_replay_filters(self, graph: Graph) -> list[Node]:
+        """Return the plan's node order with a ReplayFilter before each Batch or at the tail.
+
+        The user's graph is left untouched. The Pipeline caches plans and
+        drops them when the graph changes, so a ReplayFilter written into the graph
+        would survive that reset and end up in the middle of the chain once more
+        ops are added. On restore, two filters on one lane drop every record after the
+        replay cursor.
+        """
         nodes: list[Node] = []
         has_batch = False
         for node in graph.nodes:
@@ -246,7 +256,8 @@ class Planner:
                         parallelism=dop,
                     )
                     # TODO: Explore co-locating ReplayFilter within Batch once we have explicit pre-batch hooks.
-                    node.inputs = [filter_node]
+                    # Rewire a copy so the user's Batch node keeps its original inputs.
+                    node = dataclasses.replace(node, inputs=[filter_node])
                     nodes.append(filter_node)
                 nodes.append(node)
             else:
@@ -266,5 +277,4 @@ class Planner:
                 )
                 nodes.append(filter_node)
 
-        graph.nodes = nodes
         return nodes
