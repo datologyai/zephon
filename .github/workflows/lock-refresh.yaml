@@ -18,9 +18,14 @@ jobs:
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@v4
+    # Key caches per runner image: wheels built from source link that image's
+    # glibc. $ImageOS (ubuntu24, ubuntu26, ...) is not in the `env` context.
+    - name: Expose runner image for cache keys
+      run: echo "IMAGE_OS=${ImageOS:?}" >> "$GITHUB_ENV"
     - uses: astral-sh/setup-uv@v6
       with:
         version: "0.11.15"
+        cache-suffix: ${{ env.IMAGE_OS }}
     - name: Upgrade lockfile
       run: uv lock --upgrade
     - name: Open PR
