@@ -48,15 +48,20 @@ jobs:
         python-version: ${{ matrix.python_version }}
         allow-prereleases: true
         freethreaded: ${{ endsWith(matrix.python_version, 't') }}
+    # Key caches per runner image: wheels built from source link that image's
+    # glibc. $ImageOS (ubuntu24, ubuntu26, ...) is not in the `env` context.
+    - name: Expose runner image for cache keys
+      run: echo "IMAGE_OS=${ImageOS:?}" >> "$GITHUB_ENV"
     - uses: astral-sh/setup-uv@v6
       with:
         version: "0.11.15"
+        cache-suffix: ${{ env.IMAGE_OS }}
     - name: Restore venv cache for slow builds
       if: startsWith(matrix.python_version, '3.14') || endsWith(matrix.python_version, 't')
       uses: actions/cache/restore@v4
       with:
         path: .venv
-        key: venv-unit-${{ matrix.python_version }}-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+        key: venv-unit-${{ matrix.python_version }}-${{ runner.os }}-${{ env.IMAGE_OS }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
     - name: Setup
       run: |
         set -ex
@@ -101,7 +106,7 @@ jobs:
       uses: actions/cache/save@v4
       with:
         path: .venv
-        key: venv-unit-${{ matrix.python_version }}-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+        key: venv-unit-${{ matrix.python_version }}-${{ runner.os }}-${{ env.IMAGE_OS }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
   tokenizers-v1:
     name: Tokenizers v1 (${{ matrix.python_version }}, ${{ matrix.tokenizers_version }})
     timeout-minutes: 15
@@ -117,9 +122,12 @@ jobs:
         python-version: ${{ matrix.python_version }}
         allow-prereleases: true
         freethreaded: ${{ endsWith(matrix.python_version, 't') }}
+    - name: Expose runner image for cache keys
+      run: echo "IMAGE_OS=${ImageOS:?}" >> "$GITHUB_ENV"
     - uses: astral-sh/setup-uv@v6
       with:
         version: "0.11.15"
+        cache-suffix: ${{ env.IMAGE_OS }}
     - name: Setup tokenizers v1 and Transformers parity reference
       run: |
         uv sync --python ${{ matrix.python_version }} --group dev
@@ -159,9 +167,12 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: "3.10"
+    - name: Expose runner image for cache keys
+      run: echo "IMAGE_OS=${ImageOS:?}" >> "$GITHUB_ENV"
     - uses: astral-sh/setup-uv@v6
       with:
         version: "0.11.15"
+        cache-suffix: ${{ env.IMAGE_OS }}
     - name: Setup
       run: |
         set -ex
@@ -194,9 +205,12 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: "3.12"
+    - name: Expose runner image for cache keys
+      run: echo "IMAGE_OS=${ImageOS:?}" >> "$GITHUB_ENV"
     - uses: astral-sh/setup-uv@v6
       with:
         version: "0.8.17"
+        cache-suffix: ${{ env.IMAGE_OS }}
     - name: Setup
       run: uv sync --python 3.12 --group dev
     - name: Run Packaging Tests
@@ -211,9 +225,12 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: "3.12"
+    - name: Expose runner image for cache keys
+      run: echo "IMAGE_OS=${ImageOS:?}" >> "$GITHUB_ENV"
     - uses: astral-sh/setup-uv@v6
       with:
         version: "0.11.15"
+        cache-suffix: ${{ env.IMAGE_OS }}
     - name: Setup
       run: |
         set -ex

@@ -23,9 +23,14 @@ jobs:
         # Default-token pushes don't retrigger CI; a PAT here does. Must be
         # a DEPENDABOT secret (Dependabot-triggered runs don't see Actions ones).
         token: ${{ secrets.LOCK_REFRESH_TOKEN || github.token }}
+    # Key caches per runner image: wheels built from source link that image's
+    # glibc. $ImageOS (ubuntu24, ubuntu26, ...) is not in the `env` context.
+    - name: Expose runner image for cache keys
+      run: echo "IMAGE_OS=${ImageOS:?}" >> "$GITHUB_ENV"
     - uses: astral-sh/setup-uv@v6
       with:
         version: "0.11.15"
+        cache-suffix: ${{ env.IMAGE_OS }}
     - name: Restore pyproject.toml from base
       run: |
         set -ex

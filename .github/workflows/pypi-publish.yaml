@@ -35,9 +35,14 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: "3.12"
+    # Key caches per runner image: wheels built from source link that image's
+    # glibc. $ImageOS (ubuntu24, ubuntu26, ...) is not in the `env` context.
+    - name: Expose runner image for cache keys
+      run: echo "IMAGE_OS=${ImageOS:?}" >> "$GITHUB_ENV"
     - uses: astral-sh/setup-uv@v6
       with:
         version: "0.8.17"
+        cache-suffix: ${{ env.IMAGE_OS }}
     - name: Build sdist and wheel
       run: uv build
     - name: Check version matches tag
