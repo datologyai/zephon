@@ -8497,8 +8497,8 @@ requires-dist = [
     { name = "zephon", extras = ["parquet"], marker = "extra == 'lance'" },
     { name = "zephon", extras = ["streaming"], marker = "extra == 'mds'" },
     { name = "zephon", extras = ["streaming"], marker = "extra == 'mosaic'" },
-    { name = "zstd", marker = "extra == 'litdata'" },
-    { name = "zstd", marker = "extra == 'streaming'" },
+    { name = "zstd", marker = "extra == 'litdata'", specifier = ">=1.5.7.1" },
+    { name = "zstd", marker = "extra == 'streaming'", specifier = ">=1.5.7.1" },
 ]
 provides-extras = ["parquet", "vortex", "array-record", "lance", "cloud", "litdata", "streaming", "mosaic", "mds", "hf", "ray", "docs"]
 
@@ -8526,7 +8526,7 @@ test = [
     { name = "torchdata", specifier = ">=0.11.0" },
     { name = "transformers", specifier = ">=4.52.0" },
     { name = "zephon", extras = ["ray"] },
-    { name = "zstd", specifier = ">=1.5.0" },
+    { name = "zstd", specifier = ">=1.5.7.1" },
 ]
 
 [[package]]
