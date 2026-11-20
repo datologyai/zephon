@@ -11,7 +11,8 @@ in turn. If you want to know even more about why we built Zephon (and why you mi
 about the order your data arrives in), :doc:`why_zephon` has you covered. The
 Internals section opens Zephon up and describes the machinery behind the guarantees the
 guide makes, and the API reference documents the public classes and functions that the
-guide refers to.
+guide refers to. Coming from Mosaic Streaming or Grain? :doc:`migrating/index` maps what you
+already know onto Zephon.
 
 .. toctree::
    :maxdepth: 2
@@ -23,6 +24,12 @@ guide refers to.
    worksources/index
    pipelines/index
    training_integrations
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Migrating to Zephon
+
+   migrating/index
 
 .. toctree::
    :maxdepth: 1
