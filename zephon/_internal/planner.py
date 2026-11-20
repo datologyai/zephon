@@ -237,44 +237,41 @@ class Planner:
         ops are added. On restore, two filters on one lane drop every record after the
         replay cursor.
         """
+        # Only this method creates ReplayFilter nodes, and it never adds them to the graph.
+        assert not any(isinstance(node.op, ReplayFilter) for node in graph.nodes), (
+            "ReplayFilter nodes are added by the planner and must not appear in the graph"
+        )
         nodes: list[Node] = []
         has_batch = False
         for node in graph.nodes:
             if isinstance(node.op, Batch):
                 has_batch = True
-                has_filter = any(
-                    isinstance(inp.op, ReplayFilter) for inp in node.inputs
+                # ReplayFilter must be single-threaded per stage to maintain per-lane equality replay semantics.
+                dop = 1
+                filter_node = Node(
+                    name=f"{node.name}_replay_filter",
+                    op=ReplayFilter(),
+                    inputs=list(node.inputs),
+                    placement=node.placement,
+                    parallelism=dop,
                 )
-                if not has_filter:
-                    # ReplayFilter must be single-threaded per stage to maintain per-lane equality replay semantics.
-                    dop = 1
-                    filter_node = Node(
-                        name=f"{node.name}_replay_filter",
-                        op=ReplayFilter(),
-                        inputs=list(node.inputs),
-                        placement=node.placement,
-                        parallelism=dop,
-                    )
-                    # TODO: Explore co-locating ReplayFilter within Batch once we have explicit pre-batch hooks.
-                    # Rewire a copy so the user's Batch node keeps its original inputs.
-                    node = dataclasses.replace(node, inputs=[filter_node])
-                    nodes.append(filter_node)
-                nodes.append(node)
-            else:
-                nodes.append(node)
+                # TODO: Explore co-locating ReplayFilter within Batch once we have explicit pre-batch hooks.
+                # Rewire a copy so the user's Batch node keeps its original inputs.
+                node = dataclasses.replace(node, inputs=[filter_node])
+                nodes.append(filter_node)
+            nodes.append(node)
 
         if not has_batch and nodes:
             tail = nodes[-1]
-            if not isinstance(tail.op, ReplayFilter):
-                # Keep replay filtering single-threaded at the tail.
-                dop = 1
-                filter_node = Node(
-                    name=f"{tail.name}_replay_filter",
-                    op=ReplayFilter(),
-                    inputs=[tail],
-                    placement=tail.placement,
-                    parallelism=dop,
-                )
-                nodes.append(filter_node)
+            # Keep replay filtering single-threaded at the tail.
+            dop = 1
+            filter_node = Node(
+                name=f"{tail.name}_replay_filter",
+                op=ReplayFilter(),
+                inputs=[tail],
+                placement=tail.placement,
+                parallelism=dop,
+            )
+            nodes.append(filter_node)
 
         return nodes
