@@ -15,12 +15,15 @@ from __future__ import annotations
 import array
 import fcntl
 import socket
+import struct
 import sys
 import termios
 from multiprocessing.connection import Connection
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import threading
+
     from zephon.options import IpcTransport
 
 DEFAULT_IPC_TRANSPORT: IpcTransport = "socketpair"
@@ -31,6 +34,112 @@ DEFAULT_MTP_BUFFER_BYTES = 8 * 1024 * 1024
 
 # Requested sizes already reported, so a fleet of queues warns once.
 _clamp_warned: set[int] = set()
+_LENGTH = struct.Struct("!i")
+# Negative values in that length prefix are markers, not lengths.
+_LARGE_FRAME = -1  # CPython: a frame over 2 GiB; its real length follows as a u64.
+
+
+class QueueTransportError(RuntimeError):
+    """A queue stream is no longer safe to reuse."""
+
+
+def _read_exact(sock: socket.socket, size: int) -> bytes:
+    if not size:
+        return b""
+    result = sock.recv(size, socket.MSG_WAITALL)
+    if len(result) == size:
+        return result
+    chunks = []
+    while len(result) < size:
+        if not result:
+            raise QueueTransportError("Queue ended inside a message")
+        chunks.append(result)
+        size -= len(result)
+        result = sock.recv(size, socket.MSG_WAITALL)
+    chunks.append(result)
+    return b"".join(chunks)
+
+
+def read_frame(sock: socket.socket, *, nonblocking_start: bool = False) -> bytes | None:
+    """Read one complete native multiprocessing frame from a socket.
+
+    nonblocking_start returns None only if the first read consumes no bytes.
+    After any progress the reader must finish the frame or fail the stream;
+    returning an empty-queue result would lose the next frame boundary.
+    """
+    try:
+        header = sock.recv(4, socket.MSG_DONTWAIT if nonblocking_start else 0)
+    except BlockingIOError:
+        if nonblocking_start:
+            return None  # No bytes consumed; the queue can wait outside its lock.
+        raise
+    if not header:
+        raise QueueTransportError("Queue ended inside a message")
+    if len(header) < 4:
+        header += _read_exact(sock, 4 - len(header))
+    size = _LENGTH.unpack(header)[0]
+    if size == _LARGE_FRAME:
+        size = struct.unpack("!Q", _read_exact(sock, 8))[0]
+    if size < 0 or size > sys.maxsize:
+        raise QueueTransportError("Invalid queue frame length")
+    return _read_exact(sock, size)
+
+
+class SocketConnection(Connection):
+    """Expose a socket through Connection while keeping a single FD owner.
+
+    Difference to CPython: a stock Connection holds only a raw FD; this keeps the
+    socket for sendmsg/recvmsg/shutdown and can defer close during a read.
+
+    Connection's byte methods and the socket's ancillary methods use the same
+    descriptor; only the socket closes it. A framed reader holds close_guard
+    during a receive. Concurrent close requests are deferred until that reader
+    unwinds, preventing descriptor reuse underneath an active socket operation.
+    """
+
+    def __init__(
+        self, sock: socket.socket, *, readable: bool = True, writable: bool = True
+    ) -> None:
+        sock.setblocking(True)
+        self.socket = sock
+        self.close_guard: threading.Lock | None = None
+        self.close_requested = False
+        super().__init__(sock.fileno(), readable=readable, writable=writable)
+
+    def _close(self) -> None:
+        """Close the descriptor.
+
+        Difference to CPython: closes through the socket, the FD's only owner.
+        """
+        self.socket.close()
+
+    def close(self) -> None:
+        """Defer feeder close until an active framed reader has unwound.
+
+        Difference to CPython: the stock close is immediate, so the FD number
+        could be reused while another thread is still inside recv on it.
+        """
+        self.close_requested = True
+        if self.close_guard is None:
+            super().close()
+        elif self.close_guard.acquire(False):
+            try:
+                super().close()
+            finally:
+                self.close_guard.release()
+
+    def __getstate__(self) -> tuple[socket.socket, bool, bool]:
+        """Pickle the connection for a spawned child.
+
+        Difference to CPython: the stock reducer only handles plain Connections;
+        shipping the socket makes the child rebuild a working SocketConnection.
+        """
+        return self.socket, self.readable, self.writable
+
+    def __setstate__(self, state: tuple[socket.socket, bool, bool]) -> None:
+        """Rebuild around the unpickled socket."""
+        sock, readable, writable = state
+        self.__init__(sock, readable=readable, writable=writable)
 
 
 def _warn_buffer_shortfall(granted: int, requested: int, exc: OSError | None) -> None:
@@ -58,7 +167,7 @@ def readable_bytes(fd: int) -> int:
 
 def socketpair_connections(
     buffer_bytes: int | None = None,
-) -> tuple[Connection, Connection]:
+) -> tuple[SocketConnection, SocketConnection]:
     """Return a socketpair-backed ``(reader, writer)`` Connection pair.
 
     Mirrors ``multiprocessing.connection.Pipe``: ``duplex=False`` semantics
@@ -91,6 +200,6 @@ def socketpair_connections(
     # raw os.read/os.write with no EAGAIN handling. Mirrors stdlib Pipe().
     read_sock.setblocking(True)
     write_sock.setblocking(True)
-    reader = Connection(read_sock.detach(), writable=False)
-    writer = Connection(write_sock.detach(), readable=False)
+    reader = SocketConnection(read_sock, writable=False)
+    writer = SocketConnection(write_sock, readable=False)
     return reader, writer

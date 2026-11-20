@@ -37,6 +37,34 @@ from zephon._internal.runners.queue import NamedQueue, QueueFeederError
 from zephon.types import ContributorRef, SampleBatch, SampleCursor, SampleRecord
 
 
+@pytest.mark.parametrize("finalize", [False, True])
+def test_shutdown_aborts_before_joining_prefetch(
+    monkeypatch: pytest.MonkeyPatch, finalize: bool
+) -> None:
+    pipeline = object.__new__(MTPPipeline)
+    pipeline._closed = False
+    pipeline._exhausted = False
+    pipeline._watchdog_stop = threading.Event()
+    pipeline._finalizer = mock.Mock()
+    pipeline._process, pipeline._main_conn = mock.Mock(), mock.Mock()
+    pipeline._data_q = mock.Mock(spec=NamedQueue)
+    pipeline._prefetch = mock.Mock()
+    pipeline._prefetch.stop.side_effect = pipeline._data_q.abort.assert_called_once_with
+    shutdown = mock.Mock()
+    monkeypatch.setattr(mtp, "_shutdown_process", shutdown)
+    if finalize:
+        MTPPipeline._static_close(
+            pipeline._process,
+            pipeline._main_conn,
+            pipeline._data_q,
+            pipeline._prefetch,
+        )
+    else:
+        pipeline.close()
+    pipeline._prefetch.stop.assert_called_once_with()
+    shutdown.assert_called_once()
+
+
 @pytest.mark.parametrize("tag", [_LOCAL_CHECKPOINT, _CHECKPOINT])
 def test_checkpoint_control_aggregates_only_on_explicit_request(tag: int) -> None:
     engine, connection = mock.Mock(), mock.Mock()
