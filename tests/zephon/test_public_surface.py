@@ -90,6 +90,7 @@ EXPECTED_ALL = {
     "zephon.work": [
         "ComponentOrder",
         "ConstantSchedule",
+        "MixturePhase",
         "MixtureReadConfig",
         "MixtureReadMode",
         "MixtureSchedule",
@@ -97,6 +98,7 @@ EXPECTED_ALL = {
         "PhaseConstantSchedule",
         "PhaseLinearSchedule",
         "StaticMixtureWorkSource",
+        "StepMixturePlan",
         "TokenEstimation",
         "WorkChunk",
         "WorkSource",
@@ -278,9 +280,11 @@ EXPECTED_ALL = {
     ],
     "zephon.work.curriculum": [
         "ConstantSchedule",
+        "MixturePhase",
         "MixtureSchedule",
         "PhaseConstantSchedule",
         "PhaseLinearSchedule",
+        "StepMixturePlan",
     ],
     "zephon.work.mixture": [
         "MixtureSpec",
