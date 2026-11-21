@@ -10,17 +10,27 @@ from zephon.work.base import (
     WorkChunk,
     WorkSource,
 )
+from zephon.work.curriculum import (
+    ConstantSchedule,
+    MixtureSchedule,
+    PhaseConstantSchedule,
+    PhaseLinearSchedule,
+)
 from zephon.work.mixture import MixtureSpec
 from zephon.work.static_mixture import StaticMixtureWorkSource
 from zephon.work.token_estimation import TokenEstimation
 
 __all__ = [
     "ComponentOrder",
+    "ConstantSchedule",
     "MixtureReadConfig",
     "MixtureReadMode",
-    "WorkChunk",
-    "WorkSource",
+    "MixtureSchedule",
     "MixtureSpec",
+    "PhaseConstantSchedule",
+    "PhaseLinearSchedule",
     "StaticMixtureWorkSource",
     "TokenEstimation",
+    "WorkChunk",
+    "WorkSource",
 ]
