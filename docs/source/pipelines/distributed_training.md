@@ -198,8 +198,8 @@ start of a run because they cannot be changed later.
    but not more.
 2. **Keep `canonical_replicas` divisible by each `dp_degree` you use.** Otherwise some
    data-parallel groups own more streams than others, which unbalances the load between
-   them. Zephon warns when this happens, and both of our reference integrations check for
-   this condition and refuse to start if it isn't satisfied.
+   them. Zephon warns when this happens (and raises when `global_batch_size` is set), and
+   both of our reference integrations refuse to start if it isn't satisfied.
    [Highly composite numbers](https://en.wikipedia.org/wiki/Highly_composite_number) are
    your friend here.
 3. **Consume a multiple of `canonical_replicas` batches per optimizer step.** Each lane
@@ -212,9 +212,9 @@ start of a run because they cannot be changed later.
    batches from each of the eight lanes. A step that consumes only four batches contains
    batches from just four of the lanes, and which four lanes those are depends on the
    current topology, so a run that is resumed on a different topology would group its
-   samples into steps differently than the original run would have. Our reference
-   integrations check for this condition at startup and will raise an error if this
-   doesn't hold.
+   samples into steps differently than the original run would have. Set
+   `Pipeline.options(global_batch_size=...)` and Zephon checks this condition when the
+   pipeline starts, suggesting settings that satisfy it.
 
 **Sharing a node.** Because every rank that loads data will need to run its own
 `Pipeline`, keep in mind that a node that has 8 GPUs will be running 8 independent
