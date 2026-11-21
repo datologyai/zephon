@@ -114,6 +114,7 @@ from zephon._internal.checkpoint._schemas import (
     StaticMixtureStateV4,
     StaticMixtureStateV5,
     StaticMixtureStateV6,
+    StaticMixtureStateV7,
     WorkChunkStateV1,
     WorkChunkStateV2,
     WorkChunkStateV3,
@@ -180,6 +181,13 @@ def _static_mixture_v5_to_v6(v5: StaticMixtureStateV5) -> dict[str, Any]:
     """Keep skipping pass tails: pre-v6 streams were produced that way."""
     d = v5.to_dict()
     d["_legacy_repeat_skip_tail"] = True
+    return d
+
+
+def _static_mixture_v6_to_v7(v6: StaticMixtureStateV6) -> dict[str, Any]:
+    """No schedule: pre-v7 sources could not have one."""
+    d = v6.to_dict()
+    d["schedule_fingerprint"] = None
     return d
 
 
@@ -275,6 +283,7 @@ _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
         3: _static_mixture_v3_to_v4,
         4: _static_mixture_v4_to_v5,
         5: _static_mixture_v5_to_v6,
+        6: _static_mixture_v6_to_v7,
     },
     "cursor": {},
 }
@@ -296,6 +305,7 @@ _SCHEMAS: dict[str, dict[int, type[CheckpointMixin]]] = {
         4: StaticMixtureStateV4,
         5: StaticMixtureStateV5,
         6: StaticMixtureStateV6,
+        7: StaticMixtureStateV7,
     },
     "cursor": {1: CursorStateV1},
 }
