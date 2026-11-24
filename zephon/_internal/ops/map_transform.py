@@ -7,8 +7,13 @@ import logging
 from dataclasses import replace
 from typing import Any, Callable, Optional
 
+from zephon._internal.ops._one_to_one import (
+    REQUIRE_ONE_TO_ONE_RECORDS,
+    one_to_one_violation,
+    record_identity,
+)
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
-from zephon.ops.base import BaseOp
+from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.children import tombstones_for_record
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleBatch, SamplePayload, SampleRecord
@@ -39,9 +44,19 @@ class _BaseMapTransform(BaseOp):
         self.drop_none = drop_none
         self._max_batch = max_batch
         self._max_latency_ms = max_latency_ms
+        self._require_one_to_one = False
+
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
+        self._require_one_to_one = bool(ctx.get(REQUIRE_ONE_TO_ONE_RECORDS))
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            one_to_one_records=True,
+            parallelism=4,
+        )
 
     def _tombstones_for(self, elem: SampleRecord | SampleBatch) -> list[SampleRecord]:
         """Emit tombstone records for every closing contributor in *elem*."""
@@ -131,6 +146,10 @@ class MapTransform(_BaseMapTransform):
         if transformed is None:
             if not self.drop_none:
                 return [elem]
+            if self._require_one_to_one:
+                raise one_to_one_violation(
+                    "map_transform", "dropped a record", record_identity(elem)
+                )
             return self._tombstones_for(elem)
 
         elem.payload = transformed
@@ -215,17 +234,41 @@ class MapBatchTransform(_BaseMapTransform):
         When ``drop_none=True`` and the transform returns ``None``, tombstone
         records are emitted for every record in the batch.
         """
+        # Snapshot first: the callback may mutate the batch in place.
+        before = (
+            [record_identity(record) for record in elem.records]
+            if self._require_one_to_one
+            else None
+        )
         transformed = self.transform_fn(elem)
 
-        if transformed is None:
-            if not self.drop_none:
-                return [elem]
+        if transformed is None and self.drop_none:
+            if before is not None:
+                raise one_to_one_violation("map_batch", "dropped a batch", before[0])
             # _tombstones_for returns list[SampleRecord]; widen via extend.
             out: list[SampleBatch | SampleRecord] = []
             out.extend(self._tombstones_for(elem))
             return out
 
-        return [transformed]
+        result = elem if transformed is None else transformed
+        if before is not None:
+            after = (
+                [record_identity(record) for record in result.records]
+                if isinstance(result, SampleBatch)
+                else None
+            )
+            if after != before:
+                raise one_to_one_violation(
+                    "map_batch",
+                    f"turned a batch of {len(before)} records into "
+                    + (
+                        "a non-batch"
+                        if after is None
+                        else f"{len(after)} different ones"
+                    ),
+                    before[0],
+                )
+        return [result]
 
     def process_many(
         self, elems: list[SampleRecord | SampleBatch]
