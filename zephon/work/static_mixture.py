@@ -8,7 +8,7 @@ import random
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from typing import Any, ClassVar, Literal
 
@@ -18,13 +18,14 @@ from zephon._internal.checkpoint import (
     CursorStateV1 as _CursorStateV1,
 )
 from zephon._internal.checkpoint import (
-    StaticMixtureStateV6 as _StaticMixtureStateV6,
+    StaticMixtureStateV7 as _StaticMixtureStateV7,
 )
 from zephon._internal.token_counting import TokenCountingSpec as _TokenCountingSpec
 from zephon._internal.utils.swrr import DeficitRoundRobin as _DeficitRoundRobin
 from zephon.io.dataset import Dataset
 from zephon.types import SampleId
 from zephon.work.base import WorkChunk, WorkSource
+from zephon.work.curriculum import MixtureSchedule
 from zephon.work.mixture import MixtureSpec
 from zephon.work.token_estimation import (
     PerShardTokenCost,
@@ -323,12 +324,18 @@ def _repeat_liveness_error(
     name: str,
     available: int,
     required: int,
+    schedule_peak: float | None = None,
 ) -> str:
     """Explain an undersized repeat dataset and suggest valid configuration fixes."""
+    weight = (
+        f"mixture weight={cfg.weights[name] * 100:.4g}%"
+        if schedule_peak is None
+        else f"schedule peak weight={schedule_peak * 100:.4g}%"
+    )
     parts = [
         f"Dataset '{name}' has {available} samples but repeat policy requires "
         f"at least {required} for its per-chunk allocation "
-        f"(chunk_size={cfg.chunk_size}, mixture weight={cfg.weights[name] * 100:.4g}%).",
+        f"(chunk_size={cfg.chunk_size}, {weight}).",
         "Each allocation must fit within a single dataset pass.",
     ]
     if cfg.stop_after_passes is not None:
@@ -347,6 +354,9 @@ def _repeat_liveness_error(
         if single_dataset
         else "Reduce chunk_size."
     )
+    if schedule_peak is not None:
+        # Schedules reject redistribution.
+        return "\n".join(parts)
     redistribution = (
         "To read each dataset once and allow short chunks, "
         "set exhausted_policy='redistribute'"
@@ -361,14 +371,35 @@ def _repeat_liveness_error(
     return "\n".join(parts)
 
 
+def _accumulator_quota_bound(
+    weight: float, chunk_size: int, *, varying: bool = False
+) -> int:
+    """Largest quota one accumulator chunk can draw for a component at ``weight``.
+
+    A fractional share can draw ``ceil(weight * chunk_size) + 1``: a
+    ``deficit < 0`` credit can leave its accumulator above 1. An integral share
+    draws exactly its share while weights are fixed; when they ``vary``, the
+    remainder carried from earlier rounds can add one. No quota exceeds
+    ``chunk_size``.
+    """
+    share = weight * chunk_size
+    if share.is_integer():
+        bound = int(share) + (1 if varying else 0)
+    else:
+        bound = math.ceil(share) + 1
+    return min(bound, chunk_size)
+
+
 def _validate_repeat_liveness(
     cfg: _AllocationConfig,
     cursors: Mapping[str, "_DatasetCursor"],
     min_required: Callable[[str], int],
+    schedule_peak: Callable[[str], float] | None = None,
 ) -> None:
     """Reject repeat datasets smaller than their per-chunk demand bound.
 
-    ``min_required`` is the mode's bound.
+    ``min_required`` is the mode's bound. ``schedule_peak`` reports a
+    scheduled source's peak weight instead of its current one.
     """
     for name in cfg.component_order:
         if cfg.exhausted_policy[name] != "repeat":
@@ -376,8 +407,9 @@ def _validate_repeat_liveness(
         required = min_required(name)
         cursor = cursors[name]
         if cursor._total_samples < required:
+            peak = None if schedule_peak is None else schedule_peak(name)
             raise ValueError(
-                _repeat_liveness_error(cfg, name, cursor._total_samples, required)
+                _repeat_liveness_error(cfg, name, cursor._total_samples, required, peak)
             )
 
 
@@ -1056,17 +1088,18 @@ class AllocationStrategy(ABC):
     def _active_weights(
         self, cursors: Mapping[str, _DatasetCursor]
     ) -> Mapping[str, float]:
-        """Normalized weights of components still active per checkpointed cursors.
+        """Normalized weights of components that can still draw.
 
-        Treat the result as read-only: it may share the config's weight mapping.
+        A component drops out while a schedule holds its weight at 0, or once
+        redistribution retires it per the checkpointed cursors. Treat the result
+        as read-only: it may share the config's weight mapping.
         """
         weights = self._config.weights
-        if not self._redistributing:
-            return weights
         active = {
             name: weight
             for name, weight in weights.items()
-            if name not in self._redistributing or cursors[name].remaining > 0
+            if weight > 0.0
+            and (name not in self._redistributing or cursors[name].remaining > 0)
         }
         if len(active) == len(weights):
             return weights
@@ -1108,8 +1141,12 @@ class AllocationStrategy(ABC):
         """
 
     @abstractmethod
-    def clone(self) -> "AllocationStrategy":
-        """Return an independent copy with deep-copied mutable state."""
+    def clone(self, config: "_AllocationConfig | None" = None) -> "AllocationStrategy":
+        """Return an independent copy with deep-copied mutable state.
+
+        A given ``config`` replaces the parent's: lane clones each bind their
+        own config so scheduled weight updates stay lane-private.
+        """
 
     @abstractmethod
     def checkpoint_state(self) -> dict[str, Any]:
@@ -1125,7 +1162,7 @@ class AllocationStrategy(ABC):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: _StaticMixtureStateV6,
+        ckpt: _StaticMixtureStateV7,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -1161,6 +1198,15 @@ class AllocationStrategy(ABC):
     def requires_priming(self) -> bool:
         """Whether the source must run :meth:`prime` before it can produce chunks."""
         return False
+
+    def set_weights(self, weights: Mapping[str, float]) -> None:
+        """Install new per-component weights for subsequent chunks.
+
+        Mutates the (otherwise frozen) config's ``weights`` dict in place.
+        Strategies that cache quotas derived from the weights must override.
+        """
+        for name in self._config.component_order:
+            self._config.weights[name] = weights[name]
 
     @property
     def length_ready(self) -> bool:
@@ -1273,21 +1319,15 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
     def validate_liveness(self, cursors: dict[str, _DatasetCursor]) -> None:
         """Reject a repeat dataset smaller than its worst-case chunk quota.
 
-        A fractional share can draw ``ceil(weight * chunk_size) + 1`` in one
-        chunk: a ``deficit < 0`` credit can leave its accumulator above 1. An
-        integral share was never observed to overshoot, so it keeps the exact
-        bound; the runtime check in :meth:`compute_quotas` backstops both. No
-        quota exceeds ``chunk_size``, so the bound is capped there.
-        With redistribution, use each repeat component's largest survivor share.
+        See :func:`_accumulator_quota_bound`; the runtime check in
+        :meth:`compute_quotas` backstops it. With redistribution, use each
+        repeat component's largest survivor share.
         """
         cfg = self._config
         shares = self._max_repeat_shares(cfg.weights)
 
         def required(n: str) -> int:
-            share = shares[n] * cfg.chunk_size
-            if share.is_integer():
-                return int(share)
-            return min(math.ceil(share) + 1, cfg.chunk_size)
+            return _accumulator_quota_bound(shares[n], cfg.chunk_size)
 
         _validate_repeat_liveness(cfg, cursors, required)
 
@@ -1386,11 +1426,12 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         saved = dict(self._accumulators)
         if any(
             name not in weights and self._accumulators[name] != 0.0
-            for name in self._redistributing
+            for name in cfg.component_order
         ):
-            # Retiring nonzero fractional debt unbalances the survivors' rounding
-            # ledger, so restart all rounding. Zeroed retired entries prevent
-            # another reset on checkpoint restore.
+            # Dropping a component with nonzero fractional debt unbalances the
+            # survivors' rounding ledger, so restart all rounding. Zeroed entries
+            # prevent another reset on checkpoint restore, and a component that
+            # becomes active again rejoins with no debt.
             self._accumulators = dict.fromkeys(cfg.component_order, 0.0)
         quotas = self._advance_accumulators(weights)
         wrapping: list[str] = []
@@ -1442,7 +1483,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
             return None
         reset_carry = any(
             name not in weights and self._accumulators[name] != 0.0
-            for name in self._redistributing
+            for name in cfg.component_order
         )
 
         # Compute quotas, then verify cursors can fulfill them.
@@ -1451,7 +1492,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         while True:
             saved = dict(self._accumulators)
             if reset_carry:
-                # Retiring nonzero fractional debt unbalances the survivors'
+                # Dropping nonzero fractional debt unbalances the survivors'
                 # rounding ledger. Restart all rounding, survivors included.
                 # Zero retired entries prevent another reset on checkpoint restore.
                 # Each retry saves before clearing so terminal attempts roll back
@@ -1548,9 +1589,9 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
 
     # -- clone / checkpoint -----------------------------------------------
 
-    def clone(self) -> "AccumulatorStrategy":
+    def clone(self, config: _AllocationConfig | None = None) -> "AccumulatorStrategy":
         return AccumulatorStrategy(
-            config=self._config,
+            config=self._config if config is None else config,
             accumulators=self._accumulators,
         )
 
@@ -1563,7 +1604,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: _StaticMixtureStateV6,
+        ckpt: _StaticMixtureStateV7,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -1714,9 +1755,11 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
 
     # -- clone / checkpoint -----------------------------------------------
 
-    def clone(self) -> "LegacyFixedStrategy":
+    def clone(self, config: _AllocationConfig | None = None) -> "LegacyFixedStrategy":
         s = LegacyFixedStrategy.__new__(LegacyFixedStrategy)
-        AllocationStrategy.__init__(s, self._config)
+        AllocationStrategy.__init__(s, self._config if config is None else config)
+        # Copying the cache is safe: a lane config starts weight-identical and
+        # legacy mode rejects weight changes.
         s._chunk_quota = dict(self._chunk_quota)
         return s
 
@@ -1727,13 +1770,17 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: _StaticMixtureStateV6,
+        ckpt: _StaticMixtureStateV7,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
         estimation: TokenEstimation | None,
     ) -> "LegacyFixedStrategy":
         return cls(config=config)
+
+    def set_weights(self, weights: Mapping[str, float]) -> None:
+        """Reject weight updates: legacy quotas are fixed at construction."""
+        raise NotImplementedError("legacy_fixed allocation has fixed quotas")
 
 
 class TokenAwareStrategy(AllocationStrategy):
@@ -2060,9 +2107,9 @@ class TokenAwareStrategy(AllocationStrategy):
 
     # -- clone / checkpoint -------------------------------------------------
 
-    def clone(self) -> "TokenAwareStrategy":
+    def clone(self, config: _AllocationConfig | None = None) -> "TokenAwareStrategy":
         return TokenAwareStrategy(
-            config=self._config,
+            config=self._config if config is None else config,
             datasets_by_name=self._datasets_by_name,
             dataset_ids=self._dataset_ids,
             estimation=self._estimation,
@@ -2103,7 +2150,7 @@ class TokenAwareStrategy(AllocationStrategy):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: _StaticMixtureStateV6,
+        ckpt: _StaticMixtureStateV7,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -2212,7 +2259,7 @@ class StaticMixtureWorkSource(WorkSource):
     def __init__(
         self,
         datasets: list[Dataset],
-        mixture: MixtureSpec | Mapping[str, float],
+        mixture: MixtureSpec | Mapping[str, float] | MixtureSchedule,
         chunk_size: int = 16384,
         seed: int = 0,
         shuffle_shards: bool = True,
@@ -2262,7 +2309,36 @@ class StaticMixtureWorkSource(WorkSource):
         self._datasets: list[Dataset] = list(datasets)
         component_order = tuple(ds.name for ds in self._datasets)
 
-        mixture_spec = MixtureSpec(mixture) if isinstance(mixture, Mapping) else mixture
+        schedule = mixture if isinstance(mixture, MixtureSchedule) else None
+        if schedule is not None:
+            if set(schedule.component_names) != set(component_order):
+                raise ValueError(
+                    "MixtureSchedule components must match work source dataset "
+                    f"names. work_source={component_order}, "
+                    f"schedule={schedule.component_names}"
+                )
+            never_active = [
+                name
+                for name in schedule.component_names
+                if schedule.max_weight(name) <= 0.0
+            ]
+            if never_active:
+                raise ValueError(
+                    f"MixtureSchedule components {never_active} are never active"
+                )
+            # Peak shares only seed the config; the first chunk installs round 0.
+            mixture_spec = MixtureSpec(
+                {name: schedule.max_weight(name) for name in schedule.component_names}
+            )
+        elif isinstance(mixture, MixtureSpec):
+            mixture_spec = mixture
+        elif isinstance(mixture, Mapping):
+            mixture_spec = MixtureSpec(mixture)
+        else:
+            raise TypeError(
+                "mixture must be a MixtureSpec, a mapping of dataset weights, or a "
+                f"schedule, got {type(mixture).__name__}"
+            )
         mixture_spec.validate_for(component_order)
 
         self._dataset_ids: dict[str, int] = {}
@@ -2438,8 +2514,18 @@ class StaticMixtureWorkSource(WorkSource):
         self._strategy: AllocationStrategy = self._build_fresh_strategy()
         # The repeat-policy liveness guard lives on the strategy: sample mode
         # checks immediately; an unprimed token strategy no-ops until prime()
-        # supplies the ratios and re-runs it.
-        self._strategy.validate_liveness(self._cursors)
+        # supplies the ratios and re-runs it. A schedule is checked exactly
+        # against its peaks below instead.
+        if schedule is None:
+            self._strategy.validate_liveness(self._cursors)
+
+        self._schedule: MixtureSchedule | None = None
+        self._schedule_digest: str | None = None
+        self._last_scheduled_round: int = -1
+        if schedule is not None:
+            self._validate_schedule(schedule)
+            self._schedule = schedule
+            self._schedule_digest = schedule._fingerprint()
 
         if not any(cur._total_samples for cur in self._cursors.values()):
             raise ValueError("At least one dataset must contain samples")
@@ -2455,7 +2541,7 @@ class StaticMixtureWorkSource(WorkSource):
         """
         if _is_unbounded(self._alloc_config):
             self._total_samples: int | float | None = float("inf")
-        elif not self._strategy.length_ready:
+        elif self._has_schedule() or not self._strategy.length_ready:
             self._total_samples = None
         else:
             self._total_samples = len(self)
@@ -2464,6 +2550,11 @@ class StaticMixtureWorkSource(WorkSource):
     def total_samples(self) -> int | float:
         """Samples this source will produce (``float("inf")`` when unbounded)."""
         if self._total_samples is None:
+            if self._has_schedule():
+                raise RuntimeError(
+                    "total_samples is unavailable for a scheduled work source: "
+                    "its length depends on the schedule"
+                )
             raise RuntimeError(
                 "total_samples is unavailable before priming: the token-aware "
                 "length estimate needs the primed cost table. prime() must run "
@@ -2486,6 +2577,58 @@ class StaticMixtureWorkSource(WorkSource):
             estimation=self._token_estimation,
         )
 
+    # -- curriculum schedules ----------------------------------------------
+
+    def _validate_schedule(self, schedule: MixtureSchedule) -> None:
+        cfg = self._alloc_config
+        if self._strategy.mixture_unit != "samples":
+            raise ValueError(
+                "Mixture schedules require sample-denominated allocation; "
+                "token_estimation is not supported with a schedule"
+            )
+        if cfg.redistributing:
+            # The repeat and stopping guards below assume the scheduled
+            # components stay active for the whole run.
+            raise ValueError(
+                "Mixture schedules do not support exhausted_policy='redistribute'"
+            )
+
+        def required(name: str) -> int:
+            return _accumulator_quota_bound(
+                schedule.max_weight(name), cfg.chunk_size, varying=True
+            )
+
+        _validate_repeat_liveness(
+            cfg, self._cursors, required, schedule_peak=schedule.max_weight
+        )
+
+        # A dataset left at weight 0 never finishes a pass or runs dry, so a
+        # source that stops on either would run forever.
+        final = schedule._final_weights()
+        stops_on = [
+            name
+            for name in cfg.component_order
+            if cfg.stop_after_passes is not None
+            or cfg.exhausted_policy[name] == "stop"
+            or cfg.max_repeats[name] is not None
+        ]
+        idle = [name for name in stops_on if final[name] <= 0.0]
+        if idle and (cfg.stop_after_passes is not None or len(idle) == len(stops_on)):
+            raise ValueError(
+                f"Schedule ends with weight 0 for {idle}, so this work source would "
+                "never stop. Keep a positive final weight, or use "
+                "exhausted_policy='repeat' and end training by step count."
+            )
+
+    def _has_schedule(self) -> bool:
+        return self._schedule is not None
+
+    def _apply_schedule_for_round(self, chunk_round: int) -> None:
+        if self._schedule is None or chunk_round == self._last_scheduled_round:
+            return
+        self._strategy.set_weights(self._schedule.weights_at(chunk_round))
+        self._last_scheduled_round = chunk_round
+
     def clone_for_lane(self, lane_id: int, canonical_replicas: int) -> WorkSource:
         """Lightweight clone that avoids deepcopying large cursor buffers.
 
@@ -2505,8 +2648,15 @@ class StaticMixtureWorkSource(WorkSource):
         clone._datasets = list(self._datasets)
         clone._dataset_ids = dict(self._dataset_ids)
         clone._datasets_by_id = dict(self._datasets_by_id)
-        clone._alloc_config = self._alloc_config  # frozen, safe to share
+        # Lane-private weights: a lane prefetching a later round must not change
+        # the weights a sibling lane in the same process reads.
+        clone_alloc_config = replace(
+            self._alloc_config,
+            weights=dict(self._alloc_config.weights),
+        )
+        clone._alloc_config = clone_alloc_config
         clone._explicit_policy_fields = self._explicit_policy_fields
+        clone._weights = clone_alloc_config.weights
         clone._seed = self._seed
         clone._global_chunk_index = self._global_chunk_index
         clone._lane_assignment = self._lane_assignment
@@ -2516,11 +2666,15 @@ class StaticMixtureWorkSource(WorkSource):
         clone._knobs_by_name = dict(self._knobs_by_name)
         clone._token_estimation = self._token_estimation
 
-        clone._strategy = self._strategy.clone()
+        clone._strategy = self._strategy.clone(config=clone_alloc_config)
 
         clone._cursors = {name: cur._clone() for name, cur in self._cursors.items()}
 
         clone._total_samples = self._total_samples
+
+        clone._schedule = self._schedule
+        clone._schedule_digest = self._schedule_digest
+        clone._last_scheduled_round = self._last_scheduled_round
 
         clone._cloned = True
         clone._bind_lane(lane_id, canonical_replicas)
@@ -2618,6 +2772,7 @@ class StaticMixtureWorkSource(WorkSource):
             "Please assign lane for WorkSource before requesting chunk."
         )
         while True:
+            self._apply_schedule_for_round(self._global_chunk_index // self._canon)
             g = self._global_chunk_index
             owned = self._lane_for_chunk(g) == (self._lane % self._canon)
             # A boundary chunk keeps the target it was allocated against. EOD
@@ -2711,6 +2866,11 @@ class StaticMixtureWorkSource(WorkSource):
                     "(at least one dataset has exhausted_policy='repeat' "
                     "with max_repeats=None)"
                 )
+            if self._has_schedule():
+                raise TypeError(
+                    "len() is not defined for a scheduled work source: its "
+                    "length depends on the schedule"
+                )
 
         return self._strategy.estimate_remaining_samples(self._cursors)
 
@@ -2741,7 +2901,7 @@ class StaticMixtureWorkSource(WorkSource):
         cursor_block_sizes = {
             name: self._knobs_by_name[name].shuffle_block_size for name in self._cursors
         }
-        state = _StaticMixtureStateV6(
+        state = _StaticMixtureStateV7(
             lane_id=base["lane_id"],
             canonical_replicas=base["canonical_replicas"],
             chunk_size_hint=base["chunk_size_hint"],
@@ -2778,10 +2938,11 @@ class StaticMixtureWorkSource(WorkSource):
             token_deficits=strategy_state.get("token_deficits"),
             token_ratios=strategy_state.get("token_ratios"),
             _legacy_repeat_skip_tail=cfg._legacy_repeat_skip_tail,
+            schedule_fingerprint=self._schedule_digest,
         )
         return state.to_dict()
 
-    def _reject_policy_override(self, ckpt: _StaticMixtureStateV6) -> None:
+    def _reject_policy_override(self, ckpt: _StaticMixtureStateV7) -> None:
         """Fail a resume whose explicit policy args contradict the checkpoint.
 
         A resume restores the policy frozen in the checkpoint, so an explicit
@@ -2814,7 +2975,7 @@ class StaticMixtureWorkSource(WorkSource):
             )
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        ckpt = _StaticMixtureStateV6.load(state)
+        ckpt = _StaticMixtureStateV7.load(state)
 
         self._verify_base_state(int(ckpt.lane_id), int(ckpt.canonical_replicas))
 
@@ -2826,6 +2987,18 @@ class StaticMixtureWorkSource(WorkSource):
         if strategy_cls is None:
             raise RuntimeError(
                 f"Unknown allocation_mode {ckpt.allocation_mode!r} in checkpoint"
+            )
+        # The schedule is configuration, so a resume must bring the same one.
+        fingerprint = self._schedule_digest
+        if ckpt.schedule_fingerprint != fingerprint:
+
+            def describe(value: str | None) -> str:
+                return "no schedule" if value is None else f"schedule {value[:12]}"
+
+            raise RuntimeError(
+                f"Checkpoint was written with {describe(ckpt.schedule_fingerprint)}, "
+                f"but this work source has {describe(fingerprint)}. Build the work "
+                "source with the same schedule before restoring."
             )
         if strategy_cls.mixture_unit != self._strategy.mixture_unit:
             raise RuntimeError(
@@ -2916,6 +3089,8 @@ class StaticMixtureWorkSource(WorkSource):
             self._cursors[ds.name] = cur
 
         self._global_chunk_index = int(ckpt.global_chunk_index)
+        # Re-evaluate the schedule for the restored round.
+        self._last_scheduled_round = -1
 
         self._alloc_config = _AllocationConfig(
             component_order=tuple(ckpt.component_order),
