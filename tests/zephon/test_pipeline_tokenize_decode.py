@@ -117,7 +117,7 @@ def test_pipeline_tokenize_forwards_missing_field_policy() -> None:
     pipe = PublicPipeline(FakeIndexableWorkSource(ds)).tokenize(
         tokenizer_id="__fallback__", field="text", missing_field="empty"
     )
-    op = pipe._tail.op
+    op = pipe._tails[-1].op
     assert isinstance(op, TokenizeText)
     assert op.missing_field == "empty"
 

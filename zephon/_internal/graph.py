@@ -7,6 +7,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Generic, Optional, TypeVar
 
+from zephon._internal.branching import Router, is_branched
 from zephon.ops.base import BaseOp
 
 # TypeVar for operator type, enabling typed Node[OpT] where OpT is the specific op
@@ -15,13 +16,19 @@ OpT = TypeVar("OpT", bound=BaseOp)
 
 @dataclass
 class Node(Generic[OpT]):
-    """A vertex in the logical pipeline graph bound to an operator instance."""
+    """A vertex in the logical pipeline graph bound to an operator instance.
+
+    ``router`` is set on the op before a ``branch()`` call (U). ``branch`` names
+    the branch a node belongs to; such a node's only input is its U.
+    """
 
     name: str
     op: OpT
     inputs: list["Node[Any]"] = field(default_factory=list)
     placement: str = "auto"
     parallelism: Optional[int] = None
+    router: Optional[Router] = None
+    branch: Optional[str] = None
 
 
 class Graph:
@@ -42,6 +49,7 @@ class Graph:
         *inputs: Node[Any],
         placement: str = "auto",
         parallelism: Optional[int] = None,
+        branch: Optional[str] = None,
     ) -> Node[OpT]:
         """Create a node, infer defaults, and append it to the graph order."""
         if parallelism is None:
@@ -52,6 +60,7 @@ class Graph:
             inputs=list(inputs),
             placement=placement,
             parallelism=parallelism,
+            branch=branch,
         )
         self.nodes.append(node)
         return node
@@ -120,19 +129,33 @@ class Plan:
         )
 
     def _signature(self) -> tuple[Any, ...]:
-        """Compact tuple describing the plan for hashing purposes."""
+        """Compact tuple describing the plan for hashing purposes.
+
+        A chain's order already defines its edges. A branched plan also lists
+        each node's inputs (by position in the plan), its branch and its
+        router, so two graphs with the same nodes but different edges differ.
+        Chains keep their previous signature, and so their plan ids.
+        """
+        all_nodes = [nd for st in self.stages for nd in st.nodes]
+        branched = is_branched(all_nodes)
+        position = {id(nd): index for index, nd in enumerate(all_nodes)}
         stages_sig: list[Any] = []
         for st in self.stages:
             nodes_sig: list[Any] = []
             for nd in st.nodes:
-                nodes_sig.append(
-                    (
-                        nd.name,
-                        nd.placement,
-                        int(nd.parallelism) if nd.parallelism else 1,
-                        self._op_identity(nd.op),
-                    )
+                node_sig: tuple[Any, ...] = (
+                    nd.name,
+                    nd.placement,
+                    int(nd.parallelism) if nd.parallelism else 1,
+                    self._op_identity(nd.op),
                 )
+                if branched:
+                    node_sig += (
+                        tuple(position.get(id(inp), -1) for inp in nd.inputs),
+                        nd.branch,
+                        nd.router.identity() if nd.router is not None else None,
+                    )
+                nodes_sig.append(node_sig)
             stages_sig.append(
                 (
                     st.name,

@@ -94,11 +94,11 @@ def _make_pipe(sample_count: int, mtp_mode: bool = False) -> PublicPipeline:
     node = pipe._graph.add(
         "defer_first",
         _DeferFirstOp(),
-        pipe._tail,
+        *pipe._tails,
         placement="local",
         parallelism=1,
     )
-    pipe._tail = node
+    pipe._tails = [node]
     pipe = pipe.options(
         deterministic=True,
         default_stage_prefetch=16,

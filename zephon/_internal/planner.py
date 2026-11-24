@@ -4,7 +4,9 @@
 """Stage planner that converts logical graphs into executable plans."""
 
 import dataclasses
+from typing import Any
 
+from zephon._internal.branching import is_branched, stateless_violation
 from zephon._internal.graph import Graph, Node, Plan, Stage
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.map_transform import MapBatchTransform, MapTransform
@@ -45,6 +47,7 @@ class Planner:
         """
         nodes = self._with_replay_filters(graph)
         self._validate_map_batch_ordering(nodes)
+        self._validate_branch_ops(nodes)
 
         stages: list[Stage] = []
         current_nodes: list[Node] = []
@@ -86,6 +89,7 @@ class Planner:
         flush("end")
 
         stages = self._split_batch_stages(stages)
+        self._validate_branch_stages(stages)
 
         indexable = True
         preserves_cursor_order = True
@@ -105,7 +109,7 @@ class Planner:
 
         explain_lines = []
         for idx, stage in enumerate(stages):
-            ops = [f"{nd.name}@p{nd.parallelism}" for nd in stage.nodes]
+            ops = [self._explain_node(nd) for nd in stage.nodes]
             explain_lines.append(
                 f"Stage[{idx}] place={stage.placement} break='{stage.break_reason}' ops={ops}"
             )
@@ -116,6 +120,49 @@ class Planner:
             preserves_cursor_order=preserves_cursor_order,
             batch_size_hint=batch_size_hint,
         )
+
+    @staticmethod
+    def _explain_node(node: Node[Any]) -> str:
+        """Format one node for ``Plan.explain``, marking routers and branches."""
+        text = f"{node.name}@p{node.parallelism}"
+        if node.branch is not None:
+            text = f"[{node.branch}] {text}"
+        if node.router is not None:
+            text += f" -> branch({', '.join(node.router.branches)})"
+        return text
+
+    def _validate_branch_ops(self, nodes: list[Node]) -> None:
+        """Reject branch ops that are not stateless and record-local.
+
+        The runner flushes a branch op after every slice of U's output, so its
+        output must not depend on how its input is cut into batches.
+        """
+        for node in nodes:
+            if node.branch is None:
+                continue
+            reason = stateless_violation(node)
+            if reason is not None:
+                raise ValueError(
+                    f"op {node.name!r} in branch {node.branch!r} cannot run in a "
+                    f"branch: {reason}. Branches take only stateless, "
+                    "record-local ops; add this op after the branch() call."
+                )
+
+    def _validate_branch_stages(self, stages: list[Stage]) -> None:
+        """Require the branch ops of one ``branch()`` call to share a stage."""
+        stage_of: dict[int, int] = {}
+        for index, stage in enumerate(stages):
+            for node in stage.nodes:
+                if node.branch is None:
+                    continue
+                upstream = node.inputs[0]
+                first = stage_of.setdefault(id(upstream), index)
+                if first != index:
+                    raise ValueError(
+                        f"the branches after {upstream.name!r} landed in "
+                        "different stages; give every branch op the same "
+                        "placement"
+                    )
 
     def _validate_map_batch_ordering(self, nodes: list[Node]) -> None:
         """Ensure map operators appear on the correct side of Batch."""
@@ -268,10 +315,21 @@ class Planner:
             filter_node = Node(
                 name=f"{tail.name}_replay_filter",
                 op=ReplayFilter(),
-                inputs=[tail],
+                # A chain has one tail. A pipeline that ends after branch()
+                # has one per branch op.
+                inputs=self._tails(nodes) if is_branched(nodes) else [tail],
                 placement=tail.placement,
                 parallelism=dop,
             )
             nodes.append(filter_node)
 
         return nodes
+
+    @staticmethod
+    def _tails(nodes: list[Node]) -> list[Node]:
+        """Return the nodes no other node takes as input, in graph order.
+
+        Every record U emits goes to a branch op, so a routed U is never a tail.
+        """
+        consumed = {id(inp) for node in nodes for inp in node.inputs}
+        return [node for node in nodes if id(node) not in consumed]

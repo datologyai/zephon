@@ -6,4 +6,4 @@ covers it in :doc:`../pipelines/index`.
 
 .. autoclass:: zephon.Pipeline
    :members:
-   :show-inheritance:
+   :inherited-members:

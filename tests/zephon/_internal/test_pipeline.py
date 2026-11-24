@@ -173,9 +173,9 @@ def test_preflight_reports_failure_without_disabling_runtime_checks(
         loss_scope="after_last_user",
     )
     assert not pipe.preflight_tokenizers(strict=False).ok
-    assert not pipe._tail.op._tokenizer_instantiated
+    assert not pipe._tails[-1].op._tokenizer_instantiated
     with pytest.raises(ValueError, match="no enclosing loop"):
-        pipe._tail.op._ids_and_mask({"messages": CONVERSATION}, "fixture")
+        pipe._tails[-1].op._ids_and_mask({"messages": CONVERSATION}, "fixture")
 
 
 def test_deprecation_warning_points_to_public_caller(chat_scope_tokenizer) -> None:
