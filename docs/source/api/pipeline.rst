@@ -7,3 +7,7 @@ covers it in :doc:`../pipelines/index`.
 .. autoclass:: zephon.Pipeline
    :members:
    :inherited-members:
+
+.. autoclass:: zephon.pipeline.Branch
+   :members:
+   :inherited-members:

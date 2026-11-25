@@ -31,7 +31,7 @@ from zephon._internal.checkpoint._aggregation import (
 from zephon._internal.coordination import CheckpointCoordinator, make_coordinator
 from zephon._internal.engine import Engine, get_torch_worker_info
 from zephon._internal.functional_op import _is_user_op
-from zephon._internal.graph import Graph, Node, Plan
+from zephon._internal.graph import Graph, Merge, Node, Plan
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.ensure_mixture import EnsureMixture
 from zephon._internal.ops.fetch import FetchOp
@@ -201,9 +201,9 @@ class Pipeline(_RecordOps):
         self._fetch_node: Node[FetchOp] = self._graph.add(
             "fetch", FetchOp(), placement="local"
         )
-        # The nodes the next op takes as inputs: one for a chain, or every branch
-        # op right after branch().
-        self._tails: list[Node[Any]] = [self._fetch_node]
+        # The vertex the next op takes as input: the last op, or the merge right
+        # after branch().
+        self._tail: Node[Any] | Merge = self._fetch_node
         # Optional prefetch node inserted before fetch
         self._prefetch_node: Node[PrefetchOp] | None = None
 
@@ -215,11 +215,10 @@ class Pipeline(_RecordOps):
         placement: str,
         parallelism: Optional[int],
     ) -> None:
-        """Append ``op`` after the current tails and make it the only tail."""
-        node = self._graph.add(
-            name, op, *self._tails, placement=placement, parallelism=parallelism
+        """Append ``op`` after the current tail and make it the tail."""
+        self._tail = self._graph.add(
+            name, op, self._tail, placement=placement, parallelism=parallelism
         )
-        self._tails = [node]
 
     @_mutates_graph
     def fetch_parallelism(
@@ -345,9 +344,10 @@ class Pipeline(_RecordOps):
         holds at most one stateless, record-local op (``map_transform``,
         ``add_op``, ``decode_text``, ``tokenize``, ``tokenize_chat`` or
         ``expand_chat``); ``lambda b: b`` passes records through unchanged.
-        The next builder call merges the branches in input order, so the
+        The branches merge back in input order before the next op, so the
         output is the same as a chain whose op picks per record with an
-        if/else.
+        if/else. Branches route records, so call ``branch()`` before
+        ``batch()``.
 
         Args:
             by: Returns a branch name for a record's payload. It must be
@@ -378,12 +378,12 @@ class Pipeline(_RecordOps):
         """
         if not callable(by):
             raise TypeError(f"branch() needs a callable `by`, got {type(by).__name__}")
-        if len(self._tails) != 1:
+        if isinstance(self._tail, Merge):
             raise ValueError(
                 "branch() cannot follow another branch() directly; add an op "
                 "after the first one to merge its branches"
             )
-        upstream = self._tails[0]
+        upstream = self._tail
         if not branches:
             raise ValueError("branch() needs at least one branch")
         for name in branches:
@@ -407,22 +407,23 @@ class Pipeline(_RecordOps):
                     "received, e.g. `lambda b: b.tokenize(...)`"
                 )
             # A passthrough branch is an ordinary branch op that returns its
-            # input, so the merge always reads exactly the branch op nodes.
+            # input, so every branch has an op for the merge to read.
             held[name] = builder._held or _BranchOp(
                 "passthrough", Identity(), placement="auto", parallelism=None
             )
-        upstream.router = Router(by=by, branches=tuple(held), default=default)
-        self._tails = [
-            self._graph.add(
+        router = Router(by=by, branches=tuple(held), default=default)
+        split = self._graph.add_split(f"{upstream.name}_split", upstream, router)
+        branch_ops = {
+            name: self._graph.add(
                 op.name,
                 op.op,
-                upstream,
+                split,
                 placement=op.placement,
                 parallelism=op.parallelism,
-                branch=name,
             )
             for name, op in held.items()
-        ]
+        }
+        self._tail = self._graph.add_merge(f"{upstream.name}_merge", split, branch_ops)
         return self
 
     @_mutates_graph

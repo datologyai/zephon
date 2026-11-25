@@ -647,7 +647,7 @@ def test_add_op_passes_advanced_traits_through() -> None:
     )
 
     # The op we just appended is the new tail; pull it back out and inspect.
-    node = pipe._tails[-1]
+    node = pipe._tail
     traits = node.op.traits()
     assert traits.calibration_replayable is True
     assert traits.batch_shape_sensitive is True
@@ -661,7 +661,7 @@ def test_add_op_advanced_traits_default_false() -> None:
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
-    traits = pipe._tails[-1].op.traits()
+    traits = pipe._tail.op.traits()
     assert traits.calibration_replayable is False
     assert traits.batch_shape_sensitive is False
     assert traits.requires_serial_state is False

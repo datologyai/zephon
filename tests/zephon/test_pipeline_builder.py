@@ -110,7 +110,7 @@ def test_pipeline_tokenize_preserve_flag_forwarded() -> None:
         .options(deterministic=True, prefetch_batches=0, default_stage_prefetch=0)
     )
 
-    tail_op = pipe._tails[-1].op  # type: ignore[attr-defined]
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
     assert isinstance(tail_op, TokenizeText)
     assert tail_op.preserve_upstream_payload is True
 
@@ -127,7 +127,7 @@ def test_pipeline_pack_sequences_is_envelope() -> None:
 
     pipe = PublicPipeline(ws).pack_sequences(max_length=8, num_bins=4)
 
-    tail_op = pipe._tails[-1].op  # type: ignore[attr-defined]
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
     assert isinstance(tail_op, PackSequences)
     assert tail_op.output == "envelope"
 
@@ -147,7 +147,7 @@ def test_pipeline_pack_flat_wrap() -> None:
 
     pipe = PublicPipeline(ws).pack_flat(max_length=8, algorithm="wrap")
 
-    tail_op = pipe._tails[-1].op  # type: ignore[attr-defined]
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
     assert isinstance(tail_op, PackSequences)
     assert tail_op.output == "flat"
     assert tail_op.emit_positions is True  # positions on by default
@@ -165,7 +165,7 @@ def test_pipeline_best_fit_wrap_forwards_candidate_pool_options() -> None:
         max_candidate_age=23,
     )
 
-    tail_op = pipe._tails[-1].op  # type: ignore[attr-defined]
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
     assert isinstance(tail_op, PackSequences)
     assert tail_op.algorithm == "best_fit_wrap"
     assert tail_op.drop_oversized is False
@@ -186,7 +186,7 @@ def test_pipeline_packing_forwards_segment_limit(method: str, cap: int | None) -
         )
         is pipe
     )
-    tail_op = pipe._tails[-1].op  # type: ignore[attr-defined]
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
     assert isinstance(tail_op, PackSequences)
     assert tail_op.max_sequences_per_bin == cap
 
@@ -213,7 +213,7 @@ def test_pipeline_pack_flat_first_fit_forwards_pad_token_id() -> None:
         emit_positions=False,
     )
 
-    tail_op = pipe._tails[-1].op  # type: ignore[attr-defined]
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
     assert isinstance(tail_op, PackSequences)
     assert tail_op.output == "flat"
     assert tail_op.algorithm == "first_fit"

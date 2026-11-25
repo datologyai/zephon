@@ -15,6 +15,7 @@ import pytest
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline
 from zephon.ops import CountingAccumulator
+from zephon.pipeline import Branch
 
 
 def _route(payload: Any) -> str:
@@ -32,11 +33,11 @@ def _pipeline() -> Pipeline:
     )
 
 
-def _names(nodes: list[Any]) -> list[str]:
-    return [node.name for node in nodes]
+def _names(vertices: list[Any]) -> list[str]:
+    return [vertex.name for vertex in vertices]
 
 
-def test_branch_wires_one_op_per_branch_after_upstream() -> None:
+def test_branch_adds_split_branch_ops_and_merge() -> None:
     pipe = (
         _pipeline()
         .map_transform(_identity)
@@ -50,43 +51,44 @@ def test_branch_wires_one_op_per_branch_after_upstream() -> None:
         .materialize()
     )
 
-    fetch, upstream, text, chat, merge = pipe._graph.nodes
-    assert _names([fetch, upstream, text, chat, merge]) == [
+    fetch, upstream, text, chat, after = pipe._graph.nodes
+    assert _names([fetch, upstream, text, chat, after]) == [
         "fetch",
         "map_transform",
         "decode_text",
         "expand_chat",
         "materialize",
     ]
-    assert upstream.router is not None
-    assert upstream.router.branches == ("text", "chat")
-    assert upstream.router.default is None
-    assert (text.branch, text.inputs) == ("text", [upstream])
-    assert (chat.branch, chat.inputs) == ("chat", [upstream])
-    assert merge.branch is None
-    assert merge.inputs == [text, chat]
+    (split,) = pipe._graph.splits
+    (merge,) = pipe._graph.merges
+    assert split.name == "map_transform_split"
+    assert split.input is upstream
+    assert split.router.branches == ("text", "chat")
+    assert split.router.default is None
+    assert text.inputs[0] is split and chat.inputs[0] is split
+    assert merge.name == "map_transform_merge"
+    assert merge.split is split
+    assert list(merge.branches) == ["text", "chat"]
+    assert merge.branches["text"] is text and merge.branches["chat"] is chat
+    assert len(after.inputs) == 1 and after.inputs[0] is merge
     # decode_text keeps its forced placement inside a branch.
     assert text.placement == "local"
 
 
 def test_passthrough_branch_is_an_identity_branch_op() -> None:
-    pipe = (
-        _pipeline()
-        .map_transform(_identity)
-        .branch(
-            _route,
-            {"text": lambda b: b, "chat": lambda b: b.expand_chat()},
-            default="text",
-        )
-        .materialize()
+    pipe = _pipeline().branch(
+        _route,
+        {"text": lambda b: b, "chat": lambda b: b.expand_chat()},
+        default="text",
     )
 
-    _, upstream, text, chat, merge = pipe._graph.nodes
-    assert upstream.router.default == "text"
-    assert (text.name, text.branch, text.inputs) == ("passthrough", "text", [upstream])
+    _, text, _ = pipe._graph.nodes
+    (split,) = pipe._graph.splits
+    (merge,) = pipe._graph.merges
+    assert split.router.default == "text"
+    assert text.name == "passthrough" and text.inputs[0] is split
     assert text.op.process_many(["a", "b"]) == ["a", "b"]
-    # The merge reads exactly the branch op nodes, never U.
-    assert merge.inputs == [text, chat]
+    assert merge.branches["text"] is text
 
 
 def test_every_branch_may_be_a_passthrough() -> None:
@@ -94,7 +96,6 @@ def test_every_branch_may_be_a_passthrough() -> None:
 
     _, text, chat = pipe._graph.nodes
     assert _names([text, chat]) == ["passthrough", "passthrough"]
-    assert (text.branch, chat.branch) == ("text", "chat")
     assert "'[chat] passthrough@p1'" in pipe.explain()
 
 
@@ -162,13 +163,15 @@ def test_branch_rejects_invalid_arguments(
 ) -> None:
     pipe = _pipeline().map_transform(_identity)
     nodes_before = list(pipe._graph.nodes)
+    tail_before = pipe._tail
 
     with pytest.raises(error, match=match):
         pipe.branch(**kwargs)
 
     # A rejected call leaves the graph as it was.
     assert pipe._graph.nodes == nodes_before
-    assert all(node.router is None for node in pipe._graph.nodes)
+    assert pipe._graph.splits == [] and pipe._graph.merges == []
+    assert pipe._tail is tail_before
 
 
 def test_branch_cannot_directly_follow_another_branch() -> None:
@@ -179,39 +182,66 @@ def test_branch_cannot_directly_follow_another_branch() -> None:
     with pytest.raises(ValueError, match="cannot follow another branch"):
         pipe.branch(_route, {"text": lambda b: b.decode_text()})
 
-    # An op in between merges the first branches, so a second split works.
+    # An op in between reads the first merge, so a second split works.
     pipe.map_transform(_identity).branch(_route, {"text": lambda b: b.decode_text()})
-    assert sum(node.router is not None for node in pipe._graph.nodes) == 2
+    assert len(pipe._graph.splits) == len(pipe._graph.merges) == 2
+    pipe.explain()
 
 
-def test_branch_builder_offers_only_record_level_methods() -> None:
+def test_branch_builder_is_public_and_offers_only_record_level_methods() -> None:
     seen: dict[str, Any] = {}
 
-    def capture(builder: Any) -> Any:
+    def capture(builder: Branch) -> Branch:
         seen["builder"] = builder
         return builder.decode_text()
 
     _pipeline().branch(_route, {"text": capture})
 
     builder = seen["builder"]
+    assert isinstance(builder, Branch)
+    assert type(builder).__module__ == "zephon.pipeline"
     for name in ("map_transform", "add_op", "decode_text", "tokenize", "tokenize_chat"):
         assert callable(getattr(builder, name))
     for name in ("branch", "batch", "shuffle", "pack_flat", "ensure_mixture"):
         assert not hasattr(builder, name)
 
 
-def test_explain_marks_router_and_branch_ops() -> None:
+def test_explain_shows_split_branch_ops_and_merge_in_order() -> None:
     pipe = _pipeline().branch(
         _route, {"text": lambda b: b.decode_text(), "chat": lambda b: b.expand_chat()}
     )
 
     plan = pipe.explain().splitlines()[0]
-    assert "'fetch@p4 -> branch(text, chat)'" in plan
-    assert "'[text] decode_text@p" in plan
-    assert "'[chat] expand_chat@p" in plan
+    marks = [
+        "'fetch@p4'",
+        "'fetch_split(text, chat)'",
+        "'[text] decode_text@p",
+        "'[chat] expand_chat@p",
+        "'fetch_merge'",
+    ]
+    positions = [plan.index(mark) for mark in marks]
+    assert positions == sorted(positions)
 
 
-def test_tail_replay_filter_reads_every_branch_output() -> None:
+def test_split_and_merge_are_placed_with_their_branch_ops() -> None:
+    pipe = _pipeline().branch(
+        _route,
+        {
+            "text": lambda b: b.map_transform(_identity, placement="remote"),
+            "chat": lambda b: b.map_transform(_identity, placement="remote"),
+        },
+    )
+    pipe.explain()
+
+    assert pipe._plan is not None
+    upstream_stage, branch_stage = pipe._plan.stages
+    assert _names(upstream_stage.nodes) == ["fetch"]
+    assert upstream_stage.splits == [] and upstream_stage.merges == []
+    assert branch_stage.splits == pipe._graph.splits
+    assert branch_stage.merges == pipe._graph.merges
+
+
+def test_tail_replay_filter_reads_the_merge() -> None:
     pipe = _pipeline().branch(
         _route, {"text": lambda b: b, "chat": lambda b: b.expand_chat()}
     )
@@ -219,11 +249,11 @@ def test_tail_replay_filter_reads_every_branch_output() -> None:
 
     assert pipe._plan is not None
     replay_filter = pipe._plan.stages[-1].nodes[-1]
-    assert replay_filter.name == "expand_chat_replay_filter"
-    assert _names(replay_filter.inputs) == ["passthrough", "expand_chat"]
+    assert replay_filter.name == "fetch_merge_replay_filter"
+    assert replay_filter.inputs == pipe._graph.merges
 
 
-def test_replay_filter_before_batch_reads_every_branch_output() -> None:
+def test_replay_filter_before_batch_reads_the_merge() -> None:
     pipe = _pipeline().branch(
         _route, {"text": lambda b: b.decode_text(), "chat": lambda b: b.expand_chat()}
     )
@@ -233,7 +263,45 @@ def test_replay_filter_before_batch_reads_every_branch_output() -> None:
     assert pipe._plan is not None
     batch_stage = pipe._plan.stages[-1]
     assert _names(batch_stage.nodes) == ["batch_replay_filter", "batch"]
-    assert _names(batch_stage.nodes[0].inputs) == ["decode_text", "expand_chat"]
+    assert batch_stage.nodes[0].inputs == pipe._graph.merges
+
+
+def test_ops_after_batch_read_the_plans_batch() -> None:
+    pipe = _pipeline().branch(
+        _route, {"text": lambda b: b.decode_text(), "chat": lambda b: b.expand_chat()}
+    )
+    pipe.batch(2).map_batch(_identity)
+    pipe.explain()
+
+    assert pipe._plan is not None
+    plan_nodes = [node for stage in pipe._plan.stages for node in stage.nodes]
+    batch, map_batch = plan_nodes[-2:]
+    assert _names([batch, map_batch]) == ["batch", "map_batch"]
+    # The planner copies Batch to put its replay filter in front, and the op
+    # after it reads that copy, so every edge in the plan stays in the plan.
+    assert map_batch.inputs[0] is batch
+    # The graph keeps its own edges.
+    graph_batch, graph_map_batch = pipe._graph.nodes[-2:]
+    assert graph_map_batch.inputs[0] is graph_batch
+    assert graph_batch.inputs == pipe._graph.merges
+
+
+@pytest.mark.parametrize(
+    "before",
+    [
+        pytest.param(lambda pipe: pipe.batch(2), id="right-after-batch"),
+        pytest.param(
+            lambda pipe: pipe.batch(2).map_batch(_identity), id="later-after-batch"
+        ),
+    ],
+)
+def test_planner_rejects_branch_after_batch(before: Callable[[Any], Any]) -> None:
+    pipe = before(_pipeline()).branch(
+        _route, {"text": lambda b: b, "chat": lambda b: b.decode_text()}
+    )
+
+    with pytest.raises(ValueError, match=r"branch\(\) cannot come after batch\(\)"):
+        pipe.explain()
 
 
 class _HoldingAccumulator(CountingAccumulator[Any]):
@@ -271,6 +339,39 @@ def test_planner_rejects_branch_ops_that_are_not_stateless(
 
     with pytest.raises(ValueError, match=rf"op 'custom' in branch 'text'.*{match}"):
         pipe.explain()
+
+
+@pytest.mark.parametrize("padding", [True, "longest"])
+def test_planner_rejects_tokenize_that_pads_to_the_batch(padding: bool | str) -> None:
+    pipe = _pipeline().branch(
+        _route,
+        {
+            "text": lambda b: b.tokenize(
+                tokenizer_id="__fallback__", field="text", padding=padding
+            ),
+            "chat": lambda b: b,
+        },
+    )
+
+    with pytest.raises(ValueError, match="op 'tokenize'.*depends on batch shape"):
+        pipe.explain()
+
+
+def test_planner_accepts_tokenize_that_pads_to_a_fixed_length() -> None:
+    pipe = _pipeline().branch(
+        _route,
+        {
+            "text": lambda b: b.tokenize(
+                tokenizer_id="__fallback__",
+                field="text",
+                padding="max_length",
+                max_length=8,
+            ),
+            "chat": lambda b: b,
+        },
+    )
+
+    assert "[text] tokenize@p" in pipe.explain()
 
 
 def test_planner_accepts_counting_and_passthrough_accumulators() -> None:
@@ -315,7 +416,7 @@ def test_branched_plan_id_reflects_edges() -> None:
     branched.explain()
 
     assert chain._plan is not None and branched._plan is not None
-    # Same node names and ops in the same order; only the edges differ.
+    # Same ops in the same order; only the split, merge and edges differ.
     assert [_names(stage.nodes) for stage in chain._plan.stages] == [
         _names(stage.nodes) for stage in branched._plan.stages
     ]

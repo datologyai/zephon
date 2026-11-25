@@ -3,13 +3,14 @@
 
 """Routing metadata and plan-time rules for ``Pipeline.branch()``.
 
-A ``branch()`` call stores a :class:`Router` on the op before the branches
-(U). Each branch op is an ordinary graph node whose only input is U and whose
-``Node.branch`` names its branch; a passthrough branch gets a built-in identity
-op. The op added after the branches (J) takes every branch op as input.
+A ``branch()`` call adds a ``Split`` vertex after the op before the branches
+(U) and a ``Merge`` vertex after the branches. The split holds a
+:class:`Router`. Each branch op is an ordinary graph node whose only input is
+the split; a passthrough branch gets a built-in identity op. The op added after
+the branches (J) takes the merge as its only input.
 """
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -36,7 +37,7 @@ _BATCHING_ONLY_ACCUMULATORS = (CountingAccumulator, PassthroughAccumulator)
 
 @dataclass(frozen=True)
 class Router:
-    """Routes each record that U emits to exactly one named branch.
+    """Routes each record a split receives to exactly one named branch.
 
     Attributes:
         by: Returns a branch name for a record's payload. It must be
@@ -88,11 +89,6 @@ class Router:
         )
 
 
-def is_branched(nodes: Iterable["Node[Any]"]) -> bool:
-    """Return whether any node routes or belongs to a branch."""
-    return any(node.router is not None or node.branch is not None for node in nodes)
-
-
 def stateless_violation(node: "Node[Any]") -> str | None:
     """Return why ``node`` cannot run inside a branch, or ``None`` if it can.
 
@@ -123,14 +119,15 @@ def stateless_violation(node: "Node[Any]") -> str | None:
 
 
 def require_runner_support(stage: "Stage", runner_type: str) -> None:
-    """Raise if ``stage`` holds branch ops that ``runner_type`` cannot run.
+    """Raise if ``stage`` holds a split or merge that ``runner_type`` cannot run.
 
-    Only the stage holding the branch ops routes and joins. A stage that ends
-    with U hands its output on as usual: the next stage's feeder routes it.
+    The planner places each split and merge in the stage that holds their
+    branch ops, so only that stage routes and rejoins. A stage that ends with
+    U hands its output on as usual.
     """
     if runner_type in SUPPORTED_RUNNERS:
         return
-    if not any(node.branch is not None for node in stage.nodes):
+    if not (stage.splits or stage.merges):
         return
     supported = ", ".join(sorted(SUPPORTED_RUNNERS)) or "none yet"
     raise NotImplementedError(
