@@ -151,6 +151,7 @@ EXPECTED_ALL = {
         "PrefetchTimingTotals",
     ],
     "zephon.pipeline": [
+        "Branch",
         "Pipeline",
     ],
     "zephon.build_index": [

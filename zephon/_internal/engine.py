@@ -44,6 +44,7 @@ from collections import defaultdict, deque
 from multiprocessing.context import BaseContext
 from typing import Any, Iterable, Iterator, cast
 
+from zephon._internal.branching import require_runner_support
 from zephon._internal.checkpoint import (
     ENGINE_VERSION,
     EngineStateV2,
@@ -707,6 +708,7 @@ class Engine:
         )
 
         for stage, spec in zip(self._plan.stages, self._runtime_spec.stages):
+            require_runner_support(stage, spec.runner_type)
             common: dict[str, Any] = dict(
                 prefetch_capacity=spec.prefetch_capacity,
                 deterministic=self._opts.deterministic,

@@ -338,11 +338,14 @@ class TokenizeText(TokenizeBase):
         return self._num_specials_to_prepend() + self._num_specials_to_append()
 
     def traits(self) -> OpTraits:
+        # padding=True/"longest" pads to the longest row in the batch, so a row's
+        # output depends on its batch; split mode pads each chunk separately.
+        pads_to_batch = not (
+            self.split_long_samples or self.padding in (False, "max_length")
+        )
         return OpTraits(
-            # Batch padding changes payloads; split mode pads each chunk separately.
-            calibration_replayable=(
-                self.split_long_samples or self.padding in (False, "max_length")
-            ),
+            calibration_replayable=not pads_to_batch,
+            batch_shape_sensitive=pads_to_batch,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=4,
