@@ -33,6 +33,59 @@ linux_only = pytest.mark.skipif(
 TRANSPORTS = ["pipe", "socketpair"]
 
 
+def test_framed_recovery_checks_transaction_owner_without_releasing_lock() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from zephon._internal.runners.watchdog import recover_result_queue
+
+    q = SimpleNamespace(
+        _transport_state=[0, 0, 0], _wlock=Mock(), check_dead_process=Mock()
+    )
+    state = SimpleNamespace(parallelism=2, result_queue=q)
+    factory = Mock()
+    recover_result_queue(
+        state=state,
+        dead_proc=SimpleNamespace(pid=1234),
+        worker_index=0,
+        make_ipc_queue=factory,
+    )
+    q.check_dead_process.assert_called_once_with(1234)
+    assert not q._wlock.mock_calls
+    assert not factory.mock_calls
+
+
+def test_rotation_publishes_replacement_before_waking_old_readers() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from zephon._internal.runners.watchdog import recover_result_queue
+
+    old = SimpleNamespace(_transport_state=[0, 0, 0])
+    replacement = object()
+    state = SimpleNamespace(
+        parallelism=1,
+        result_queue=old,
+        _abandoned_result_queues=[],
+        node=SimpleNamespace(name="map"),
+        stage_name="stage",
+        op_index=0,
+    )
+
+    def abort() -> None:
+        assert state.result_queue is replacement
+
+    old.abort = Mock(side_effect=abort)
+    recover_result_queue(
+        state=state,
+        dead_proc=SimpleNamespace(pid=1234),
+        worker_index=0,
+        make_ipc_queue=lambda name: replacement,
+    )
+    old.abort.assert_called_once_with()
+    assert state._abandoned_result_queues == [old]
+
+
 def _connection_pair(
     transport: str, ctx: mp.context.BaseContext
 ) -> tuple["mp.connection.Connection", "mp.connection.Connection"]:

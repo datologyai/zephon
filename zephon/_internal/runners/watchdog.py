@@ -22,16 +22,28 @@ The race is dramatically more likely under free-threaded Python
 (``PYTHON_GIL=0``) where ``_feed`` runs concurrently with the worker's
 main thread rather than cooperatively.
 
-This module implements a tiered strategy chain:
+Whatever the transport, the dead worker is respawned and its in-flight work
+resubmitted; only how the result queue is repaired differs.
 
-1. **Queue rotation** (``parallelism == 1`` only).  Replace
-   ``state.result_queue`` with a fresh queue and abandon the old one.
-   No ``_wlock`` inspection — the wedge becomes irrelevant because no
-   one ever writes to or reads from the old queue again.  Cross-platform.
-   The pump reads ``state.result_queue`` each iteration with no caching,
-   so the swap is transparent (modulo one ~50 ms blocking ``get()`` on
-   the old queue that times out).  Also handles partial-pipe-data
-   automatically.
+**Managed Linux socketpair queues** (``NamedQueue``'s default transport on
+Linux) record which process holds each lock. A worker that died outside a
+queue transfer (e.g. inside operator code) left every stream intact, so
+nothing needs repair. One that died mid-transfer may have left half a frame on
+the stream. Force-releasing its lock would let the next frame be glued onto
+that remainder, so these locks are never force-released:
+
+- One worker per op: rotate the result queue (publish a fresh one, then abort
+  the old one so readers blocked on it move over).
+- Any other stream cut off mid-transfer (a result queue shared by several
+  workers, or a task/service queue, which the process runner checks): abort
+  it and fail the run.
+
+**Other transports** (``"pipe"``, or socketpairs off Linux) have no owner
+tracking and use a tiered strategy chain:
+
+1. **Queue rotation** (``parallelism == 1`` only). Replace the result queue
+   and abandon the old one. Readers already waiting on the old queue return
+   through their existing timeout. Also handles partial-pipe-data.
 2. **Timed acquire** (``parallelism > 1``, all platforms).
    ``Lock.acquire(timeout=1.0)``.  If acquired the lock was healthy and
    we give it back.  If timed out, escalate.
@@ -130,6 +142,11 @@ def recover_result_queue(
     # Step 1: rotation (parallelism=1).  Proper fix; no lock inspection.
     if state.parallelism == 1 and "rotation" not in disabled:
         _rotate_result_queue(state, dead_pid, make_ipc_queue)
+        return
+
+    # Shared framed streams cannot be repaired by force-releasing their locks.
+    if getattr(state.result_queue, "_transport_state", None) is not None:
+        state.result_queue.check_dead_process(dead_pid)
         return
 
     wlock = _unwrap_wlock(state.result_queue)
@@ -291,17 +308,17 @@ def _rotate_result_queue(
 ) -> None:
     """Replace ``state.result_queue`` with a fresh queue.
 
-    The old queue is appended to ``state._abandoned_result_queues`` and
-    closed at shutdown — closing it now is unsafe because the pump may
-    still be inside an old ``get()``.  Garbage in the old pipe (partial
-    frames, stuck ``_wlock``) is harmless because nothing ever reads
-    from or writes to the old queue again.
+    Publish the replacement before aborting a framed old queue so blocked
+    readers can retry against the new stream. Retain the old queue for remaining
+    cleanup at shutdown, when the pump has stopped using it.
     """
     op_label = state.node.name or f"op{state.op_index}"
     queue_label = f"{state.stage_name}:{op_label}"
     new_queue = make_ipc_queue(f"result:{queue_label}")
     old_queue = state.result_queue
     state.result_queue = new_queue
+    if getattr(old_queue, "_transport_state", None) is not None:
+        old_queue.abort()
     state._abandoned_result_queues.append(old_queue)
     print(
         f"[zephon] rotated result_queue after worker death "

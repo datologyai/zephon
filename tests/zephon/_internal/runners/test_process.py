@@ -2088,6 +2088,51 @@ def test_proxy_slow_response_has_no_wall_clock_deadline() -> None:
             assert proxy("report") == "result"
 
 
+@pytest.mark.parametrize("timeout", [None, 0.1])
+@pytest.mark.parametrize("rotated", [False, True])
+def test_result_transport_failure_retries_only_a_retired_queue(
+    timeout: float | None, rotated: bool
+) -> None:
+    from zephon._internal.runners.queue import QueueTransportError
+
+    runner = object.__new__(ProcessStageRunner)
+    old, replacement = Mock(), Mock()
+    replacement.get.return_value = replacement.get_nowait.return_value = "result"
+    state = SimpleNamespace(result_queue=old)
+
+    def interrupted(*args: Any, **kwargs: Any) -> None:
+        if rotated:
+            state.result_queue = replacement
+        raise QueueTransportError("partial frame")
+
+    old.get.side_effect = old.get_nowait.side_effect = interrupted
+    if rotated:
+        assert runner._get_result(state, timeout) == "result"
+    else:
+        with pytest.raises(QueueTransportError, match="partial frame"):
+            runner._get_result(state, timeout)
+        assert not replacement.mock_calls
+
+
+def test_dead_worker_queue_failure_cancels_service_and_result_waits(
+    control_runner: Any,
+) -> None:
+    from zephon._internal.runners.queue import NamedQueue
+
+    task, result, service, response = [Mock(spec=NamedQueue) for _ in range(4)]
+    task.check_dead_process.return_value = False
+    state = SimpleNamespace(task_queue=task, result_queue=result, worker_ids=[17])
+    context = control_runner._create_context()
+    with patch.object(control_runner, "_service_queue", service):
+        with patch.object(control_runner, "_service_responses", {17: response}):
+            with patch.object(control_runner, "_active_context", context):
+                assert not control_runner._check_dead_worker_queues(state, 0, 1234)
+    assert control_runner._service_cancelled.value
+    assert context.stop_event.is_set()
+    for q in [task, result, service, response]:
+        assert q.abort.called
+
+
 @pytest.fixture
 def control_runner() -> Any:
     runner = ProcessStageRunner(

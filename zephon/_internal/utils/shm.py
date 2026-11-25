@@ -15,6 +15,7 @@ import os
 import random as _random
 import sys
 import time
+from collections.abc import Callable
 
 _SHM_FREE_THRESHOLD = 0.05  # require 5% free before re-queuing for serialization
 
@@ -108,7 +109,12 @@ def shm_has_free_space(threshold: float = _SHM_FREE_THRESHOLD) -> bool:
         return True  # Non-Linux or /dev/shm unavailable — don't block
 
 
-def wait_for_shm_space(label: str, *, threshold: float = _SHM_FREE_THRESHOLD) -> int:
+def wait_for_shm_space(
+    label: str,
+    *,
+    threshold: float = _SHM_FREE_THRESHOLD,
+    check_cancelled: Callable[[], None] | None = None,
+) -> int:
     """Block with exponential-jittered backoff until ``/dev/shm`` has free space.
 
     After a shared-memory allocation failure, the caller should check
@@ -116,6 +122,9 @@ def wait_for_shm_space(label: str, *, threshold: float = _SHM_FREE_THRESHOLD) ->
 
     Returns the number of backoff sleeps performed (``0`` if space was
     already available on the first check).
+
+    If provided, check_cancelled runs during backoff sleeps. Its exception
+    interrupts the wait so an aborted queue can stop retrying allocations.
     """
     attempt = 0
     while not shm_has_free_space(threshold):
@@ -135,7 +144,13 @@ def wait_for_shm_space(label: str, *, threshold: float = _SHM_FREE_THRESHOLD) ->
                 flush=True,
             )
 
-        time.sleep(sleep_time)
+        if check_cancelled is None:
+            time.sleep(sleep_time)
+        else:
+            deadline = time.monotonic() + sleep_time
+            while (remaining := deadline - time.monotonic()) > 0:
+                check_cancelled()
+                time.sleep(min(0.1, remaining))
         attempt += 1
     return attempt
 
